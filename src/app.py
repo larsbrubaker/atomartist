@@ -1,7 +1,7 @@
 # Copyright 2025 AtomArtist. All rights reserved.
 
 import logging
-from flask import Flask
+from flask import Flask, render_template
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 
@@ -26,13 +26,16 @@ def create_app():
     migrate.init_app(app, db)
 
     # Import and register blueprints
-    from routes import main_bp
     from routes.api import api_bp
     from routes.health import health_bp
 
-    app.register_blueprint(main_bp)
     app.register_blueprint(api_bp, url_prefix='/api')
     app.register_blueprint(health_bp)
+
+    # Home page route
+    @app.route('/')
+    def index():
+        return render_template('index.html')
 
     return app
 
@@ -41,4 +44,3 @@ if __name__ == '__main__':
     app = create_app()
     logger.info("AtomArtist listening on port 8080")
     app.run(host='0.0.0.0', port=8080, debug=False)
-
