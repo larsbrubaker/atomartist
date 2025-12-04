@@ -1,28 +1,18 @@
-# Build stage
-FROM rustlang/rust:nightly as builder
+# Copyright 2025 AtomArtist. All rights reserved.
+
+FROM python:3.12-slim
 
 WORKDIR /app
 
-# Copy the standalone atomartist project
-COPY . .
+# Install dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Build the application
-RUN cargo build --release --locked
-
-# Runtime stage
-FROM debian:bookworm-slim
-
-RUN apt-get update && apt-get install -y \
-    ca-certificates \
-    libssl3 \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /app
-
-COPY --from=builder /app/target/release/atomartist /app/atomartist
-COPY --from=builder /app/migrations ./migrations
+# Copy source code
+COPY src/ .
+COPY migrations/ ./migrations/
 
 EXPOSE 8080
 
-CMD ["/app/atomartist"]
-
+# Run with gunicorn for production
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "4", "app:create_app()"]
