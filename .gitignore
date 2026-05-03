@@ -1,0 +1,21 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# wasm-pack output
+/pkg/
+**/pkg/
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Local build state
+*.log
+
+# Local Claude state — keep skills + settings.local.json checked in (they live in .claude/)

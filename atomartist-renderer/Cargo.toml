@@ -1,0 +1,16 @@
+[package]
+name = "atomartist-renderer"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.70"
+authors = ["Lars Brubaker <larsbrubaker@matterhackers.com>"]
+license = "MIT"
+description = "AtomArtist 3D viewport renderer (wgpu) — orbit camera, Blinn-Phong shading, gizmos."
+repository = "https://github.com/larsbrubaker/atomartist"
+
+[lib]
+name = "atomartist_renderer"
+path = "src/lib.rs"
+
+[dependencies]
+atomartist-lib = { path = "../atomartist-lib" }

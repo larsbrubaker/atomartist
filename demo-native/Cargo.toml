@@ -1,0 +1,17 @@
+[package]
+name = "demo-native"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.70"
+authors = ["Lars Brubaker <larsbrubaker@matterhackers.com>"]
+license = "MIT"
+description = "AtomArtist native shell — winit + wgpu window, event loop, disk persistence."
+
+[[bin]]
+name = "atomartist"
+path = "src/main.rs"
+
+[dependencies]
+atomartist-lib      = { path = "../atomartist-lib" }
+atomartist-renderer = { path = "../atomartist-renderer" }
+atomartist-ui       = { path = "../atomartist-ui" }

@@ -1,0 +1,33 @@
+[workspace]
+members = [
+    "atomartist-lib",
+    "atomartist-renderer",
+    "atomartist-ui",
+    "demo-native",
+    "demo-wasm",
+]
+default-members = [
+    "atomartist-lib",
+    "atomartist-ui",
+    "demo-native",
+]
+resolver = "2"
+
+# Optimize dependencies in debug builds so the rendering / geometry path
+# runs at near-release speed while user code stays unoptimized
+# (fast incremental compile, usable backtraces).
+[profile.dev.package."*"]
+opt-level = 2
+
+# ---------------------------------------------------------------------------
+# Local sibling-submodule path overrides
+# ---------------------------------------------------------------------------
+# AtomArtist depends on agg-gui, manifold-rust, clipper2-rust, tess2-rust as
+# sibling submodules in the rust-apps directory while we develop them in
+# tandem. To switch to published crates, comment out this section.
+#
+# [patch.crates-io]
+# agg-gui       = { path = "../agg-gui/agg-gui" }
+# manifold-rust = { path = "../manifold-rust" }
+# clipper2-rust = { path = "../clipper2-rust" }
+# tess2-rust    = { path = "../tess2-rust" }

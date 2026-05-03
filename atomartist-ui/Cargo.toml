@@ -1,0 +1,17 @@
+[package]
+name = "atomartist-ui"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.70"
+authors = ["Lars Brubaker <larsbrubaker@matterhackers.com>"]
+license = "MIT"
+description = "AtomArtist shared widget tree — node canvas, property panel, toolbar, top-level layout."
+repository = "https://github.com/larsbrubaker/atomartist"
+
+[lib]
+name = "atomartist_ui"
+path = "src/lib.rs"
+
+[dependencies]
+atomartist-lib      = { path = "../atomartist-lib" }
+atomartist-renderer = { path = "../atomartist-renderer" }
