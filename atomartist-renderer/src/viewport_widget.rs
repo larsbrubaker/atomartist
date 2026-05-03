@@ -15,6 +15,8 @@
 //!   - Scroll wheel   → zoom
 //!   - F key          → fit camera to current mesh bounds
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use agg_gui::{
@@ -24,6 +26,7 @@ use agg_gui::{
 use manifold_rust::types::MeshGL;
 
 use crate::camera::{mul4, transform_point4, OrbitCamera};
+use crate::scene_renderer::WgpuSceneRenderer;
 
 /// External hooks the widget needs from the app: where to read the latest
 /// mesh from, and how to mark the viewport as repainted (so `needs_draw`
@@ -50,6 +53,12 @@ pub struct Viewport3dWidget {
     /// the camera once.
     last_mesh_ptr: usize,
     bg_color: Color,
+    /// wgpu-backed scene renderer (lazy-initialized GPU state). When the
+    /// active `DrawCtx` is a `WgpuGfxCtx`, the widget pushes a custom
+    /// render command holding a clone of this `Rc`. Otherwise (software
+    /// backend, or pre-wgpu agg-gui) the widget falls through to the
+    /// wireframe path that uses only the 2-D `DrawCtx`.
+    scene: Rc<RefCell<WgpuSceneRenderer>>,
 }
 
 impl Viewport3dWidget {
@@ -65,6 +74,7 @@ impl Viewport3dWidget {
             drag: CameraDrag::None,
             last_mesh_ptr: 0,
             bg_color: Color::rgb(0.10, 0.11, 0.13),
+            scene: Rc::new(RefCell::new(WgpuSceneRenderer::new())),
         }
     }
 
@@ -99,6 +109,34 @@ impl Viewport3dWidget {
             self.camera.fit_to_bounds(mn, mx);
         }
         let _ = ptr;
+    }
+
+    /// If the active backend is wgpu, push a custom render command via
+    /// `WgpuGfxCtx::push_custom_render` and return `true`. Returns `false`
+    /// when the backend is something else (e.g. software `GfxCtx`) — the
+    /// caller then falls back to the wireframe path.
+    fn try_push_wgpu_render(&mut self, ctx: &mut dyn DrawCtx, w: f64, h: f64) -> bool {
+        // The widget's local origin is (0,0); transform (w,h) into agg-gui
+        // screen-space pixels via the active DrawCtx affine. The transform
+        // maps widget-local → screen.
+        let any = match ctx.as_any_mut() { Some(a) => a, None => return false };
+        let wgpu_ctx = match any.downcast_mut::<demo_wgpu::WgpuGfxCtx>() {
+            Some(c) => c,
+            None => return false,
+        };
+        let t = wgpu_ctx.transform();
+        let mut x0 = 0.0; let mut y0 = 0.0;
+        t.transform(&mut x0, &mut y0);
+        let mut x1 = w; let mut y1 = h;
+        t.transform(&mut x1, &mut y1);
+        let screen_rect = agg_gui::Rect::new(
+            x0.min(x1),
+            y0.min(y1),
+            (x1 - x0).abs(),
+            (y1 - y0).abs(),
+        );
+        wgpu_ctx.push_custom_render(self.scene.clone(), screen_rect);
+        true
     }
 
     fn draw_mesh(&self, ctx: &mut dyn DrawCtx, mesh: &MeshGL, w: f64, h: f64) {
@@ -241,25 +279,42 @@ impl Widget for Viewport3dWidget {
         let h = self.bounds.height;
         if w <= 0.0 || h <= 0.0 { return; }
 
-        // Background.
+        // Background fill always painted via the 2-D ctx so the underlying
+        // surface gets a solid backdrop before the 3-D pass overdraws on top.
         ctx.set_fill_color(self.bg_color);
         ctx.begin_path();
         ctx.rect(0.0, 0.0, w, h);
         ctx.fill();
 
-        // Floor grid hint — a single horizon line for orientation.
-        ctx.set_stroke_color(Color::rgba(1.0, 1.0, 1.0, 0.07));
-        ctx.set_line_width(1.0);
-        ctx.begin_path();
-        ctx.move_to(0.0, h * 0.5);
-        ctx.line_to(w, h * 0.5);
-        ctx.stroke();
+        // Push the latest mesh + camera into the scene renderer (cheap;
+        // the renderer detects ptr equality and skips re-uploading
+        // identical meshes).
+        let mesh_opt = self.current_mesh();
+        if let Some(mesh) = &mesh_opt {
+            self.maybe_auto_fit(mesh);
+        }
+        {
+            let mut s = self.scene.borrow_mut();
+            s.mesh = mesh_opt.clone();
+            s.camera = self.camera.clone();
+        }
 
-        // Mesh wireframe.
-        if let Some(mesh) = self.current_mesh() {
-            self.maybe_auto_fit(&mesh);
-            self.draw_mesh(ctx, &mesh, w, h);
-        } else {
+        // Try the wgpu path. The widget's `bounds` are widget-local — the
+        // `DrawCtx` already has a transform that maps (0,0) to the widget's
+        // bottom-left. We need the screen-space rect (in agg-gui Y-up
+        // pixel coords). We get that from `ctx.transform()` applied to
+        // origin + size.
+        let used_wgpu = self.try_push_wgpu_render(ctx, w, h);
+
+        if !used_wgpu {
+            // Software fallback wireframe — kept for the GfxCtx (CPU AGG)
+            // backend or any non-wgpu DrawCtx.
+            if let Some(mesh) = mesh_opt.as_ref() {
+                self.draw_mesh(ctx, mesh, w, h);
+            }
+        }
+
+        if mesh_opt.is_none() {
             // Empty-state hint.
             ctx.set_fill_color(Color::rgba(1.0, 1.0, 1.0, 0.4));
             ctx.set_font_size(12.0);

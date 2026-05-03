@@ -12,6 +12,16 @@ name = "atomartist"
 path = "src/main.rs"
 
 [dependencies]
+agg-gui             = { path = "../../agg-gui/agg-gui", default-features = false, features = ["winit-adapter"] }
 atomartist-lib      = { path = "../atomartist-lib" }
 atomartist-renderer = { path = "../atomartist-renderer" }
 atomartist-ui       = { path = "../atomartist-ui" }
+demo-wgpu           = { path = "../../agg-gui/demo-wgpu", default-features = false }
+winit               = "0.30"
+pollster            = "0.4"
+raw-window-handle   = "0.6"
+
+[dependencies.wgpu]
+version = "29"
+default-features = false
+features = ["wgsl", "vulkan", "dx12", "metal"]

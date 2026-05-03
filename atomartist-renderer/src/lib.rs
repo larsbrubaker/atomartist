@@ -13,9 +13,11 @@
 //! designed to be stable across that swap.
 
 pub mod camera;
+pub mod scene_renderer;
 pub mod viewport_widget;
 
 pub use camera::OrbitCamera;
+pub use scene_renderer::WgpuSceneRenderer;
 pub use viewport_widget::{Viewport3dWidget, ViewportInputs};
 
 /// Phase 0 placeholder kept so `demo-native` / `demo-wasm` stubs continue

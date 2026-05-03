@@ -10,6 +10,7 @@ pub mod geometry;
 pub mod graph;
 pub mod nodes;
 pub mod registry;
+pub mod serialization;
 pub mod socket_types;
 
 pub use graph::{Edge, Graph, GraphError, NodeId, NodeInstance, PortValue, SocketId};

@@ -15,3 +15,5 @@ path = "src/lib.rs"
 [dependencies]
 agg-gui       = { path = "../../agg-gui/agg-gui", default-features = false }
 manifold-rust = { path = "../../manifold-rust" }
+serde         = { version = "1", features = ["derive"] }
+serde_json    = "1"

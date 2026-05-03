@@ -28,6 +28,28 @@ workspace `Cargo.toml`. This lets us extend or fix these libraries while buildin
 AtomArtist. Eventually we flip to crates.io versions; structure changes
 accordingly so that switch is a one-line edit per dep.
 
+## We improve sibling libraries as we go
+
+This project is **as much about strengthening our supporting libraries as it
+is about AtomArtist itself**. When AtomArtist needs a feature that belongs
+naturally in `agg-gui`, `manifold-rust`, `clipper2-rust`, or `tess2-rust`,
+add it there — don't work around the limitation in AtomArtist code.
+
+Examples that belong upstream:
+- A custom-render hook on agg-gui's wgpu pipeline (so AtomArtist can run a
+  3D render pass on the same encoder).
+- Missing `CrossSection` query (e.g. iterate contours with winding) →
+  add to `manifold-rust`.
+- A `tess2-rust` API that returns extra data we need → extend it.
+
+When you push an upstream change, write a one-paragraph note in the commit
+explaining what AtomArtist needs and why the addition is general enough to
+benefit other consumers. The eventual goal is for these libraries to graduate
+to crates.io with feature sets shaped by real consumer (AtomArtist) needs.
+
+Avoid breaking changes when an additive change works — every dependent
+project (including the existing demos in those repos) must keep compiling.
+
 ## Test-First Bug Fixing (Critical Practice)
 
 When a bug is reported, always follow this workflow:
