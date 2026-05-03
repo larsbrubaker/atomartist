@@ -6,7 +6,9 @@
 //! consumes geometry from here for the 3D viewport, and `atomartist-ui`
 //! consumes the graph + registry to drive the canvas widget.
 
+pub mod geometry;
 pub mod graph;
+pub mod nodes;
 pub mod registry;
 pub mod socket_types;
 
