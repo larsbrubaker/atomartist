@@ -13,3 +13,5 @@ name = "atomartist_lib"
 path = "src/lib.rs"
 
 [dependencies]
+agg-gui       = { path = "../../agg-gui/agg-gui", default-features = false }
+manifold-rust = { path = "../../manifold-rust" }
