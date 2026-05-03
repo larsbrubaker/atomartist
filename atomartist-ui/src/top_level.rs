@@ -39,6 +39,31 @@ pub fn fresh_state_with_builtins() -> AppState {
     AppState::new(Graph::new(), reg)
 }
 
+/// Same as `fresh_state_with_builtins`, but seeds the graph with a
+/// single Box node and runs the first evaluation so the 3D viewport
+/// shows geometry on app start.
+pub fn fresh_state_with_starter_graph() -> AppState {
+    use atomartist_lib::graph::node::NodeInstance;
+    let state = fresh_state_with_builtins();
+    let id = {
+        let mut g = state.graph.lock().unwrap();
+        let id = g.allocate_id();
+        let mut node = NodeInstance::new(id, "Box", [120.0, -120.0]);
+        // Apply default property values from the registered NodeDef so
+        // the executor finds a valid `width` etc. on first eval.
+        if let Some(def) = state.registry.get("Box") {
+            for prop in def.properties() {
+                node.properties.insert(prop.name, prop.default);
+            }
+        }
+        let _ = g.add_node(node);
+        id
+    };
+    state.set_display_node(Some(id));
+    state.evaluate_now();
+    state
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

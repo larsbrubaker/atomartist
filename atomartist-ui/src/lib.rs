@@ -12,7 +12,7 @@ pub mod top_level;
 
 pub use app_state::AppState;
 pub use canvas_widget::{add_node_with_defaults, NodeCanvas};
-pub use top_level::{build_app, fresh_state_with_builtins};
+pub use top_level::{build_app, fresh_state_with_builtins, fresh_state_with_starter_graph};
 
 /// Phase 0 placeholder kept so `demo-native` / `demo-wasm` stubs continue to
 /// compile while real wiring lands. Removed in Phase 6.

@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use agg_gui::{App, Key, Modifiers, MouseButton, Size, text::Font};
-use atomartist_ui::{build_app, fresh_state_with_builtins};
+use atomartist_ui::{build_app, fresh_state_with_starter_graph};
 use demo_wgpu::{begin_frame, WgpuGfxCtx};
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, Event, MouseScrollDelta, WindowEvent};
@@ -170,8 +170,8 @@ fn main() {
         init_h,
     );
 
-    // Build the AtomArtist UI.
-    let state = fresh_state_with_builtins();
+    // Build the AtomArtist UI with a starter Box visible in the viewport.
+    let state = fresh_state_with_starter_graph();
     let root = build_app(state);
     let mut app = App::new(root);
 
