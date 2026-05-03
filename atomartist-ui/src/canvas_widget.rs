@@ -26,8 +26,10 @@ use atomartist_lib::Graph;
 use crate::app_state::AppState;
 use crate::canvas_draw::{
     draw_bezier_connection, draw_canvas_grid, draw_node, layout_node, CanvasPalette,
-    NodeLayoutInfo, SocketLayout, SocketSide,
+    NodeLayoutInfo, PropLayout, SocketLayout, SocketSide,
 };
+
+use atomartist_lib::graph::node::PortValue;
 
 const ZOOM_MIN: f64 = 0.15;
 const ZOOM_MAX: f64 = 3.0;
@@ -52,6 +54,15 @@ enum CanvasState {
         from_canvas: [f64; 2],
         cursor_canvas: [f64; 2],
         from_socket_type: atomartist_lib::SocketType,
+    },
+    /// Click-and-horizontal-drag editing of a numeric property.
+    DraggingProperty {
+        node_id: NodeId,
+        prop_name: &'static str,
+        start_value: f64,
+        start_local_x: f64,
+        min: Option<f64>,
+        max: Option<f64>,
     },
 }
 
@@ -142,6 +153,34 @@ impl NodeCanvas {
             }
         }
         None
+    }
+
+    fn hit_property(&self, layouts: &[NodeLayoutInfo], canvas_pos: [f64; 2]) -> Option<(NodeId, PropLayout)> {
+        for l in layouts.iter().rev() {
+            if let Some(p) = l.prop_at(canvas_pos) {
+                return Some((l.node_id, p.clone()));
+            }
+        }
+        None
+    }
+
+    /// If `node_id` has a Geometry3d output, set it as the viewport's
+    /// display node so the next evaluate populates `last_mesh_output`.
+    fn update_display_node_for(&self, node_id: NodeId) {
+        let g = self.state.graph.lock().unwrap();
+        let has_geom = g
+            .get(node_id)
+            .and_then(|n| self.state.registry.get(n.type_id))
+            .map(|def| {
+                def.output_sockets()
+                    .iter()
+                    .any(|s| s.socket_type == atomartist_lib::SocketType::Geometry3d)
+            })
+            .unwrap_or(false);
+        drop(g);
+        if has_geom {
+            self.state.set_display_node(Some(node_id));
+        }
     }
 
     fn begin_drag_node(&mut self, id: NodeId, canvas_start: [f64; 2]) {
@@ -344,11 +383,37 @@ impl NodeCanvas {
                     };
                     return EventResult::Consumed;
                 }
+                // Property row hit (numeric drag)?
+                if let Some((node_id, prop)) = self.hit_property(&layouts, canvas_pos) {
+                    if let PortValue::Number(start) = prop.current {
+                        self.selected.clear();
+                        self.selected.insert(node_id);
+                        self.update_display_node_for(node_id);
+                        self.interaction = CanvasState::DraggingProperty {
+                            node_id,
+                            prop_name: prop.name,
+                            start_value: start,
+                            start_local_x: pos.x,
+                            min: prop.min,
+                            max: prop.max,
+                        };
+                        return EventResult::Consumed;
+                    }
+                    // Bool toggle on click.
+                    if let PortValue::Bool(b) = prop.current {
+                        let mut g = self.state.graph.lock().unwrap();
+                        let _ = g.set_property(node_id, prop.name, PortValue::Bool(!b));
+                        drop(g);
+                        self.state.schedule_evaluate();
+                        return EventResult::Consumed;
+                    }
+                }
                 if let Some(node_id) = self.hit_node(&layouts, canvas_pos) {
                     if !modifiers.shift && !self.selected.contains(&node_id) {
                         self.selected.clear();
                     }
                     self.selected.insert(node_id);
+                    self.update_display_node_for(node_id);
                     self.begin_drag_node(node_id, canvas_pos);
                     return EventResult::Consumed;
                 }
@@ -397,6 +462,22 @@ impl NodeCanvas {
                 *cursor_canvas = canvas_pos;
                 EventResult::Consumed
             }
+            CanvasState::DraggingProperty { node_id, prop_name, start_value, start_local_x, min, max } => {
+                // 1.0 unit per logical pixel; that's coarse for fine
+                // tweaking, but adequate for Phase 4. Holding shift would
+                // multiply sensitivity in a future iteration.
+                let dx = pos.x - *start_local_x;
+                let mut new_value = *start_value + dx;
+                if let Some(mn) = *min { if new_value < mn { new_value = mn; } }
+                if let Some(mx) = *max { if new_value > mx { new_value = mx; } }
+                let id = *node_id;
+                let name = *prop_name;
+                let mut g = self.state.graph.lock().unwrap();
+                let _ = g.set_property(id, name, PortValue::Number(new_value));
+                drop(g);
+                self.state.schedule_evaluate();
+                EventResult::Consumed
+            }
             CanvasState::Idle => EventResult::Ignored,
         }
     }
@@ -425,28 +506,30 @@ impl NodeCanvas {
                         };
                         let edge = Edge { from: out_sid, to: in_sid.clone() };
                         let mut g = self.state.graph.lock().unwrap();
+                        let mut connected = false;
                         match g.connect(edge.clone(), &self.state.registry) {
-                            Ok(()) => {
-                                self.state.mark_viewport_dirty();
-                            }
+                            Ok(()) => connected = true,
                             Err(GraphError::InputAlreadyConnected) => {
-                                // Replace existing edge into in_sid.
                                 let to_remove: Vec<Edge> =
                                     g.edges().iter().filter(|e| e.to == in_sid).cloned().collect();
                                 for e in to_remove {
                                     let _ = g.disconnect(&e);
                                 }
-                                let _ = g.connect(edge, &self.state.registry);
-                                self.state.mark_viewport_dirty();
+                                connected = g.connect(edge, &self.state.registry).is_ok();
                             }
                             Err(_) => {}
+                        }
+                        drop(g);
+                        if connected {
+                            self.state.schedule_evaluate();
                         }
                     }
                 }
                 EventResult::Consumed
             }
             (_, CanvasState::DraggingNode { .. })
-            | (_, CanvasState::PanningCanvas { .. }) => EventResult::Consumed,
+            | (_, CanvasState::PanningCanvas { .. })
+            | (_, CanvasState::DraggingProperty { .. }) => EventResult::Consumed,
             (_, _) => EventResult::Ignored,
         }
     }
@@ -487,7 +570,7 @@ impl NodeCanvas {
                     let _ = g.remove_node(id);
                 }
                 drop(g);
-                self.state.mark_viewport_dirty();
+                self.state.schedule_evaluate();
                 EventResult::Consumed
             }
             _ => EventResult::Ignored,

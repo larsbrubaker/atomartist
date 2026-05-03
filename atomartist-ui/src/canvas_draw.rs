@@ -9,7 +9,7 @@
 
 use agg_gui::{Color, DrawCtx};
 
-use atomartist_lib::graph::node::{NodeId, NodeInstance};
+use atomartist_lib::graph::node::{NodeId, NodeInstance, PortValue};
 use atomartist_lib::registry::{NodeDef, SocketDef};
 use atomartist_lib::SocketType;
 
@@ -41,6 +41,30 @@ pub struct SocketLayout {
     pub center: [f64; 2],
 }
 
+/// One editable property row inside a node — its name, current value
+/// (read from the node at layout time), and canvas-space row rectangle.
+#[derive(Clone, Debug)]
+pub struct PropLayout {
+    pub name: &'static str,
+    /// Numeric range, copied from the `PropDef`. Used to clamp drag deltas.
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub current: PortValue,
+    /// Canvas-space rect (top-left + size) of the row — used for hit testing.
+    pub top_left: [f64; 2],
+    pub size: [f64; 2],
+}
+
+impl PropLayout {
+    pub fn contains(&self, canvas_pos: [f64; 2]) -> bool {
+        let x0 = self.top_left[0];
+        let y1 = self.top_left[1];
+        let x1 = x0 + self.size[0];
+        let y0 = y1 - self.size[1];
+        canvas_pos[0] >= x0 && canvas_pos[0] <= x1 && canvas_pos[1] >= y0 && canvas_pos[1] <= y1
+    }
+}
+
 /// Computed canvas-space layout for one node — its size and socket
 /// positions. Recomputed on each paint frame; cheap.
 #[derive(Clone, Debug)]
@@ -49,6 +73,7 @@ pub struct NodeLayoutInfo {
     pub top_left: [f64; 2],
     pub size: [f64; 2],
     pub sockets: Vec<SocketLayout>,
+    pub props: Vec<PropLayout>,
     pub display_name: &'static str,
     pub category: &'static str,
 }
@@ -83,26 +108,51 @@ impl NodeLayoutInfo {
             dx * dx + dy * dy <= SOCKET_HIT_RADIUS * SOCKET_HIT_RADIUS
         })
     }
+
+    /// Find the property row hit by `canvas_pos`.
+    pub fn prop_at(&self, canvas_pos: [f64; 2]) -> Option<&PropLayout> {
+        self.props.iter().find(|p| p.contains(canvas_pos))
+    }
 }
 
 /// Compute layout for a single node. The node's `position` is treated as
-/// its top-left in canvas-space.
+/// its top-left in canvas-space. Sockets are stacked from the top under
+/// the title bar; properties stack below the sockets.
 pub fn layout_node(node: &NodeInstance, def: &dyn NodeDef) -> NodeLayoutInfo {
     let inputs = def.input_sockets();
     let outputs = def.output_sockets();
-    let body_rows = inputs.len().max(outputs.len()) as f64;
-    let height = TITLE_HEIGHT + body_rows * ROW_HEIGHT + NODE_BOTTOM_PAD;
+    let socket_rows = inputs.len().max(outputs.len()) as f64;
+
+    let prop_defs = def.properties();
+    let prop_rows = prop_defs.len() as f64;
+
+    let height = TITLE_HEIGHT + socket_rows * ROW_HEIGHT + prop_rows * ROW_HEIGHT + NODE_BOTTOM_PAD;
     let top_left = [node.position[0], node.position[1]];
 
     let mut sockets = Vec::with_capacity(inputs.len() + outputs.len());
     push_sockets(&mut sockets, &inputs, SocketSide::Input, top_left);
     push_sockets(&mut sockets, &outputs, SocketSide::Output, top_left);
 
+    let prop_section_top = top_left[1] - TITLE_HEIGHT - socket_rows * ROW_HEIGHT;
+    let mut props = Vec::with_capacity(prop_defs.len());
+    for (i, p) in prop_defs.iter().enumerate() {
+        let row_top_y = prop_section_top - i as f64 * ROW_HEIGHT;
+        let current = node.properties.get(p.name).cloned().unwrap_or_else(|| p.default.clone());
+        props.push(PropLayout {
+            name: p.name,
+            min: p.min,
+            max: p.max,
+            current,
+            top_left: [top_left[0] + 1.0, row_top_y],
+            size: [NODE_WIDTH - 2.0, ROW_HEIGHT],
+        });
+    }
     NodeLayoutInfo {
         node_id: node.id,
         top_left,
         size: [NODE_WIDTH, height],
         sockets,
+        props,
         display_name: def.display_name(),
         category: def.category(),
     }
@@ -249,6 +299,30 @@ pub fn draw_node(
     let title_y = y_top - TITLE_HEIGHT * 0.5 - 4.0;
     ctx.fill_text(layout.display_name, x + 10.0, title_y);
 
+    // Property rows — drawn before sockets so socket labels can paint on top.
+    let prop_bg = Color::rgba(0.15, 0.16, 0.20, 0.9);
+    for p in &layout.props {
+        // Slight inset background for the row.
+        ctx.set_fill_color(prop_bg);
+        ctx.begin_path();
+        ctx.rect(p.top_left[0], p.top_left[1] - p.size[1], p.size[0], p.size[1] - 2.0);
+        ctx.fill();
+
+        // Name on the left.
+        ctx.set_fill_color(palette.label_text);
+        ctx.set_font_size(11.0);
+        ctx.fill_text(p.name, p.top_left[0] + 6.0, p.top_left[1] - 14.0);
+
+        // Value on the right (rough right-align by string length estimate).
+        let value_str = format_value(&p.current);
+        let est = (value_str.len() as f64) * 6.0;
+        ctx.fill_text(
+            &value_str,
+            p.top_left[0] + p.size[0] - est - 6.0,
+            p.top_left[1] - 14.0,
+        );
+    }
+
     // Socket circles + labels.
     for s in &layout.sockets {
         let c = socket_color(s.socket_type);
@@ -281,6 +355,25 @@ pub fn draw_node(
                 );
             }
         }
+    }
+}
+
+fn format_value(v: &PortValue) -> String {
+    match v {
+        PortValue::Number(n) => {
+            if (n.fract()).abs() < 1e-6 {
+                format!("{}", *n as i64)
+            } else {
+                format!("{:.3}", n)
+            }
+        }
+        PortValue::Bool(b) => if *b { "true".into() } else { "false".into() },
+        PortValue::StringVal(s) => s.as_str().to_string(),
+        PortValue::Color(_) => "Color".into(),
+        PortValue::Matrix4x4(_) => "Matrix4x4".into(),
+        PortValue::Path2d(_) => "Path2d".into(),
+        PortValue::Geometry3d(_) => "Geometry3d".into(),
+        PortValue::None => "—".into(),
     }
 }
 

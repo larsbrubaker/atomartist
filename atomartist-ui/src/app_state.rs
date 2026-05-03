@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use agg_gui::undo::UndoBuffer;
-use atomartist_lib::graph::node::NodeId;
+use atomartist_lib::graph::executor::evaluate_dirty;
+use atomartist_lib::graph::node::{NodeId, PortValue};
 use atomartist_lib::registry::NodeRegistry;
 use atomartist_lib::Graph;
 use manifold_rust::types::MeshGL;
@@ -54,6 +55,97 @@ impl AppState {
     /// Take + reset the dirty flag — used by the viewport widget.
     pub fn take_viewport_dirty(&self) -> bool {
         self.viewport_dirty.swap(false, Ordering::Relaxed)
+    }
+
+    /// Kick off an evaluation pass.
+    ///
+    /// On native, spawns a background thread that locks the graph, runs
+    /// `evaluate_dirty`, picks the display node's mesh output, and stores
+    /// it in `last_mesh_output`. On WASM, runs synchronously in the same
+    /// frame.
+    ///
+    /// The dirty flag is set on completion so the viewport repaints.
+    pub fn schedule_evaluate(&self) {
+        // Only the Send parts of AppState — UndoBuffer is !Send because
+        // its `Box<dyn UndoRedoCommand>` trait objects don't carry Send.
+        let task = EvalTask {
+            graph: self.graph.clone(),
+            registry: self.registry.clone(),
+            last_mesh_output: self.last_mesh_output.clone(),
+            viewport_dirty: self.viewport_dirty.clone(),
+            display_node: self.display_node.clone(),
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            std::thread::spawn(move || {
+                task.run();
+            });
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            task.run();
+        }
+    }
+
+    /// Synchronous alternative — used by tests and tight code paths that
+    /// need the result immediately.
+    pub fn evaluate_now(&self) {
+        let task = EvalTask {
+            graph: self.graph.clone(),
+            registry: self.registry.clone(),
+            last_mesh_output: self.last_mesh_output.clone(),
+            viewport_dirty: self.viewport_dirty.clone(),
+            display_node: self.display_node.clone(),
+        };
+        task.run();
+    }
+
+    /// Set the display target — the canvas calls this when the user
+    /// selects a node with a Geometry3d output.
+    pub fn set_display_node(&self, id: Option<NodeId>) {
+        *self.display_node.lock().unwrap() = id;
+        self.mark_viewport_dirty();
+    }
+}
+
+/// Send-only subset of `AppState` used by the background evaluator.
+struct EvalTask {
+    graph: Arc<Mutex<Graph>>,
+    registry: Arc<NodeRegistry>,
+    last_mesh_output: Arc<Mutex<Option<Arc<MeshGL>>>>,
+    viewport_dirty: Arc<AtomicBool>,
+    display_node: Arc<Mutex<Option<NodeId>>>,
+}
+
+impl EvalTask {
+    fn run(self) {
+        let mesh = {
+            let mut g = self.graph.lock().unwrap();
+            let _ = evaluate_dirty(&mut g, &self.registry);
+            self.pick_display_mesh(&g)
+        };
+        *self.last_mesh_output.lock().unwrap() = mesh;
+        self.viewport_dirty.store(true, Ordering::Relaxed);
+    }
+
+    fn pick_display_mesh(&self, g: &Graph) -> Option<Arc<MeshGL>> {
+        let display_id = *self.display_node.lock().unwrap();
+        if let Some(id) = display_id {
+            if let Some(n) = g.get(id) {
+                if let Some(PortValue::Geometry3d(m)) = n.cached_outputs.get("out") {
+                    return Some(m.clone());
+                }
+            }
+        }
+        let mut best: Option<(NodeId, Arc<MeshGL>)> = None;
+        for n in g.nodes() {
+            if let Some(PortValue::Geometry3d(m)) = n.cached_outputs.get("out") {
+                if best.as_ref().map(|(id, _)| n.id > *id).unwrap_or(true) {
+                    best = Some((n.id, m.clone()));
+                }
+            }
+        }
+        best.map(|(_, m)| m)
     }
 }
 
