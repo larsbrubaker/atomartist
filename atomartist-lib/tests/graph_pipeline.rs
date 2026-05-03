@@ -91,6 +91,47 @@ fn registry_has_expected_phase2_nodes() {
 }
 
 #[test]
+fn rectangle_through_extrude_produces_solid() {
+    let mut reg = NodeRegistry::new();
+    nodes::register_all(&mut reg);
+    let mut g = Graph::new();
+    let r = g.allocate_id();
+    let e = g.allocate_id();
+    let mut rn = NodeInstance::new(r, "Rectangle", [0.0, 0.0]);
+    rn.properties.insert("width", PortValue::Number(4.0));
+    rn.properties.insert("height", PortValue::Number(2.0));
+    let mut en = NodeInstance::new(e, "Extrude", [200.0, 0.0]);
+    en.properties.insert("height", PortValue::Number(3.0));
+    g.add_node(rn).unwrap();
+    g.add_node(en).unwrap();
+    g.connect(
+        Edge { from: SocketId { node: r, name: "out" }, to: SocketId { node: e, name: "input" } },
+        &reg,
+    ).unwrap();
+
+    atomartist_lib::graph::executor::evaluate_all(&mut g, &reg).unwrap();
+    match g.get(e).unwrap().cached_outputs.get("out") {
+        Some(PortValue::Geometry3d(m)) => {
+            // Extrude produces caps + sides; vert count > 0, tri count > 0.
+            assert!(m.vert_properties.len() > 0);
+            assert!(m.tri_verts.len() >= 12);
+            // Z extents are ±1.5.
+            let stride = m.num_prop as usize;
+            let n = m.vert_properties.len() / stride;
+            let mut z_min = f32::INFINITY; let mut z_max = f32::NEG_INFINITY;
+            for i in 0..n {
+                let z = m.vert_properties[i * stride + 2];
+                if z < z_min { z_min = z; }
+                if z > z_max { z_max = z; }
+            }
+            assert!((z_min + 1.5).abs() < 1e-4);
+            assert!((z_max - 1.5).abs() < 1e-4);
+        }
+        _ => panic!("expected Geometry3d on Extrude.out"),
+    }
+}
+
+#[test]
 fn combine_two_boxes_via_executor() {
     let mut reg = NodeRegistry::new();
     nodes::register_all(&mut reg);

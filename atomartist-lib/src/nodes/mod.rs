@@ -4,7 +4,9 @@
 //! that want to add custom nodes should call this first, then register their
 //! own types on top.
 
+pub mod ops_2d;
 pub mod ops_3d;
+pub mod primitives_2d;
 pub mod primitives_3d;
 
 use crate::registry::NodeRegistry;
@@ -13,6 +15,8 @@ use crate::registry::NodeRegistry;
 /// so far as `register` panics on duplicate type ids — call this once at
 /// startup.
 pub fn register_all(reg: &mut NodeRegistry) {
+    primitives_2d::register_all(reg);
     primitives_3d::register_all(reg);
+    ops_2d::register_all(reg);
     ops_3d::register_all(reg);
 }
