@@ -8,9 +8,10 @@
 //! inspector / screenshot / MSAA / multi-touch / font-asset machinery
 //! which AtomArtist doesn't need yet.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use agg_gui::{App, Key, Modifiers, MouseButton, Size, text::Font};
+use agg_gui::{App, DrawCtx, Key, Modifiers, MouseButton, Size, text::Font, theme::{set_visuals, Visuals}};
 use atomartist_ui::{build_app, fresh_state_with_starter_graph};
 use demo_wgpu::{begin_frame, WgpuGfxCtx};
 use winit::dpi::LogicalSize;
@@ -64,7 +65,9 @@ impl Gpu {
             .unwrap_or(caps.formats[0]);
 
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            // COPY_SRC required for the screenshot capture path (which
+            // copies the surface into an internal capture texture).
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             format: surface_format,
             width: size.width.max(1),
             height: size.height.max(1),
@@ -92,17 +95,33 @@ impl Gpu {
     }
 }
 
-fn paint_frame(gpu: &Gpu, ctx: &mut WgpuGfxCtx, app: &mut App, w: u32, h: u32) {
+fn paint_frame(
+    gpu: &Gpu,
+    ctx: &mut WgpuGfxCtx,
+    app: &mut App,
+    w: u32,
+    h: u32,
+    capture_after: bool,
+) {
     let frame = match gpu.surface.get_current_texture() {
         wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
         _ => return,
     };
+    // Stash the surface texture handle before begin_frame so the screenshot
+    // path can copy from it (capture_screenshot reads ctx.surface_texture).
+    ctx.set_surface_texture(frame.texture.clone());
     let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
     ctx.reset(w as f32, h as f32);
     begin_frame(ctx, view);
     app.layout(Size::new(w as f64, h as f64));
     app.paint(ctx);
     ctx.end_frame();
+    if capture_after {
+        // Must run between end_frame (commands flushed) and present
+        // (surface texture destroyed). The captured pixels live inside
+        // ctx.capture_texture and survive present.
+        ctx.capture_screenshot();
+    }
     frame.present();
 }
 
@@ -141,14 +160,41 @@ fn translate_winit_key(key: &winit::keyboard::Key) -> Option<Key> {
     }
 }
 
+/// Parsed CLI: `--screenshot <path>` exits after grabbing one frame.
+struct CliArgs {
+    screenshot_to: Option<PathBuf>,
+}
+
+fn parse_args() -> CliArgs {
+    let mut args = std::env::args().skip(1);
+    let mut screenshot_to = None;
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--screenshot" => {
+                screenshot_to = args.next().map(PathBuf::from);
+            }
+            _ => {}
+        }
+    }
+    CliArgs { screenshot_to }
+}
+
 #[allow(deprecated)]
 fn main() {
+    let cli = parse_args();
     let event_loop = EventLoop::new().expect("event loop");
+
+    // Install light theme as the default — AtomArtist is a CAD-style design
+    // tool where high-contrast white backgrounds match user expectation.
+    set_visuals(Visuals::light());
 
     let font = Arc::new(
         Font::from_bytes(DEFAULT_FONT_BYTES.to_vec()).expect("load NotoSans-Regular"),
     );
-    let _ = font; // installed via agg-gui's font subsystem on first widget that needs it
+    // Make the font available to every widget via agg-gui's thread-local
+    // system-font slot, so widgets can fall back to it without an explicit
+    // ctx.set_font call.
+    agg_gui::font_settings::set_system_font(Some(font.clone()));
 
     let window_attributes = WindowAttributes::default()
         .with_title("AtomArtist")
@@ -181,6 +227,12 @@ fn main() {
     let mut cursor_x = 0.0f64;
     let mut cursor_y = 0.0f64;
     let mut current_mods = Modifiers::default();
+
+    // Screenshot mode: paint a few warmup frames so all GPU state is
+    // realised, then capture + save + exit. Frame counting starts at 0.
+    let mut frames_painted: u32 = 0;
+    let screenshot_path = cli.screenshot_to.clone();
+    let warmup_frames: u32 = 3;
 
     event_loop
         .run(move |event, elwt| {
@@ -255,12 +307,49 @@ fn main() {
                 Event::WindowEvent {
                     event: WindowEvent::RedrawRequested, ..
                 } => {
-                    paint_frame(&gpu, &mut wgpu_ctx, &mut app, win_w, win_h);
+                    let capture_now = screenshot_path.is_some()
+                        && frames_painted + 1 == warmup_frames;
+                    paint_frame(&gpu, &mut wgpu_ctx, &mut app, win_w, win_h, capture_now);
+                    frames_painted = frames_painted.saturating_add(1);
+                    if let Some(path) = screenshot_path.clone() {
+                        if frames_painted == warmup_frames {
+                            // Capture happened above; pixels are now in the
+                            // capture texture. Read them back and exit.
+                            let (pixels, w, h) = wgpu_ctx.read_captured_screenshot();
+                            if !pixels.is_empty() && w > 0 && h > 0 {
+                                if let Err(e) = save_rgba_png(&path, &pixels, w, h) {
+                                    eprintln!("screenshot write failed: {}", e);
+                                } else {
+                                    eprintln!("wrote {}x{} screenshot to {}", w, h, path.display());
+                                }
+                            } else {
+                                eprintln!("screenshot capture returned no pixels");
+                            }
+                            elwt.exit();
+                        } else {
+                            window.request_redraw();
+                        }
+                    }
                 }
                 _ => {}
             }
         })
         .expect("event loop run");
+}
+
+/// Encode an RGBA8 buffer to PNG. The capture path returns Y-down rows
+/// (wgpu surface convention), which matches PNG's natural top-down order
+/// — no flip needed.
+fn save_rgba_png(path: &std::path::Path, pixels: &[u8], w: u32, h: u32) -> Result<(), String> {
+    use image::ImageBuffer;
+    let buf = ImageBuffer::<image::Rgba<u8>, &[u8]>::from_raw(w, h, pixels)
+        .ok_or_else(|| format!("image buffer build failed: pixels={} w={} h={}", pixels.len(), w, h))?;
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+    }
+    buf.save(path).map_err(|e| e.to_string())
 }
 
 // Phase 0 placeholder kept while atomartist-{lib,renderer,ui} stubs still

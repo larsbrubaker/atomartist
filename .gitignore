@@ -17,5 +17,7 @@ Thumbs.db
 
 # Local build state
 *.log
+# Transient screenshot capture from `cargo shot`
+/screenshot.png
 
 # Local Claude state — keep skills + settings.local.json checked in (they live in .claude/)

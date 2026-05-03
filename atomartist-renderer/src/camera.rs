@@ -32,9 +32,12 @@ impl Default for OrbitCamera {
         Self {
             center: [0.0, 0.0, 0.0],
             radius: 60.0,
-            azimuth: 0.6,
-            elevation: 0.4,
-            fov_y: PI * 0.25,
+            // Slight 3/4 view, lower elevation than the prior 0.4 so the
+            // model presents like NodeDesigner's reference: enough top-
+            // surface visible for orientation without flattening it.
+            azimuth: -0.45,
+            elevation: 0.30,
+            fov_y: PI * 0.22,
             near: 0.1,
             far: 5000.0,
         }
@@ -95,9 +98,12 @@ impl OrbitCamera {
         let dy = max[1] - min[1];
         let dz = max[2] - min[2];
         let extent = dx.max(dy).max(dz).max(0.1);
-        // Place the camera so the bounding sphere fits with some headroom.
+        // Place the camera so the bounding sphere fits comfortably inside
+        // the viewport with generous headroom. The 1.4 multiplier keeps the
+        // model occupying ~60-70% of the viewport extent, matching the
+        // NodeDesigner reference layout.
         let half_fov = self.fov_y * 0.5;
-        let dist = (extent * 0.6) / half_fov.tan().max(1e-3);
+        let dist = (extent * 1.4) / half_fov.tan().max(1e-3);
         self.radius = dist.max(0.1);
     }
 

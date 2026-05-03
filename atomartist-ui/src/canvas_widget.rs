@@ -256,6 +256,18 @@ impl Widget for NodeCanvas {
             return;
         }
 
+        // Pull palette from current visuals each frame so theme switches
+        // (light <-> dark) take effect immediately.
+        let visuals = ctx.visuals();
+        self.palette = CanvasPalette::from_visuals(&visuals);
+
+        // Make text rendering work — agg-gui's DrawCtx requires a font to
+        // be installed before fill_text. Pull from the thread-local
+        // system font slot.
+        if let Some(f) = agg_gui::font_settings::current_system_font() {
+            ctx.set_font(f);
+        }
+
         // Background
         ctx.set_fill_color(self.palette.canvas_bg);
         ctx.begin_path();

@@ -277,8 +277,10 @@ impl WgpuCustomRender for WgpuSceneRenderer {
         let vp_h = ctx.screen_rect.height.max(1.0) as f32;
         let vp_y_topdown = target_h - (ctx.screen_rect.y as f32) - vp_h;
 
-        let vp_size = (vp_w as u32, vp_h as u32);
-        self.ensure_depth(ctx.device, vp_size);
+        // Depth attachment MUST match the color attachment size (the full
+        // target_view), not the viewport rect — wgpu validates this. We
+        // limit drawing to the widget's rect via set_viewport / scissor.
+        self.ensure_depth(ctx.device, ctx.target_size);
         self.ensure_mesh_buffers(ctx.device);
 
         let s = match &self.state { Some(s) => s, None => return };

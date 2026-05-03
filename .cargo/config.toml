@@ -1,0 +1,6 @@
+[alias]
+# Run the native demo. For continuous watch-mode, install cargo-watch
+# (`cargo install cargo-watch`) and use `cargo watch -x dev`.
+dev = "run -p demo-native"
+# Take a screenshot of the running app and exit (CI / visual regression).
+shot = "run -p demo-native -- --screenshot ./screenshot.png"

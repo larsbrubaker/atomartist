@@ -279,6 +279,34 @@ impl Widget for Viewport3dWidget {
         let h = self.bounds.height;
         if w <= 0.0 || h <= 0.0 { return; }
 
+        // Theme-aware background: slightly lighter / darker than the
+        // canvas backdrop so the viewport reads as a distinct pane.
+        let visuals = ctx.visuals();
+        let dark = 0.299 * visuals.bg_color.r
+            + 0.587 * visuals.bg_color.g
+            + 0.114 * visuals.bg_color.b
+            < 0.5;
+        self.bg_color = if dark {
+            Color::rgb(0.10, 0.11, 0.13)
+        } else {
+            Color::rgb(0.985, 0.985, 0.99)
+        };
+        // Update the wgpu scene base color too — light theme wants a
+        // mid-grey shaded model on white background.
+        {
+            let mut s = self.scene.borrow_mut();
+            s.base_color = if dark {
+                [0.62, 0.66, 0.78, 1.0]
+            } else {
+                [0.74, 0.78, 0.86, 1.0]
+            };
+        }
+
+        // Install system font so any text we paint actually renders.
+        if let Some(f) = agg_gui::font_settings::current_system_font() {
+            ctx.set_font(f);
+        }
+
         // Background fill always painted via the 2-D ctx so the underlying
         // surface gets a solid backdrop before the 3-D pass overdraws on top.
         ctx.set_fill_color(self.bg_color);

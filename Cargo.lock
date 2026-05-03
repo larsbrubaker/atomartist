@@ -602,6 +602,7 @@ dependencies = [
  "atomartist-renderer",
  "atomartist-ui",
  "demo-wgpu",
+ "image",
  "pollster",
  "raw-window-handle",
  "wgpu",
