@@ -58,7 +58,9 @@ dependencies = [
 name = "atomartist-renderer"
 version = "0.0.1"
 dependencies = [
+ "agg-gui",
  "atomartist-lib",
+ "manifold-rust",
 ]
 
 [[package]]

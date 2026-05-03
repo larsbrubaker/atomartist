@@ -13,4 +13,6 @@ name = "atomartist_renderer"
 path = "src/lib.rs"
 
 [dependencies]
+agg-gui        = { path = "../../agg-gui/agg-gui", default-features = false }
 atomartist-lib = { path = "../atomartist-lib" }
+manifold-rust  = { path = "../../manifold-rust" }

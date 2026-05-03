@@ -1,12 +1,23 @@
 //! AtomArtist 3D viewport renderer.
 //!
-//! Builds on wgpu for cross-platform 3D rendering (Windows/macOS/Linux native
-//! via Vulkan/DX12/Metal, browsers via WebGPU/WebGL2). Renders the graph's
-//! output mesh into an offscreen `wgpu::Texture` that the agg-gui compositor
-//! samples as a 2D image, isolating 3D state from the 2D UI render pass.
+//! Currently provides a software-projected wireframe viewport that uses the
+//! existing `agg-gui` 2D `DrawCtx`. Triangles are projected by an
+//! `OrbitCamera`'s view + projection matrices, backface-culled, and stroked
+//! with normal-modulated colors. This works on every platform agg-gui runs
+//! on without needing a custom wgpu render-pass injection.
 //!
-//! Phase 0 stub. Real implementation begins in Phase 5.
+//! A future revision will replace the wireframe path with a wgpu fragment
+//! shader once agg-gui exposes a generic custom-render hook (analogous to
+//! the old `GlPaint` trait or the in-progress `WgpuPaint`). The widget
+//! interface (`Viewport3dWidget`) and camera API (`OrbitCamera`) are
+//! designed to be stable across that swap.
 
-/// Crate-level placeholder so `cargo check` has something to type-check.
-/// Removed when Phase 5 adds the camera + scene_renderer modules.
+pub mod camera;
+pub mod viewport_widget;
+
+pub use camera::OrbitCamera;
+pub use viewport_widget::{Viewport3dWidget, ViewportInputs};
+
+/// Phase 0 placeholder kept so `demo-native` / `demo-wasm` stubs continue
+/// to compile while real wiring lands. Removed in Phase 6.
 pub fn placeholder() {}
