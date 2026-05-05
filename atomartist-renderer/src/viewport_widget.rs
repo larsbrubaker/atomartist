@@ -107,6 +107,8 @@ impl Viewport3dWidget {
         }
         if mn[0].is_finite() && mx[0].is_finite() {
             self.camera.fit_to_bounds(mn, mx);
+            // Sit the floor grid at the model's lowest point.
+            self.scene.borrow_mut().grid_y = mn[1];
         }
         let _ = ptr;
     }
@@ -291,8 +293,8 @@ impl Widget for Viewport3dWidget {
         } else {
             Color::rgb(0.985, 0.985, 0.99)
         };
-        // Update the wgpu scene base color too — light theme wants a
-        // mid-grey shaded model on white background.
+        // Update the wgpu scene colors per theme — model surface color
+        // and floor-grid line color.
         {
             let mut s = self.scene.borrow_mut();
             s.base_color = if dark {
@@ -300,6 +302,19 @@ impl Widget for Viewport3dWidget {
             } else {
                 [0.74, 0.78, 0.86, 1.0]
             };
+            s.grid_line_color = if dark {
+                [0.55, 0.58, 0.66, 0.55]
+            } else {
+                [0.55, 0.58, 0.66, 0.55]
+            };
+            // Background: same as the viewport bg so grid lines composite
+            // cleanly against whatever 2-D content sits behind.
+            s.grid_bg_color = [
+                self.bg_color.r,
+                self.bg_color.g,
+                self.bg_color.b,
+                0.0,
+            ];
         }
 
         // Install system font so any text we paint actually renders.

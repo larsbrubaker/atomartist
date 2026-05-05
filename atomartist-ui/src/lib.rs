@@ -9,6 +9,7 @@ pub mod app_state;
 pub mod canvas_draw;
 pub mod canvas_widget;
 pub mod top_level;
+pub mod top_menu_bar;
 
 pub use app_state::AppState;
 pub use canvas_widget::{add_node_with_defaults, NodeCanvas};

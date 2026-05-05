@@ -287,6 +287,21 @@ fn socket_color(t: SocketType) -> Color {
     )
 }
 
+/// Map a NodeDef::category() string to a title-bar color, matching the
+/// NodeDesigner reference palette. Falls back to the theme accent for
+/// categories we haven't explicitly styled.
+pub fn category_title_color(category: &str, fallback: Color) -> Color {
+    match category {
+        "Primitives 2D" | "Operations 2D" => Color::rgb(0.30, 0.50, 0.86),  // blue
+        "Primitives 3D" => Color::rgb(0.20, 0.55, 0.90),                    // bright blue
+        "Operations 3D" => Color::rgb(0.42, 0.66, 0.32),                    // green
+        "Mesh"          => Color::rgb(0.85, 0.55, 0.22),                    // amber
+        "Math"          => Color::rgb(0.50, 0.50, 0.55),                    // grey
+        "Output"        => Color::rgb(0.62, 0.36, 0.78),                    // purple
+        _ => fallback,
+    }
+}
+
 /// Render one node into the canvas (caller has already applied pan/zoom).
 pub fn draw_node(
     ctx: &mut dyn DrawCtx,
@@ -299,6 +314,7 @@ pub fn draw_node(
     let w = layout.size[0];
     let h = layout.size[1];
     let y_bot = y_top - h;
+    let title_color = category_title_color(layout.category, palette.node_title);
 
     // Body (rounded rect) — agg-gui rect uses bottom-left origin in Y-up,
     // so we pass (x, y_bot, w, h).
@@ -308,7 +324,7 @@ pub fn draw_node(
     ctx.fill();
 
     // Title bar (filled rectangle at the top, taking up TITLE_HEIGHT).
-    ctx.set_fill_color(palette.node_title);
+    ctx.set_fill_color(title_color);
     ctx.begin_path();
     ctx.rounded_rect(x, y_top - TITLE_HEIGHT, w, TITLE_HEIGHT, NODE_RADIUS);
     ctx.fill();
@@ -318,7 +334,7 @@ pub fn draw_node(
     ctx.rect(x, y_top - TITLE_HEIGHT, w, NODE_RADIUS);
     ctx.fill();
     // Re-draw the upper portion of the title bar to restore its color.
-    ctx.set_fill_color(palette.node_title);
+    ctx.set_fill_color(title_color);
     ctx.begin_path();
     ctx.rect(x, y_top - TITLE_HEIGHT + NODE_RADIUS, w, TITLE_HEIGHT - NODE_RADIUS);
     ctx.fill();

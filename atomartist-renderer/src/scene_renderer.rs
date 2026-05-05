@@ -77,6 +77,82 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// Procedural floor grid. Draws a single large quad at a configurable Y
+/// and computes line coverage in the fragment shader so the grid stays
+/// sharp at any zoom and fades to transparent at distance.
+const GRID_SHADER: &str = r#"
+struct GridU {
+    mvp: mat4x4<f32>,
+    cell: vec4<f32>,        // x = minor cell size, y = major cell stride, z = grid_y
+    line_color: vec4<f32>,
+    bg_color: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> u: GridU;
+
+struct VOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) world_xz: vec2<f32>,
+};
+
+@vertex
+fn vs(@location(0) pos: vec3<f32>) -> VOut {
+    var o: VOut;
+    let p = vec3<f32>(pos.x, u.cell.z, pos.z);
+    o.clip = u.mvp * vec4<f32>(p, 1.0);
+    o.world_xz = p.xz;
+    return o;
+}
+
+// Coverage of a 1-pixel-wide line at integer grid coordinates, derived
+// from screen-space derivatives so it stays sharp at any zoom.
+fn line_coverage(coord: vec2<f32>) -> f32 {
+    let d = fwidth(coord);
+    let g = abs(fract(coord - 0.5) - 0.5) / d;
+    let line = min(g.x, g.y);
+    return 1.0 - clamp(line, 0.0, 1.0);
+}
+
+@fragment
+fn fs(in: VOut) -> @location(0) vec4<f32> {
+    let cell  = u.cell.x;
+    let major = u.cell.y;
+
+    // Minor + major grid coverages (in world-space cell units).
+    let minor_c = coord_to_cell(in.world_xz, cell);
+    let major_c = coord_to_cell(in.world_xz, cell * major);
+    let minor_a = line_coverage(minor_c) * 0.35;
+    let major_a = line_coverage(major_c);
+
+    let alpha = max(minor_a, major_a);
+    if alpha < 0.01 {
+        discard;
+    }
+    let col = mix(u.bg_color.rgb, u.line_color.rgb, alpha);
+    return vec4<f32>(col, alpha * u.line_color.a);
+}
+
+fn coord_to_cell(p: vec2<f32>, cell: f32) -> vec2<f32> {
+    return p / cell;
+}
+"#;
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct GridUniforms {
+    mvp: [f32; 16],
+    /// x = minor cell size, y = major cell stride (in cells), z/w = pad
+    cell: [f32; 4],
+    line_color: [f32; 4],
+    bg_color: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct GridVertex {
+    pos: [f32; 3],
+}
+
 struct GpuState {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
@@ -89,6 +165,12 @@ struct GpuState {
     vbuf: Option<wgpu::Buffer>,
     ibuf: Option<wgpu::Buffer>,
     index_count: u32,
+    /// Floor grid pipeline + buffers — built lazily alongside the mesh
+    /// pipeline. `grid_vbuf` covers a large XZ plane at Y=0; the shader
+    /// fades grid lines via screen-space derivatives.
+    grid_pipeline: wgpu::RenderPipeline,
+    grid_bind_group_layout: wgpu::BindGroupLayout,
+    grid_vbuf: wgpu::Buffer,
 }
 
 pub struct WgpuSceneRenderer {
@@ -98,6 +180,16 @@ pub struct WgpuSceneRenderer {
     pub viewport_size: (u32, u32),
     pub base_color: [f32; 4],
     pub light_dir: [f32; 3],
+    /// Floor-grid line color — caller adapts to the active theme.
+    pub grid_line_color: [f32; 4],
+    /// Floor-grid background — typically the viewport bg, used to blend
+    /// grid lines against the existing 2-D backdrop already painted there.
+    pub grid_bg_color: [f32; 4],
+    /// True to draw the floor grid before the mesh.
+    pub draw_grid: bool,
+    /// World Y where the floor grid sits — `Viewport3dWidget` updates this
+    /// to the model's bounds-min Y so the grid always feels like a floor.
+    pub grid_y: f32,
 }
 
 impl WgpuSceneRenderer {
@@ -109,6 +201,10 @@ impl WgpuSceneRenderer {
             viewport_size: (0, 0),
             base_color: [0.62, 0.66, 0.78, 1.0],
             light_dir: [0.4, 0.7, 0.6],
+            grid_line_color: [0.55, 0.58, 0.66, 0.7],
+            grid_bg_color: [1.0, 1.0, 1.0, 0.0],
+            draw_grid: true,
+            grid_y: 0.0,
         }
     }
 
@@ -189,6 +285,89 @@ impl WgpuSceneRenderer {
             cache: None,
         });
 
+        // ── Grid pipeline + vbuf ────────────────────────────────────────────
+        let grid_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("atomartist grid shader"),
+            source: wgpu::ShaderSource::Wgsl(GRID_SHADER.into()),
+        });
+        let grid_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("atomartist grid bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let grid_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("atomartist grid pl"),
+            bind_group_layouts: &[Some(&grid_bgl)],
+            immediate_size: 0,
+        });
+        let grid_vert_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<GridVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[wgpu::VertexAttribute {
+                offset: 0,
+                shader_location: 0,
+                format: wgpu::VertexFormat::Float32x3,
+            }],
+        };
+        let grid_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("atomartist grid pipeline"),
+            layout: Some(&grid_pl),
+            vertex: wgpu::VertexState {
+                module: &grid_shader,
+                entry_point: Some("vs"),
+                buffers: &[grid_vert_layout],
+                compilation_options: Default::default(),
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                // Grid writes depth so the model occludes lines behind it.
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &grid_shader,
+                entry_point: Some("fs"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        // Two triangles forming a large XZ-plane quad at Y=0.
+        let plane: [GridVertex; 6] = [
+            GridVertex { pos: [-2000.0, 0.0, -2000.0] },
+            GridVertex { pos: [ 2000.0, 0.0, -2000.0] },
+            GridVertex { pos: [ 2000.0, 0.0,  2000.0] },
+            GridVertex { pos: [-2000.0, 0.0, -2000.0] },
+            GridVertex { pos: [ 2000.0, 0.0,  2000.0] },
+            GridVertex { pos: [-2000.0, 0.0,  2000.0] },
+        ];
+        let grid_vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("atomartist grid vb"),
+            contents: bytemuck::cast_slice(&plane),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
         self.state = Some(GpuState {
             pipeline,
             bind_group_layout: bgl,
@@ -199,6 +378,9 @@ impl WgpuSceneRenderer {
             vbuf: None,
             ibuf: None,
             index_count: 0,
+            grid_pipeline,
+            grid_bind_group_layout: grid_bgl,
+            grid_vbuf,
         });
     }
 
@@ -350,6 +532,35 @@ impl WgpuCustomRender for WgpuSceneRenderer {
         let scissor_x = vp_x as u32;
         let scissor_y = vp_y_topdown.max(0.0) as u32;
         pass.set_scissor_rect(scissor_x, scissor_y, vp_w as u32, vp_h as u32);
+
+        // Draw the floor grid first (depth-write on so the mesh occludes
+        // lines hidden behind it).
+        if self.draw_grid {
+            let grid_uniforms = GridUniforms {
+                mvp,
+                cell: [1.0, 10.0, self.grid_y, 0.0],
+                line_color: self.grid_line_color,
+                bg_color: self.grid_bg_color,
+            };
+            let grid_ub = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("atomartist grid ub"),
+                contents: bytemuck::bytes_of(&grid_uniforms),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+            let grid_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("atomartist grid bg"),
+                layout: &s.grid_bind_group_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: grid_ub.as_entire_binding(),
+                }],
+            });
+            pass.set_pipeline(&s.grid_pipeline);
+            pass.set_bind_group(0, &grid_bg, &[]);
+            pass.set_vertex_buffer(0, s.grid_vbuf.slice(..));
+            pass.draw(0..6, 0..1);
+        }
+
         pass.set_pipeline(&s.pipeline);
         pass.set_bind_group(0, &bg, &[]);
         pass.set_vertex_buffer(0, vbuf.slice(..));

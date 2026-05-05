@@ -4,25 +4,35 @@
 //! and a vertical splitter — the simplest layout that exercises every
 //! piece. Property panel and menu bar land in later phases.
 
-use agg_gui::{FlexColumn, HAnchor, VAnchor, Widget};
+use std::sync::Arc;
+
+use agg_gui::{font_settings::current_system_font, FlexColumn, HAnchor, VAnchor, Widget};
 use atomartist_renderer::{Viewport3dWidget, ViewportInputs};
 
 use crate::app_state::AppState;
 use crate::canvas_widget::NodeCanvas;
+use crate::top_menu_bar::build_menu_bar;
 
 /// Build the application root widget tree.
 ///
-/// Layout (matching NodeDesigner): vertical stack — 3D viewport on top
-/// (60% of height), node canvas on bottom (40%).
+/// Layout (matching NodeDesigner): vertical stack — top menu bar, then
+/// 3D viewport (60% of remaining height), then node canvas (40%).
 pub fn build_app(state: AppState) -> Box<dyn Widget> {
     let canvas: Box<dyn Widget> = Box::new(NodeCanvas::new(state.clone()));
     let viewport: Box<dyn Widget> = Box::new(Viewport3dWidget::new(ViewportInputs {
         last_mesh_output: state.last_mesh_output.clone(),
     }));
 
+    // Menu bar needs a font; the demo shells install one into
+    // font_settings before building the tree, so this fall-through is safe.
+    let font: Arc<agg_gui::text::Font> =
+        current_system_font().expect("system font must be installed before build_app");
+    let menu_bar: Box<dyn Widget> = Box::new(build_menu_bar(state.clone(), font));
+
     let column = FlexColumn::new()
         .with_h_anchor(HAnchor::STRETCH)
         .with_v_anchor(VAnchor::STRETCH)
+        .add(menu_bar)
         .add_flex(viewport, 1.5)
         .add_flex(canvas, 1.0);
     Box::new(column)
@@ -70,6 +80,7 @@ pub fn fresh_state_with_starter_graph() -> AppState {
         let rect = mk(&mut g, "Rectangle", [40.0, 240.0], &state.registry);
         let inflate = mk(&mut g, "Inflate", [260.0, 240.0], &state.registry);
         let extrude = mk(&mut g, "Extrude", [480.0, 240.0], &state.registry);
+        let output = mk(&mut g, "Output", [700.0, 240.0], &state.registry);
 
         let _ = g.connect(
             Edge { from: SocketId { node: rect, name: "out" }, to: SocketId { node: inflate, name: "input" } },
@@ -79,7 +90,11 @@ pub fn fresh_state_with_starter_graph() -> AppState {
             Edge { from: SocketId { node: inflate, name: "out" }, to: SocketId { node: extrude, name: "input" } },
             &state.registry,
         );
-        extrude
+        let _ = g.connect(
+            Edge { from: SocketId { node: extrude, name: "out" }, to: SocketId { node: output, name: "in" } },
+            &state.registry,
+        );
+        output
     };
     state.set_display_node(Some(extrude_id));
     state.evaluate_now();
