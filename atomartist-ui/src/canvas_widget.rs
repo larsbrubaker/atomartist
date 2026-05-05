@@ -627,6 +627,8 @@ impl NodeCanvas {
             pos.y - canvas_before[1] * new_scale,
         ];
         self.canvas_scale = new_scale;
+        // Publish the new zoom so StatusBar can render it.
+        *self.state.canvas_zoom.lock().unwrap() = new_scale;
         EventResult::Consumed
     }
 

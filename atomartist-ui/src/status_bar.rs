@@ -87,8 +87,10 @@ impl Widget for StatusBar {
         // Y baseline: roughly centered vertically.
         let y = h * 0.5 - 4.0;
 
-        // Left: zoom percent + version.
-        let zoom_str = format!("100%");          // Phase iteration: pull from canvas
+        // Left: zoom percent + version. canvas_zoom is the canvas
+        // widget's pan/zoom scale factor (1.0 = native).
+        let zoom_pct = (*self.state.canvas_zoom.lock().unwrap() * 100.0).round() as i64;
+        let zoom_str = format!("{}%", zoom_pct);
         ctx.fill_text(&zoom_str, 12.0, y);
         ctx.fill_text(&format!("v{}", APP_VERSION), 80.0, y);
 

@@ -23,6 +23,8 @@ pub trait FileDialogProvider: Send + Sync {
     /// User-facing error notice — typically a message dialog. Returning
     /// nothing keeps the trait simple; severity is implicit "error".
     fn show_error(&self, message: &str);
+    /// User-facing informational notice — used by License / About flows.
+    fn show_info(&self, title: &str, message: &str);
 }
 
 /// No-op file-dialog provider used by tests / WASM (until Phase 10 wires
@@ -33,6 +35,7 @@ impl FileDialogProvider for NoFileDialogs {
     fn pick_save_project(&self, _name: &str) -> Option<PathBuf> { None }
     fn pick_save_stl(&self, _name: &str) -> Option<PathBuf> { None }
     fn show_error(&self, _message: &str) {}
+    fn show_info(&self, _title: &str, _message: &str) {}
 }
 
 /// Build the application's top menu bar widget. `state` is captured so
@@ -78,6 +81,7 @@ pub fn build_menu_bar(
             "Help",
             vec![
                 MenuEntry::Item(MenuItem::action("Documentation", "help.docs")),
+                MenuEntry::Item(MenuItem::action("License", "help.license")),
                 MenuEntry::Item(MenuItem::action("About", "help.about")),
             ],
         ),
@@ -215,6 +219,33 @@ fn handle_action(state: &AppState, dialogs: &dyn FileDialogProvider, action: &st
                     dialogs.show_error(&format!("Export failed: {}", e));
                 }
             }
+        }
+        "help.about" => {
+            dialogs.show_info(
+                "About AtomArtist",
+                &format!(
+                    "AtomArtist v{}\n\n\
+                    A pure-Rust visual node-based 3D design tool.\n\
+                    Built on agg-gui + manifold-rust + clipper2-rust + tess2-rust.\n\n\
+                    https://github.com/larsbrubaker/atomartist",
+                    env!("CARGO_PKG_VERSION"),
+                ),
+            );
+        }
+        "help.license" => {
+            dialogs.show_info(
+                "License",
+                "AtomArtist is licensed under the MIT License.\n\
+                See the LICENSE file in the project root for the full text.",
+            );
+        }
+        "help.docs" => {
+            dialogs.show_info(
+                "Documentation",
+                "Documentation lives in README.md and CLAUDE.md\n\
+                in the project repository.\n\n\
+                https://github.com/larsbrubaker/atomartist",
+            );
         }
         _ => {}
     }

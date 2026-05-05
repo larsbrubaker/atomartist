@@ -40,6 +40,9 @@ pub struct AppState {
     /// Path of the currently-open project file (`Save` writes here without
     /// re-prompting). `None` when the project has never been saved.
     pub current_file: Arc<Mutex<Option<PathBuf>>>,
+    /// Latest known node-canvas zoom — written by `NodeCanvas` on each
+    /// wheel event and read by `StatusBar` for the bottom-bar percentage.
+    pub canvas_zoom: Arc<Mutex<f64>>,
 }
 
 impl AppState {
@@ -52,6 +55,7 @@ impl AppState {
             viewport_dirty: Arc::new(AtomicBool::new(false)),
             display_node: Arc::new(Mutex::new(None)),
             current_file: Arc::new(Mutex::new(None)),
+            canvas_zoom: Arc::new(Mutex::new(1.0)),
         }
     }
 
@@ -167,6 +171,7 @@ impl Clone for AppState {
             viewport_dirty: self.viewport_dirty.clone(),
             display_node: self.display_node.clone(),
             current_file: self.current_file.clone(),
+            canvas_zoom: self.canvas_zoom.clone(),
         }
     }
 }

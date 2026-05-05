@@ -33,7 +33,7 @@ pub fn build_app(state: AppState, dialogs: Arc<dyn FileDialogProvider>) -> Box<d
     // font_settings before building the tree, so this fall-through is safe.
     let font: Arc<agg_gui::text::Font> =
         current_system_font().expect("system font must be installed before build_app");
-    let menu_bar: Box<dyn Widget> = build_menu_bar_sized(state.clone(), font.clone(), dialogs);
+    let menu_bar: Box<dyn Widget> = build_menu_bar_sized(state.clone(), font.clone(), dialogs.clone());
 
     // Top chrome row: menu bar on the left, spacer pushes title + License
     // + About to the right (matching NodeDesigner's reference layout).
@@ -43,15 +43,33 @@ pub fn build_app(state: AppState, dialogs: Arc<dyn FileDialogProvider>) -> Box<d
             .with_align(agg_gui::widgets::label::LabelAlign::Right)
             .with_margin(Insets::symmetric(8.0, 6.0)),
     );
+    let license_dialogs = dialogs.clone();
     let license_btn: Box<dyn Widget> = Box::new(
         Button::new("License", font.clone())
             .with_margin(Insets::symmetric(4.0, 4.0))
-            .on_click(|| {})
+            .on_click(move || {
+                license_dialogs.show_info(
+                    "License",
+                    "AtomArtist is licensed under the MIT License.\n\
+                    See the LICENSE file in the project root for the full text.",
+                );
+            })
     );
+    let about_dialogs = dialogs.clone();
     let about_btn: Box<dyn Widget> = Box::new(
         Button::new("About", font.clone())
             .with_margin(Insets::symmetric(4.0, 4.0))
-            .on_click(|| {})
+            .on_click(move || {
+                about_dialogs.show_info(
+                    "About AtomArtist",
+                    &format!(
+                        "AtomArtist v{}\n\n\
+                        A pure-Rust visual node-based 3D design tool.\n\
+                        Built on agg-gui + manifold-rust + clipper2-rust + tess2-rust.",
+                        env!("CARGO_PKG_VERSION"),
+                    ),
+                );
+            })
     );
 
     let top_row: Box<dyn Widget> = Box::new(

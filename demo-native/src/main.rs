@@ -387,6 +387,13 @@ impl FileDialogProvider for NativeDialogs {
             .set_level(rfd::MessageLevel::Error)
             .show();
     }
+    fn show_info(&self, title: &str, message: &str) {
+        rfd::MessageDialog::new()
+            .set_title(title)
+            .set_description(message)
+            .set_level(rfd::MessageLevel::Info)
+            .show();
+    }
 }
 
 /// Encode an RGBA8 buffer to PNG. The capture path returns Y-down rows
