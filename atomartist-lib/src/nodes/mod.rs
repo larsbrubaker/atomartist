@@ -4,6 +4,7 @@
 //! that want to add custom nodes should call this first, then register their
 //! own types on top.
 
+pub mod io;
 pub mod math;
 pub mod mesh;
 pub mod ops_2d;
@@ -24,5 +25,6 @@ pub fn register_all(reg: &mut NodeRegistry) {
     ops_3d::register_all(reg);
     mesh::register_all(reg);
     math::register_all(reg);
+    io::register_all(reg);
     output_node::register(reg);
 }
