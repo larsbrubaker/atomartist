@@ -112,6 +112,7 @@ fn paint_frame(
     ctx.set_surface_texture(frame.texture.clone());
     let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
     ctx.reset(w as f32, h as f32);
+    ctx.set_lcd_mode(agg_gui::font_settings::lcd_enabled());
     begin_frame(ctx, view);
     app.layout(Size::new(w as f64, h as f64));
     app.paint(ctx);
@@ -195,6 +196,22 @@ fn main() {
     // system-font slot, so widgets can fall back to it without an explicit
     // ctx.set_font call.
     agg_gui::font_settings::set_system_font(Some(font.clone()));
+
+    // Text-quality recipe (mirrors agg-gui's demo):
+    //   - LCD subpixel rendering + Y-axis hinting on standard-DPI displays
+    //     (skip on hi-DPI to avoid colour-fringe artifacts at >1.25x).
+    //   - Default gamma / width / weight / italic so the rasterizer matches
+    //     the reference truetype_test demo.
+    let standard_dpi = agg_gui::device_scale() <= 1.25;
+    agg_gui::font_settings::set_font_size_scale(1.0);
+    agg_gui::font_settings::set_lcd_enabled(standard_dpi);
+    agg_gui::font_settings::set_hinting_enabled(standard_dpi);
+    agg_gui::font_settings::set_gamma(1.0);
+    agg_gui::font_settings::set_width(1.0);
+    agg_gui::font_settings::set_interval(0.0);
+    agg_gui::font_settings::set_faux_weight(0.0);
+    agg_gui::font_settings::set_faux_italic(0.0);
+    agg_gui::font_settings::set_primary_weight(1.0 / 3.0);
 
     let window_attributes = WindowAttributes::default()
         .with_title("AtomArtist")
