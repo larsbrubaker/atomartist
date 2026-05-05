@@ -807,8 +807,12 @@ dependencies = [
  "atomartist-renderer",
  "atomartist-ui",
  "console_error_panic_hook",
+ "demo-wgpu",
+ "js-sys",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
+ "wgpu",
 ]
 
 [[package]]

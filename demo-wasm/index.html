@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AtomArtist</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: #f4f5f7;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    overflow: hidden;
+  }
+  #canvas {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+  }
+  #status {
+    position: fixed;
+    top: 8px; left: 8px;
+    font-size: 11px;
+    color: #888;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="canvas" width="1280" height="720"></canvas>
+<div id="status">Loading...</div>
+<script type="module">
+import init, {
+  render,
+  on_mouse_move,
+  on_mouse_down,
+  on_mouse_up,
+  on_mouse_wheel,
+} from './pkg/demo_wasm.js';
+
+async function main() {
+  await init();
+  document.getElementById('status').textContent = '';
+
+  const canvas = document.getElementById('canvas');
+  function resizeCanvas() {
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width  = Math.round(canvas.clientWidth  * dpr);
+    canvas.height = Math.round(canvas.clientHeight * dpr);
+  }
+  resizeCanvas();
+  window.addEventListener('resize', resizeCanvas);
+
+  // Translate browser mouse coords (top-left origin, CSS pixels) into
+  // physical-pixel coords matching what the agg-gui App expects on
+  // native (raw winit position). Multiply by devicePixelRatio so 1
+  // CSS pixel = 1 logical pixel on the canvas, accounting for HiDPI.
+  function evtCoords(e) {
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    return [(e.clientX - rect.left) * dpr, (e.clientY - rect.top) * dpr];
+  }
+  canvas.addEventListener('mousemove', e => {
+    const [x, y] = evtCoords(e);
+    on_mouse_move(x, y);
+  });
+  canvas.addEventListener('mousedown', e => {
+    const [x, y] = evtCoords(e);
+    on_mouse_down(x, y, e.button);
+  });
+  canvas.addEventListener('mouseup', e => {
+    const [x, y] = evtCoords(e);
+    on_mouse_up(x, y, e.button);
+  });
+  canvas.addEventListener('wheel', e => {
+    const [x, y] = evtCoords(e);
+    // -deltaY because browsers send positive deltaY when scrolling down
+    // but agg-gui expects positive when scrolling up (zoom in).
+    on_mouse_wheel(x, y, -e.deltaY);
+    e.preventDefault();
+  }, { passive: false });
+  // Disable the right-click context menu so the canvas's own menu wins.
+  canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+  function loop(t) {
+    render(canvas.width, canvas.height, t);
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+}
+main().catch(err => {
+  document.getElementById('status').textContent = 'Failed to load: ' + err;
+  console.error(err);
+});
+</script>
+</body>
+</html>

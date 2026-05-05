@@ -49,8 +49,10 @@ cargo install wasm-pack basic-http-server
 
 # Build + serve:
 wasm-pack build demo-wasm --target web
-basic-http-server .
-# Open http://localhost:4000/
+cd demo-wasm && basic-http-server .
+# Open the URL printed (default http://127.0.0.1:4000/) and visit
+# /index.html — the page mounts the AtomArtist UI on a full-window
+# canvas via wgpu's WebGL2 backend.
 ```
 
 ### Tests
