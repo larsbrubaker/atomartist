@@ -802,11 +802,13 @@ dependencies = [
 name = "demo-wasm"
 version = "0.0.1"
 dependencies = [
+ "agg-gui",
  "atomartist-lib",
  "atomartist-renderer",
  "atomartist-ui",
  "console_error_panic_hook",
  "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]

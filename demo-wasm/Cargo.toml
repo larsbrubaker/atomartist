@@ -11,8 +11,13 @@ description = "AtomArtist WASM shell — wasm-bindgen entry, browser window/canv
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+agg-gui                  = { path = "../../agg-gui/agg-gui", default-features = false }
 atomartist-lib           = { path = "../atomartist-lib" }
 atomartist-renderer      = { path = "../atomartist-renderer" }
 atomartist-ui            = { path = "../atomartist-ui" }
 wasm-bindgen             = "0.2"
 console_error_panic_hook = "0.1"
+
+[dependencies.web-sys]
+version  = "0.3"
+features = ["Window", "Document", "Element", "HtmlCanvasElement", "console"]
