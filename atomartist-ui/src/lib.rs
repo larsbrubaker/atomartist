@@ -8,6 +8,7 @@
 pub mod app_state;
 pub mod canvas_draw;
 pub mod canvas_widget;
+pub mod status_bar;
 pub mod top_level;
 pub mod top_menu_bar;
 

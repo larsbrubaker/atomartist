@@ -14,6 +14,7 @@ use atomartist_renderer::{Viewport3dWidget, ViewportInputs};
 
 use crate::app_state::AppState;
 use crate::canvas_widget::NodeCanvas;
+use crate::status_bar::StatusBar;
 use crate::top_menu_bar::{build_menu_bar_sized, FileDialogProvider};
 #[cfg(test)]
 use crate::top_menu_bar::NoFileDialogs;
@@ -75,11 +76,15 @@ pub fn build_app(state: AppState, dialogs: Arc<dyn FileDialogProvider>) -> Box<d
             .with_v_anchor(VAnchor::STRETCH),
     );
 
+    let status: Box<dyn Widget> = Box::new(StatusBar::new(state.clone()));
+
+    // FlexColumn lays out top→bottom in Y-up coords (first add = top).
     let column = FlexColumn::new()
         .with_h_anchor(HAnchor::STRETCH)
         .with_v_anchor(VAnchor::STRETCH)
         .add(top_row)
-        .add_flex(split, 1.0);
+        .add_flex(split, 1.0)
+        .add(status);
     Box::new(column)
 }
 
