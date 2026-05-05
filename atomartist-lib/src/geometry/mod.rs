@@ -12,4 +12,7 @@ pub use mesh3d::{
     apply_transform, bounds, compute_flat_normals, get_normal, get_pos, make_mesh, merge_meshes,
     num_tris, num_verts, NUM_PROP, STRIDE,
 };
-pub use primitives::{generate_box, generate_cylinder, generate_sphere};
+pub use primitives::{
+    generate_box, generate_cone, generate_cylinder, generate_pyramid, generate_sphere,
+    generate_torus, generate_wedge,
+};

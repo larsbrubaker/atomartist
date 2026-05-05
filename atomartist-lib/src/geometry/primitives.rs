@@ -117,6 +117,231 @@ pub fn generate_cylinder(radius: f64, height: f64, segments: u32) -> MeshGL {
     make_mesh(verts, tris)
 }
 
+/// Cone with apex at top, circular base at bottom, both centered on Y.
+/// `radius` is the base radius; the apex sits at +height/2.
+pub fn generate_cone(radius: f64, height: f64, segments: u32) -> MeshGL {
+    let segments = segments.max(3);
+    let r = radius as f32;
+    let h = (height * 0.5) as f32;
+
+    let mut verts: Vec<f32> = Vec::new();
+    let mut tris: Vec<u32> = Vec::new();
+
+    // Side triangles — each one has its own outward-facing normal
+    // (apex is shared geometry-wise but we duplicate verts so flat
+    // shading works per face).
+    for i in 0..segments {
+        let a0 = (i as f32) / (segments as f32) * std::f32::consts::TAU;
+        let a1 = ((i + 1) as f32) / (segments as f32) * std::f32::consts::TAU;
+        let (x0, z0) = (a0.cos() * r, a0.sin() * r);
+        let (x1, z1) = (a1.cos() * r, a1.sin() * r);
+        let nx = (a0.cos() + a1.cos()) * 0.5;
+        let nz = (a0.sin() + a1.sin()) * 0.5;
+        // Normal slants up toward apex — the slope is roughly
+        // (radius, height) so angle = atan2(radius, height).
+        let slope_y = (r / height as f32).max(0.0);
+        let n_len = (nx * nx + nz * nz + slope_y * slope_y).sqrt().max(1e-6);
+        let n = [nx / n_len, slope_y / n_len, nz / n_len];
+
+        let base = (verts.len() / NUM_PROP as usize) as u32;
+        // base-back, base-front, apex; CCW from outside requires the
+        // apex to be visited BEFORE the second base vert.
+        for &(x, y, z) in &[(x0, -h, z0), (x1, -h, z1), (0.0, h, 0.0)] {
+            verts.extend_from_slice(&[x, y, z]);
+            verts.extend_from_slice(&n);
+        }
+        tris.extend_from_slice(&[base, base + 2, base + 1]);
+    }
+
+    // Bottom cap — fan from center, normal -Y.
+    let bot_center = (verts.len() / NUM_PROP as usize) as u32;
+    verts.extend_from_slice(&[0.0, -h, 0.0, 0.0, -1.0, 0.0]);
+    let bot_ring_start = (verts.len() / NUM_PROP as usize) as u32;
+    for i in 0..segments {
+        let a = (i as f32) / (segments as f32) * std::f32::consts::TAU;
+        verts.extend_from_slice(&[a.cos() * r, -h, a.sin() * r, 0.0, -1.0, 0.0]);
+    }
+    for i in 0..segments {
+        let v0 = bot_center;
+        let v1 = bot_ring_start + i;
+        let v2 = bot_ring_start + ((i + 1) % segments);
+        tris.extend_from_slice(&[v0, v1, v2]);
+    }
+
+    make_mesh(verts, tris)
+}
+
+/// Torus centered at origin in the XZ plane. `major_r` is the distance
+/// from center to ring center, `minor_r` is the tube radius.
+pub fn generate_torus(major_r: f64, minor_r: f64, segments_major: u32, segments_minor: u32) -> MeshGL {
+    let su = segments_major.max(3);
+    let sv = segments_minor.max(3);
+    let r_major = major_r as f32;
+    let r_minor = minor_r as f32;
+
+    let mut verts: Vec<f32> = Vec::with_capacity(((su + 1) * (sv + 1)) as usize * NUM_PROP as usize);
+    let mut tris: Vec<u32> = Vec::new();
+
+    // Vertex grid (su+1) × (sv+1) — closed seams have duplicate verts
+    // so smooth normals work cleanly across the wrap.
+    for j in 0..=sv {
+        let v = j as f32 / sv as f32;
+        let phi = v * std::f32::consts::TAU;
+        let cos_phi = phi.cos();
+        let sin_phi = phi.sin();
+        for i in 0..=su {
+            let u = i as f32 / su as f32;
+            let theta = u * std::f32::consts::TAU;
+            let cos_th = theta.cos();
+            let sin_th = theta.sin();
+            // Position on the torus surface.
+            let x = (r_major + r_minor * cos_phi) * cos_th;
+            let y = r_minor * sin_phi;
+            let z = (r_major + r_minor * cos_phi) * sin_th;
+            // Normal — vector from the ring center to the point.
+            let nx = cos_phi * cos_th;
+            let ny = sin_phi;
+            let nz = cos_phi * sin_th;
+            verts.extend_from_slice(&[x, y, z, nx, ny, nz]);
+        }
+    }
+    let stride_u = su + 1;
+    for j in 0..sv {
+        for i in 0..su {
+            let v00 = j * stride_u + i;
+            let v10 = j * stride_u + (i + 1);
+            let v01 = (j + 1) * stride_u + i;
+            let v11 = (j + 1) * stride_u + (i + 1);
+            tris.extend_from_slice(&[v00, v10, v11, v00, v11, v01]);
+        }
+    }
+    make_mesh(verts, tris)
+}
+
+/// Square-base pyramid — `width × depth` rectangular base centered at
+/// origin, apex at +height/2.
+pub fn generate_pyramid(width: f64, height: f64, depth: f64) -> MeshGL {
+    let w = (width * 0.5) as f32;
+    let h = (height * 0.5) as f32;
+    let d = (depth * 0.5) as f32;
+    let apex = [0.0f32, h, 0.0f32];
+
+    let mut verts: Vec<f32> = Vec::new();
+    let mut tris: Vec<u32> = Vec::new();
+
+    // Four side triangles, each with its own normal.
+    let sides: [([f32; 3], [f32; 3]); 4] = [
+        // (base-left, base-right) for face viewed from outside.
+        ([-w, -h,  d], [ w, -h,  d]),  // +Z face
+        ([ w, -h,  d], [ w, -h, -d]),  // +X face
+        ([ w, -h, -d], [-w, -h, -d]),  // -Z face
+        ([-w, -h, -d], [-w, -h,  d]),  // -X face
+    ];
+    for (left, right) in sides {
+        // Compute face normal by cross product.
+        let e1 = [right[0] - left[0], right[1] - left[1], right[2] - left[2]];
+        let e2 = [apex[0] - left[0], apex[1] - left[1], apex[2] - left[2]];
+        let n = [
+            e1[1] * e2[2] - e1[2] * e2[1],
+            e1[2] * e2[0] - e1[0] * e2[2],
+            e1[0] * e2[1] - e1[1] * e2[0],
+        ];
+        let nl = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-6);
+        let nn = [n[0] / nl, n[1] / nl, n[2] / nl];
+        let base = (verts.len() / NUM_PROP as usize) as u32;
+        for &p in &[left, right, apex] {
+            verts.extend_from_slice(&p);
+            verts.extend_from_slice(&nn);
+        }
+        tris.extend_from_slice(&[base, base + 1, base + 2]);
+    }
+
+    // Bottom face — two triangles, normal -Y.
+    let base = (verts.len() / NUM_PROP as usize) as u32;
+    let bot_n = [0.0f32, -1.0f32, 0.0f32];
+    for &(x, y, z) in &[(-w, -h, -d), (w, -h, -d), (w, -h, d), (-w, -h, d)] {
+        verts.extend_from_slice(&[x, y, z]);
+        verts.extend_from_slice(&bot_n);
+    }
+    // Standard winding (0,1,2), (0,2,3) — gives outward = -Y because
+    // the verts are laid out CCW when viewed from -Y looking up to +Y.
+    tris.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+
+    make_mesh(verts, tris)
+}
+
+/// Wedge — a triangular prism with the right-triangle cross-section in
+/// the XY plane and depth along Z. The apex of the triangle is at
+/// (+w/2, +h/2), the right-angle corner at (-w/2, -h/2).
+pub fn generate_wedge(width: f64, height: f64, depth: f64) -> MeshGL {
+    let w = (width * 0.5) as f32;
+    let h = (height * 0.5) as f32;
+    let d = (depth * 0.5) as f32;
+
+    // 6 unique geometric points but we need 18 vertices total (3 per
+    // face × 6 faces) for flat shading. Simpler to just enumerate.
+    let mut verts: Vec<f32> = Vec::new();
+    let mut tris: Vec<u32> = Vec::new();
+
+    // Helper: emit a quad with given verts + normal.
+    let mut emit_quad = |corners: [[f32; 3]; 4], n: [f32; 3], v: &mut Vec<f32>, t: &mut Vec<u32>| {
+        let base = (v.len() / NUM_PROP as usize) as u32;
+        for c in corners {
+            v.extend_from_slice(&c);
+            v.extend_from_slice(&n);
+        }
+        t.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    };
+    let mut emit_tri = |corners: [[f32; 3]; 3], n: [f32; 3], v: &mut Vec<f32>, t: &mut Vec<u32>| {
+        let base = (v.len() / NUM_PROP as usize) as u32;
+        for c in corners {
+            v.extend_from_slice(&c);
+            v.extend_from_slice(&n);
+        }
+        t.extend_from_slice(&[base, base + 1, base + 2]);
+    };
+
+    // Bottom face (-Y)
+    emit_quad(
+        [[-w, -h, -d], [w, -h, -d], [w, -h, d], [-w, -h, d]],
+        [0.0, -1.0, 0.0],
+        &mut verts, &mut tris,
+    );
+    // Back face (-X) — vertical rectangle
+    emit_quad(
+        [[-w, -h, -d], [-w, -h, d], [-w, h, d], [-w, h, -d]],
+        [-1.0, 0.0, 0.0],
+        &mut verts, &mut tris,
+    );
+    // Slanted top (the hypotenuse face) — normal points up-and-out.
+    // Plane through (w,-h,*) and (-w,h,*). Outward normal in XY is
+    // (h, w) normalized. Reverse winding from the natural enumeration
+    // so the cross product gives +X+Y instead of -X-Y.
+    let nx = h;
+    let ny = w;
+    let nl = (nx * nx + ny * ny).sqrt().max(1e-6);
+    let slope_n = [nx / nl, ny / nl, 0.0];
+    emit_quad(
+        [[-w, h, -d], [-w, h, d], [w, -h, d], [w, -h, -d]],
+        slope_n,
+        &mut verts, &mut tris,
+    );
+    // Front cap (+Z)
+    emit_tri(
+        [[-w, -h, d], [w, -h, d], [-w, h, d]],
+        [0.0, 0.0, 1.0],
+        &mut verts, &mut tris,
+    );
+    // Back cap (-Z)
+    emit_tri(
+        [[w, -h, -d], [-w, -h, -d], [-w, h, -d]],
+        [0.0, 0.0, -1.0],
+        &mut verts, &mut tris,
+    );
+
+    make_mesh(verts, tris)
+}
+
 /// UV sphere centered at origin. `segments_u` is the longitudinal count
 /// (around Y), `segments_v` the latitudinal count (from south to north
 /// pole). Smooth-shaded — the normal at each vertex is its outward

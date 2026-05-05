@@ -1,0 +1,475 @@
+{
+    "last_node_id": 23,
+    "last_link_id": 67,
+    "nodes": [
+        {
+            "id": 5,
+            "type": "graph/output",
+            "pos": [1963, 287],
+            "size": [253.60000610351562, 90.54017639160156],
+            "flags": {},
+            "order": 5,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "Boolean - Geometry",
+                    "type": "geometry",
+                    "noodle": 67,
+                    "socket_id": "d8b09c5d-8026-4e17-b47a-0283bd0cdc46"
+                },
+                {
+                    "name": "",
+                    "type": 0,
+                    "noodle": null,
+                    "socket_id": "d3c08f52-45e9-4c97-951c-e4210f5d2e45"
+                }
+            ],
+            "properties": {
+                "inputSockets": [
+                    {
+                        "name": "Boolean - Geometry",
+                        "type": "geometry",
+                        "name_in_graph": "Geometry"
+                    }
+                ]
+            }
+        },
+        {
+            "id": 18,
+            "type": "geometry/align",
+            "pos": [1457, 287],
+            "size": [210, 331.8],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "Primary",
+                    "type": "geometry",
+                    "noodle": 57,
+                    "socket_id": "1779a9a8-63d6-496e-8e34-dd19855beeda",
+                    "_labelHovered": false
+                },
+                {
+                    "name": "Secondary",
+                    "type": "geometry",
+                    "noodle": 49,
+                    "socket_id": "14b92efe-b3eb-4cf6-8ed6-4c6740d741e2",
+                    "_labelHovered": false
+                },
+                {
+                    "name": "X Align",
+                    "type": "string",
+                    "noodle": null,
+                    "socket_id": "506a5e26-765f-49b8-b183-867c2ac11d82"
+                },
+                {
+                    "name": "X Sub",
+                    "type": "string",
+                    "noodle": null,
+                    "socket_id": "3bc9adb6-705c-4d54-af9c-36ee33a30097"
+                },
+                {
+                    "name": "X Offset",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "ba55c123-c930-4826-be60-92b04164fa01"
+                },
+                {
+                    "name": "Y Align",
+                    "type": "string",
+                    "noodle": null,
+                    "socket_id": "cafacee4-c626-40f0-98ed-bc33b5cab6bb"
+                },
+                {
+                    "name": "Y Sub",
+                    "type": "string",
+                    "noodle": null,
+                    "socket_id": "26b2ad95-2c74-43ec-8b9c-fbee2ae4e5e2"
+                },
+                {
+                    "name": "Y Offset",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "e3a32738-dd54-4f2b-a020-c23d69ba249d"
+                },
+                {
+                    "name": "Z Align",
+                    "type": "string",
+                    "noodle": null,
+                    "socket_id": "3ea54efc-bdb8-438d-887b-f35f9b1fcab8"
+                },
+                {
+                    "name": "Z Sub",
+                    "type": "string",
+                    "noodle": null,
+                    "socket_id": "0480593e-7e02-48d2-9d89-bfdd1545923d"
+                },
+                {
+                    "name": "Z Offset",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "ca261808-6043-4c1d-a71c-10636c6f9f2e"
+                }
+            ],
+            "outputSockets": [
+                {
+                    "name": "Primary",
+                    "type": "geometry",
+                    "noodles": [32, 50],
+                    "socket_id": "71cfdf9f-b895-454b-aec8-702a13e806cd",
+                    "socket_index": 0
+                },
+                {
+                    "name": "Secondary",
+                    "type": "geometry",
+                    "noodles": [46, 53],
+                    "socket_id": "a86a08fc-b0be-49fa-a4b8-86dba9a5676e",
+                    "socket_index": 1
+                }
+            ],
+            "properties": {
+                "alignX": "Max",
+                "subAlignX": "None",
+                "offsetX": 0,
+                "alignY": "None",
+                "subAlignY": "None",
+                "offsetY": 0,
+                "alignZ": "Min",
+                "subAlignZ": "None",
+                "offsetZ": 0
+            }
+        },
+        {
+            "id": 19,
+            "type": "geometry/transform",
+            "pos": [1204, 389],
+            "size": [210, 105.4],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "Geometry",
+                    "type": "geometry",
+                    "noodle": 56,
+                    "socket_id": "83523e42-ed8a-41f9-87d2-a895183a4694",
+                    "_labelHovered": false
+                },
+                {
+                    "name": "Matrix",
+                    "type": "matrix",
+                    "noodle": null,
+                    "socket_id": "dba51dae-a5c1-4a8c-8c94-336ea5c8ef63"
+                }
+            ],
+            "outputSockets": [
+                {
+                    "name": "Geometry",
+                    "type": "geometry",
+                    "noodles": [49],
+                    "socket_id": "b83894ae-996a-4ec6-8cf8-d44f6fa55cee",
+                    "socket_index": 0
+                }
+            ],
+            "properties": {
+                "bakeTransform": false,
+                "matrix": [6.123234262925839e-17, 0, 1, 0, 0, 1, 0, 0, -1, 0, 6.123234262925839e-17, 0, 0, 0, 0, 1]
+            }
+        },
+        {
+            "id": 20,
+            "type": "geometry/combine",
+            "pos": [1710, 287],
+            "size": [210, 147.8],
+            "flags": {},
+            "order": 4,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "Primary",
+                    "type": "geometry",
+                    "noodle": 50,
+                    "socket_id": "8d11d146-a377-4d8b-97c4-f33c3fa38d4f",
+                    "_labelHovered": false
+                },
+                {
+                    "name": "Secondary",
+                    "type": "geometry",
+                    "noodle": 53,
+                    "socket_id": "d8dd97a3-8d0c-49db-89ab-70ffc3df5254",
+                    "_labelHovered": false
+                },
+                {
+                    "name": "Operation",
+                    "type": "string",
+                    "noodle": null,
+                    "socket_id": "b3b76df6-ceda-40da-b9bf-abaf8fe6ddec"
+                },
+                {
+                    "name": "Color",
+                    "type": "color",
+                    "noodle": null,
+                    "socket_id": "a3b2f611-1674-4452-8795-7801034d4ea2"
+                },
+                {
+                    "name": "Matrix",
+                    "type": "matrix",
+                    "noodle": null,
+                    "socket_id": "7f049776-d392-41d1-8d4e-6566c0ff0030"
+                }
+            ],
+            "outputSockets": [
+                {
+                    "name": "Geometry",
+                    "type": "geometry",
+                    "noodles": [52, 67],
+                    "socket_id": "8734cf45-881e-4e1c-ae43-cb540524a4ab",
+                    "socket_index": 0
+                }
+            ],
+            "properties": {
+                "operation": "union",
+                "color": null,
+                "matrix": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+            }
+        },
+        {
+            "id": 21,
+            "type": "graph/component-instance",
+            "pos": [933, 287],
+            "size": [228.39999389648438, 159],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "Diameter",
+                    "type": "number",
+                    "noodle": 58,
+                    "socket_id": "a54a4489-308b-47d3-bb4b-c67fb7b17347"
+                },
+                {
+                    "name": "Head",
+                    "type": "number",
+                    "noodle": 62,
+                    "socket_id": "813b6ed2-1c86-46ad-8ec8-5afbf14ce0fa"
+                },
+                {
+                    "name": "Width",
+                    "type": "number",
+                    "noodle": 59,
+                    "socket_id": "ca0bf938-12d4-4b9c-929e-bb6d2c0bde03"
+                },
+                {
+                    "name": "Depth",
+                    "type": "number",
+                    "noodle": 60,
+                    "socket_id": "d89e18f0-fcaa-4d67-ae0b-d7b9f1cf5cd2"
+                },
+                {
+                    "name": "Height",
+                    "type": "number",
+                    "noodle": 61,
+                    "socket_id": "982d92c1-4dc7-488b-ac42-5a6d2d94e10c"
+                }
+            ],
+            "outputSockets": [
+                {
+                    "name": "Boolean - Geometry",
+                    "type": "geometry",
+                    "noodles": [56, 57],
+                    "socket_id": "c3422bb0-4088-4668-9d5f-99a22fb32b7c"
+                }
+            ],
+            "title": "Side With Holes",
+            "properties": {
+                "componentId": null,
+                "componentName": "Side With Holes",
+                "inputValues": {},
+                "examplePath": "Components/Edge Bracket/Components/Side With Holes.example"
+            }
+        },
+        {
+            "id": 22,
+            "type": "graph/input",
+            "pos": [680, 287],
+            "size": [210, 183],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "outputSockets": [
+                {
+                    "name": "",
+                    "type": "number",
+                    "noodles": [58],
+                    "socket_id": "fb4b19b5-8ae8-4307-a37a-303c75dc0596",
+                    "socket_index": 0
+                },
+                {
+                    "name": "",
+                    "type": "number",
+                    "noodles": [62],
+                    "socket_id": "19edf454-defe-4452-b00d-ec8f9b627569",
+                    "socket_index": 4,
+                    "_labelHovered": false
+                },
+                {
+                    "name": "",
+                    "type": "number",
+                    "noodles": [59],
+                    "socket_id": "370291ce-57c5-453b-9582-4c075c15f658",
+                    "socket_index": 1
+                },
+                {
+                    "name": "",
+                    "type": "number",
+                    "noodles": [60],
+                    "socket_id": "978ccaf8-9aa5-41eb-8679-5678af63dcec",
+                    "socket_index": 2
+                },
+                {
+                    "name": "",
+                    "type": "number",
+                    "noodles": [61],
+                    "socket_id": "5ed038a2-732c-4aa1-9828-3d9fb9269a71",
+                    "socket_index": 3,
+                    "_labelHovered": false
+                },
+                {
+                    "name": "",
+                    "type": "",
+                    "noodles": null,
+                    "socket_id": "49f1fd31-a68a-4111-b021-fbafbe5713bc"
+                }
+            ],
+            "properties": {
+                "outputSockets": [
+                    {
+                        "name": "Diameter",
+                        "type": "number",
+                        "value": 3,
+                        "widgetConfig": {
+                            "type": "slider",
+                            "name": "Diameter",
+                            "value": 3,
+                            "options": {
+                                "min": 1,
+                                "max": 30,
+                                "step": 0.1
+                            }
+                        },
+                        "name_in_graph": "Diameter"
+                    },
+                    {
+                        "name": "Head",
+                        "type": "number",
+                        "value": 5,
+                        "widgetConfig": {
+                            "type": "slider",
+                            "name": "Head",
+                            "value": 5,
+                            "options": {
+                                "min": 1,
+                                "max": 50,
+                                "step": 1
+                            }
+                        },
+                        "name_in_graph": "Head"
+                    },
+                    {
+                        "name": "Width",
+                        "type": "number",
+                        "value": 20,
+                        "widgetConfig": {
+                            "type": "slider",
+                            "name": "Width",
+                            "value": 20,
+                            "options": {
+                                "min": 1,
+                                "max": 50,
+                                "step": 0.1
+                            }
+                        },
+                        "name_in_graph": "Width"
+                    },
+                    {
+                        "name": "Depth",
+                        "type": "number",
+                        "value": 50,
+                        "widgetConfig": {
+                            "type": "slider",
+                            "name": "Depth",
+                            "value": 50,
+                            "options": {
+                                "min": 1,
+                                "max": 50,
+                                "step": 0.1
+                            }
+                        },
+                        "name_in_graph": "Depth"
+                    },
+                    {
+                        "name": "Height",
+                        "type": "number",
+                        "value": 3,
+                        "widgetConfig": {
+                            "type": "slider",
+                            "name": "Height",
+                            "value": 3,
+                            "options": {
+                                "min": -50,
+                                "max": 50,
+                                "step": 0.1
+                            }
+                        },
+                        "name_in_graph": "Height"
+                    }
+                ]
+            }
+        }
+    ],
+    "noodles": [
+        [49, 19, "b83894ae-996a-4ec6-8cf8-d44f6fa55cee", 18, "14b92efe-b3eb-4cf6-8ed6-4c6740d741e2", "geometry"],
+        [50, 18, "71cfdf9f-b895-454b-aec8-702a13e806cd", 20, "8d11d146-a377-4d8b-97c4-f33c3fa38d4f", "geometry"],
+        [53, 18, "a86a08fc-b0be-49fa-a4b8-86dba9a5676e", 20, "d8dd97a3-8d0c-49db-89ab-70ffc3df5254", "geometry"],
+        [56, 21, "c3422bb0-4088-4668-9d5f-99a22fb32b7c", 19, "83523e42-ed8a-41f9-87d2-a895183a4694", "geometry"],
+        [57, 21, "c3422bb0-4088-4668-9d5f-99a22fb32b7c", 18, "1779a9a8-63d6-496e-8e34-dd19855beeda", "geometry"],
+        [58, 22, "fb4b19b5-8ae8-4307-a37a-303c75dc0596", 21, "a54a4489-308b-47d3-bb4b-c67fb7b17347", "number"],
+        [59, 22, "370291ce-57c5-453b-9582-4c075c15f658", 21, "ca0bf938-12d4-4b9c-929e-bb6d2c0bde03", "number"],
+        [60, 22, "978ccaf8-9aa5-41eb-8679-5678af63dcec", 21, "d89e18f0-fcaa-4d67-ae0b-d7b9f1cf5cd2", "number"],
+        [61, 22, "5ed038a2-732c-4aa1-9828-3d9fb9269a71", 21, "982d92c1-4dc7-488b-ac42-5a6d2d94e10c", "number"],
+        [62, 22, "19edf454-defe-4452-b00d-ec8f9b627569", 21, "813b6ed2-1c86-46ad-8ec8-5afbf14ce0fa", "number"],
+        [67, 20, "8734cf45-881e-4e1c-ae43-cb540524a4ab", 5, "d8b09c5d-8026-4e17-b47a-0283bd0cdc46", "geometry"]
+    ],
+    "config": {},
+    "extra": {},
+    "version": 0.4,
+    "viewState": {
+        "scale": 1.1597281524146936,
+        "offset": [-621.519775390625, -203]
+    },
+    "dividerPosition": 37.1661,
+    "cameraState": {
+        "position": {
+            "x": -31.30513550453962,
+            "y": -30.86943121180667,
+            "z": 38.57005915348854
+        },
+        "target": {
+            "x": 3.344922442729479,
+            "y": 0.20995159615301962,
+            "z": 1.7424271815447239
+        },
+        "initialPosition": {
+            "x": -4.739360294326125,
+            "y": -47.39360294326124,
+            "z": 37.914882354609
+        },
+        "initialTarget": {
+            "x": 0,
+            "y": 0,
+            "z": 2.5
+        }
+    }
+}

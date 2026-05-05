@@ -1,0 +1,321 @@
+{
+    "last_node_id": 24,
+    "last_link_id": 35,
+    "nodes": [
+        {
+            "id": 6,
+            "type": "io/image_url",
+            "pos": [229, -40],
+            "size": [308, 253],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+                {
+                    "link": null,
+                    "name": "URL",
+                    "type": "string",
+                    "socket_id": "40bcf5e1-d5e9-4371-aa9d-1a66f831203d"
+                }
+            ],
+            "outputs": [
+                {
+                    "links": [4],
+                    "name": "Image",
+                    "slot_index": 0,
+                    "type": "image",
+                    "socket_id": "f5be8979-454c-4301-ae96-cdfd9fe3d47a"
+                }
+            ],
+            "properties": {
+                "url": "/node-designer/static/test_json/images/round-cut.png"
+            },
+            "widgets_values": ["/node-designer/static/test_json/images/round-cut.png"],
+            "boxcolor": "#9F9"
+        },
+        {
+            "id": 7,
+            "type": "image/alpha_to_path",
+            "pos": [566, -40],
+            "size": [261.20735977783215, 403.89366367187506],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [
+                {
+                    "link": 4,
+                    "name": "Image",
+                    "type": "image",
+                    "socket_id": "b6024805-0fb5-4c51-ac97-83ce45706c33"
+                },
+                {
+                    "link": null,
+                    "name": "Threshold",
+                    "type": "number",
+                    "socket_id": "c83a71db-cfed-45ee-8a33-88d62a31750a"
+                },
+                {
+                    "link": null,
+                    "name": "Min Surface Area",
+                    "type": "number",
+                    "socket_id": "1786eb1c-74a9-4410-a3ba-23303e4b3409"
+                },
+                {
+                    "link": 27,
+                    "name": "Alpha Field",
+                    "type": "field",
+                    "socket_id": "c8c8a816-bd49-4d85-939c-eed5fbed202d"
+                }
+            ],
+            "outputs": [
+                {
+                    "links": [28],
+                    "name": "Paths",
+                    "slot_index": 0,
+                    "type": "paths",
+                    "socket_id": "1ec7ab18-35d2-44d2-a305-f841ef9a4241"
+                }
+            ],
+            "properties": {
+                "threshold": 0.05,
+                "minSurfaceArea": 0,
+                "useField": false
+            }
+        },
+        {
+            "id": 8,
+            "type": "geometry/smooth_paths",
+            "pos": [853, -40],
+            "size": [210, 102],
+            "flags": {},
+            "order": 4,
+            "mode": 0,
+            "inputs": [
+                {
+                    "link": 28,
+                    "name": "Paths",
+                    "type": "paths",
+                    "socket_id": "f31ec4cd-4f43-4079-b552-8b99d1b466bd"
+                },
+                {
+                    "link": null,
+                    "name": "Distance",
+                    "type": "number",
+                    "socket_id": "3c7cc3c2-1f35-4d83-9dc8-c5a8799b0e80"
+                },
+                {
+                    "link": null,
+                    "name": "Iterations",
+                    "type": "number",
+                    "socket_id": "16438e06-cd1e-4181-9c19-8349a84311d6"
+                }
+            ],
+            "outputs": [
+                {
+                    "links": [22],
+                    "name": "Paths",
+                    "slot_index": 0,
+                    "type": "paths",
+                    "socket_id": "73b24f18-b4eb-4ed5-91e4-053c4008f27a"
+                }
+            ],
+            "properties": {
+                "distance": 0.3,
+                "iterations": 3
+            }
+        },
+        {
+            "id": 10,
+            "type": "geometry/extrude",
+            "pos": [1089, -40],
+            "size": [210.2897888183595, 174],
+            "flags": {},
+            "order": 5,
+            "mode": 0,
+            "inputs": [
+                {
+                    "link": 22,
+                    "name": "Paths",
+                    "type": "paths",
+                    "socket_id": "da2311ca-0aa2-4108-bb7d-aa98d2829ac9"
+                },
+                {
+                    "link": null,
+                    "name": "Height",
+                    "type": "number",
+                    "socket_id": "059ee5cf-7e00-4225-b27b-fe09fca5201d"
+                },
+                {
+                    "name": "Radius",
+                    "type": "number",
+                    "link": null,
+                    "socket_id": "2484269c-2517-4444-bc73-9272e79ec432"
+                },
+                {
+                    "name": "Segments",
+                    "type": "number",
+                    "link": null,
+                    "socket_id": "0051c1ba-7c4b-4826-a1d6-d7e22b7a0e05"
+                },
+                {
+                    "name": "Color",
+                    "type": "color",
+                    "link": null,
+                    "socket_id": "b570f346-7372-44b4-b9c2-45a7e342338c"
+                },
+                {
+                    "name": "Matrix",
+                    "type": "matrix",
+                    "link": null,
+                    "socket_id": "91b89590-2c13-441a-b21e-042a72284a8c"
+                }
+            ],
+            "outputs": [
+                {
+                    "links": [35],
+                    "name": "Geometry",
+                    "slot_index": 0,
+                    "type": "geometry",
+                    "socket_id": "edf8015f-a74f-48e6-9373-6555d2b92738"
+                }
+            ],
+            "properties": {
+                "height": 7.042857142857184,
+                "bevelRadius": 0,
+                "bevelSegments": 3,
+                "color": "#ffffff",
+                "matrix": null
+            }
+        },
+        {
+            "id": 14,
+            "type": "field/color",
+            "pos": [74.80019287109376, 253],
+            "size": [180, 60],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "outputs": [
+                {
+                    "links": [26],
+                    "name": "Color",
+                    "slot_index": 0,
+                    "type": "field",
+                    "socket_id": "cad785e5-149f-4095-bac1-7031dfba38d4"
+                }
+            ],
+            "properties": {}
+        },
+        {
+            "id": 17,
+            "type": "field/formula",
+            "pos": [281, 253],
+            "size": [259.1997888183595, 158],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [
+                {
+                    "link": 26,
+                    "name": "Color",
+                    "type": "field",
+                    "socket_id": "076a5296-ba6b-4d75-a835-4eeb023e5f50"
+                },
+                {
+                    "link": null,
+                    "name": "Position",
+                    "type": "field",
+                    "socket_id": "eceeaad0-310f-4a8f-8546-f9ff2d838f80"
+                },
+                {
+                    "link": null,
+                    "name": "Index",
+                    "type": "field",
+                    "socket_id": "c627e495-b48a-4853-bc9e-82556c0c8090"
+                }
+            ],
+            "outputs": [
+                {
+                    "links": [27],
+                    "name": "Value",
+                    "slot_index": 0,
+                    "type": "field",
+                    "socket_id": "5b3d0a41-b5db-4c2a-bf4a-99f2fb6719fc"
+                }
+            ],
+            "properties": {
+                "formula": "const intensity = color ? 1 - (color.r * 0.299 + color.g * 0.587 + color.b * 0.114) : 0\nconst dx = x - width/2;\nconst dy = y - height/2;\nconst maxDist = Math.sqrt((width/2)*(width/2) + (height/2)*(height/2));\nconst radial = 1 - (Math.sqrt(dx*dx + dy*dy) / maxDist);\nintensity * radial"
+            }
+        },
+        {
+            "id": 24,
+            "type": "graph/output",
+            "pos": [1336, -40],
+            "size": [180, 88],
+            "flags": {},
+            "order": 6,
+            "mode": 0,
+            "inputs": [
+                {
+                    "name": "Geometry",
+                    "type": "geometry",
+                    "link": 35,
+                    "socket_id": "3f63f645-d8f4-458e-8d56-7544e02b9f7b"
+                },
+                {
+                    "name": "",
+                    "type": 0,
+                    "link": null,
+                    "socket_id": "55eb6071-6cb5-43fc-aad0-3c0e14b03daf"
+                }
+            ],
+            "properties": {
+                "inputs": [
+                    {
+                        "name": "Geometry",
+                        "type": "geometry",
+                        "name_in_graph": "Geometry"
+                    }
+                ]
+            }
+        }
+    ],
+    "links": [
+        [4, 6, "f5be8979-454c-4301-ae96-cdfd9fe3d47a", 7, "b6024805-0fb5-4c51-ac97-83ce45706c33", "image"],
+        [22, 8, "73b24f18-b4eb-4ed5-91e4-053c4008f27a", 10, "da2311ca-0aa2-4108-bb7d-aa98d2829ac9", "paths"],
+        [26, 14, "cad785e5-149f-4095-bac1-7031dfba38d4", 17, "076a5296-ba6b-4d75-a835-4eeb023e5f50", "field"],
+        [27, 17, "5b3d0a41-b5db-4c2a-bf4a-99f2fb6719fc", 7, "c8c8a816-bd49-4d85-939c-eed5fbed202d", "field"],
+        [28, 7, "1ec7ab18-35d2-44d2-a305-f841ef9a4241", 8, "f31ec4cd-4f43-4079-b552-8b99d1b466bd", "paths"],
+        [35, 10, "edf8015f-a74f-48e6-9373-6555d2b92738", 24, "3f63f645-d8f4-458e-8d56-7544e02b9f7b", "geometry"]
+    ],
+    "config": {},
+    "extra": {},
+    "version": 0.4,
+    "viewState": {
+        "scale": 0.8264462809917354,
+        "offset": [313.0602111816406, 127.2115707397461]
+    },
+    "dividerPosition": 43.7284,
+    "cameraState": {
+        "position": {
+            "x": 2.6336367877768754,
+            "y": -30.89020554228318,
+            "z": 49.20073476374927
+        },
+        "target": {
+            "x": 28.844841356786155,
+            "y": 90.77437524489542,
+            "z": -163.49631610140062
+        },
+        "initialPosition": {
+            "x": -18.155213193124364,
+            "y": -181.55213193124362,
+            "z": 145.24170554499491
+        },
+        "initialTarget": {
+            "x": 50.71549969911575,
+            "y": 5.842000037431717,
+            "z": 0.7785714268684387
+        }
+    }
+}

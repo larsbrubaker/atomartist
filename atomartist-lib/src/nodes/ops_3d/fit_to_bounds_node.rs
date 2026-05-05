@@ -1,0 +1,100 @@
+//! FitToBounds — uniformly scale the input mesh so its bounding box
+//! fits inside a target box (width × height × depth) centered at origin.
+
+use std::sync::Arc;
+
+use crate::geometry::{apply_transform, bounds};
+use crate::graph::node::PortValue;
+use crate::registry::{
+    NodeDef, NodeError, NodeInputs, NodeOutputs, NodeProperties, NodeRegistry, PropDef, SocketDef,
+};
+use crate::socket_types::SocketType;
+
+pub struct FitToBoundsNode;
+
+impl NodeDef for FitToBoundsNode {
+    fn type_id(&self) -> &'static str { "FitToBounds" }
+    fn display_name(&self) -> &'static str { "Fit to Bounds" }
+    fn category(&self) -> &'static str { "Operations 3D" }
+
+    fn input_sockets(&self) -> Vec<SocketDef> {
+        vec![SocketDef::required("input", SocketType::Geometry3d)]
+    }
+    fn output_sockets(&self) -> Vec<SocketDef> {
+        vec![SocketDef::required("out", SocketType::Geometry3d)]
+    }
+
+    fn properties(&self) -> Vec<PropDef> {
+        vec![
+            PropDef::new("width",  PortValue::Number(20.0)).with_range(0.001, 10_000.0),
+            PropDef::new("height", PortValue::Number(20.0)).with_range(0.001, 10_000.0),
+            PropDef::new("depth",  PortValue::Number(20.0)).with_range(0.001, 10_000.0),
+            // 0 = uniform (scale by smallest factor), 1 = stretch
+            PropDef::new("uniform", PortValue::Bool(true)),
+        ]
+    }
+
+    fn evaluate(&self, inputs: &NodeInputs, props: &NodeProperties) -> Result<NodeOutputs, NodeError> {
+        let input = match inputs.get("input") {
+            PortValue::Geometry3d(m) => m.clone(),
+            PortValue::None => return Ok(NodeOutputs::default()),
+            other => return Err(NodeError::msg(format!(
+                "FitToBounds: expected Geometry3d, got {:?}", other.socket_type()
+            ))),
+        };
+        let (mn, mx) = match bounds(&input) {
+            Some(b) => b,
+            None => {
+                let mut o = NodeOutputs::default();
+                o.set("out", PortValue::Geometry3d(input));
+                return Ok(o);
+            }
+        };
+        let cur = [
+            (mx[0] - mn[0]).max(1e-6),
+            (mx[1] - mn[1]).max(1e-6),
+            (mx[2] - mn[2]).max(1e-6),
+        ];
+        let target = [
+            props.number("width", 20.0) as f32,
+            props.number("height", 20.0) as f32,
+            props.number("depth", 20.0) as f32,
+        ];
+        let factor = [
+            target[0] / cur[0],
+            target[1] / cur[1],
+            target[2] / cur[2],
+        ];
+        let uniform = props.bool_("uniform", true);
+        let (sx, sy, sz) = if uniform {
+            let s = factor[0].min(factor[1]).min(factor[2]);
+            (s, s, s)
+        } else {
+            (factor[0], factor[1], factor[2])
+        };
+        // Scale around the model center.
+        let cx = (mn[0] + mx[0]) * 0.5;
+        let cy = (mn[1] + mx[1]) * 0.5;
+        let cz = (mn[2] + mx[2]) * 0.5;
+        let m = scale_about([cx, cy, cz], [sx, sy, sz]);
+        let result = apply_transform(&input, &m);
+        let mut out = NodeOutputs::default();
+        out.set("out", PortValue::Geometry3d(Arc::new(result)));
+        Ok(out)
+    }
+}
+
+fn scale_about(c: [f32; 3], s: [f32; 3]) -> [f32; 16] {
+    // T(c) · S · T(-c), column-major.
+    let tx = c[0] - s[0] * c[0];
+    let ty = c[1] - s[1] * c[1];
+    let tz = c[2] - s[2] * c[2];
+    [
+        s[0], 0.0,  0.0,  0.0,
+        0.0,  s[1], 0.0,  0.0,
+        0.0,  0.0,  s[2], 0.0,
+        tx,   ty,   tz,   1.0,
+    ]
+}
+
+pub fn register(reg: &mut NodeRegistry) { reg.register(FitToBoundsNode); }

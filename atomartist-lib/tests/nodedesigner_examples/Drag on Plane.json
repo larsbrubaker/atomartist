@@ -1,0 +1,512 @@
+{
+    "last_node_id": 21,
+    "last_link_id": 38,
+    "nodes": [
+        {
+            "id": 1,
+            "type": "geometry/rectangle",
+            "pos": [182, -81],
+            "size": {
+                "0": 210,
+                "1": 78
+            },
+            "flags": {},
+            "order": 7,
+            "mode": 0,
+            "inputs": [
+                {
+                    "name": "Width",
+                    "type": "number",
+                    "link": 36,
+                    "socket_id": "1a69058e-99f3-4169-bf6f-26d2253ac821"
+                },
+                {
+                    "name": "Depth",
+                    "type": "number",
+                    "link": 37,
+                    "socket_id": "01826a93-cd52-4fb5-bc41-bf6b5ec4ebb7"
+                }
+            ],
+            "outputs": [
+                {
+                    "name": "Paths",
+                    "type": "paths",
+                    "links": [4],
+                    "socket_id": "76e1d771-870b-4bf1-ad5c-a57d8884a3e1"
+                }
+            ],
+            "properties": {
+                "width": 20,
+                "depth": 20
+            }
+        },
+        {
+            "id": 3,
+            "type": "geometry/extrude",
+            "pos": [442, -81],
+            "size": [213.05409864802527, 174],
+            "flags": {},
+            "order": 8,
+            "mode": 0,
+            "inputs": [
+                {
+                    "name": "Paths",
+                    "type": "paths",
+                    "link": 4,
+                    "socket_id": "15ffedc9-c85c-4d9a-8b8c-f14d9663528d"
+                },
+                {
+                    "name": "Height",
+                    "type": "number",
+                    "link": null,
+                    "socket_id": "a0baeffe-b806-4791-9834-13e5a12f4ea2"
+                },
+                {
+                    "name": "Radius",
+                    "type": "number",
+                    "link": null,
+                    "socket_id": "d0136046-f18b-4b17-b82c-cd6575e415ab"
+                },
+                {
+                    "name": "Segments",
+                    "type": "number",
+                    "link": null,
+                    "socket_id": "ed0a5200-9aff-4144-a44a-1af6a137ca6d"
+                },
+                {
+                    "name": "Color",
+                    "type": "color",
+                    "link": null,
+                    "socket_id": "f57d865e-2387-4982-9c8b-bc6d639bbeac"
+                },
+                {
+                    "name": "Matrix",
+                    "type": "matrix",
+                    "link": null,
+                    "socket_id": "30dadfd3-d95a-4b51-ae84-c1338794e369"
+                }
+            ],
+            "outputs": [
+                {
+                    "name": "Geometry",
+                    "type": "geometry",
+                    "links": [14],
+                    "slot_index": 0,
+                    "socket_id": "5898d0dd-ef03-43c9-9da2-3bf8a8ab78bd"
+                }
+            ],
+            "properties": {
+                "height": 5,
+                "bevelRadius": 0,
+                "bevelSegments": 3,
+                "color": "#ffffff",
+                "matrix": null,
+                "bevelAngle": 0
+            }
+        },
+        {
+            "id": 6,
+            "type": "geometry/box",
+            "pos": [-528, -81],
+            "size": {
+                "0": 210,
+                "1": 150
+            },
+            "flags": {},
+            "order": 5,
+            "mode": 0,
+            "inputs": [
+                {
+                    "name": "Width",
+                    "type": "number",
+                    "link": 12,
+                    "socket_id": "d24cd95e-a32b-49e0-92e6-f23207bdf29e"
+                },
+                {
+                    "name": "Depth",
+                    "type": "number",
+                    "link": null,
+                    "socket_id": "8eaa1972-2c22-436b-99d1-2d99b3ca979a"
+                },
+                {
+                    "name": "Height",
+                    "type": "number",
+                    "link": null,
+                    "socket_id": "194afd35-509c-4801-82e0-f4e38e4124c2"
+                },
+                {
+                    "name": "Color",
+                    "type": "color",
+                    "link": null,
+                    "socket_id": "d417a801-4d52-445d-abe2-5a8be48cb98b"
+                },
+                {
+                    "name": "Matrix",
+                    "type": "matrix",
+                    "link": null,
+                    "socket_id": "1e40d446-31ba-4770-a66f-4a63a419d9c9"
+                }
+            ],
+            "outputs": [
+                {
+                    "name": "Geometry",
+                    "type": "geometry",
+                    "links": [32],
+                    "slot_index": 0,
+                    "socket_id": "c731224f-1e81-42ad-9a79-c2e129803173"
+                }
+            ],
+            "properties": {
+                "width": 5,
+                "depth": 5,
+                "height": 5,
+                "color": "#fe8d86",
+                "matrix": null
+            }
+        },
+        {
+            "id": 7,
+            "type": "math3d/xyz-to-vec3",
+            "pos": [-528, 154],
+            "size": [210, 102],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+                {
+                    "name": "x",
+                    "type": "number",
+                    "link": null,
+                    "socket_id": "e3f7aa09-9c2e-4023-94d6-67fdbc2e448b"
+                },
+                {
+                    "name": "y",
+                    "type": "number",
+                    "link": null,
+                    "socket_id": "6b151391-a20c-453d-9f69-3d4782870242"
+                },
+                {
+                    "name": "z",
+                    "type": "number",
+                    "link": null,
+                    "socket_id": "71c416f3-fba5-40b0-89e3-a16696906695"
+                }
+            ],
+            "outputs": [
+                {
+                    "name": "vec3",
+                    "type": "vec3",
+                    "links": [34],
+                    "slot_index": 0,
+                    "socket_id": "86bb04c2-af98-4276-9e3e-679ffcec7ff5"
+                }
+            ],
+            "properties": {
+                "x": 0,
+                "y": 0,
+                "z": 1
+            },
+            "widgets_values": [0, 0, 1]
+        },
+        {
+            "id": 8,
+            "type": "math3d/xyz-to-vec3",
+            "pos": [-718, 154],
+            "size": [140, 102],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputs": [
+                {
+                    "name": "x",
+                    "type": "number",
+                    "link": null,
+                    "socket_id": "449ba592-a588-4d1f-a837-21d382c871f2"
+                },
+                {
+                    "name": "y",
+                    "type": "number",
+                    "link": null,
+                    "socket_id": "b3f66af1-529b-44b6-99b9-8e938797dbe0"
+                },
+                {
+                    "name": "z",
+                    "type": "number",
+                    "link": null,
+                    "socket_id": "f9398479-25b1-4a41-a681-ec3eedc7cd9c"
+                }
+            ],
+            "outputs": [
+                {
+                    "name": "vec3",
+                    "type": "vec3",
+                    "links": [33],
+                    "slot_index": 0,
+                    "socket_id": "002758a3-2d10-4635-8d35-4f4785370c31"
+                }
+            ],
+            "properties": {
+                "x": 0,
+                "y": 0,
+                "z": 2.5
+            },
+            "widgets_values": [0, 0, 2.5]
+        },
+        {
+            "id": 12,
+            "type": "basic/const",
+            "pos": [-788, -81],
+            "size": {
+                "0": 210,
+                "1": 54
+            },
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "outputs": [
+                {
+                    "name": "value",
+                    "type": "number",
+                    "links": [12],
+                    "label": null,
+                    "slot_index": 0,
+                    "socket_id": "1bb6050f-b27f-4432-98e5-bcf60d5197a6"
+                }
+            ],
+            "properties": {
+                "value": 5
+            }
+        },
+        {
+            "id": 13,
+            "type": "graph/output",
+            "pos": [705, -81],
+            "size": [180, 88],
+            "flags": {},
+            "order": 9,
+            "mode": 0,
+            "inputs": [
+                {
+                    "name": "Geometry",
+                    "type": "geometry",
+                    "link": 14,
+                    "socket_id": "c2c1534d-474f-406f-8002-94d9b62fa1e4"
+                },
+                {
+                    "name": "",
+                    "type": 0,
+                    "link": null,
+                    "socket_id": "2a49677b-dfc9-4cff-b75b-eb38df8cf2b5"
+                }
+            ],
+            "properties": {
+                "inputs": [
+                    {
+                        "name": "Geometry",
+                        "type": "geometry",
+                        "name_in_graph": "Geometry"
+                    }
+                ]
+            }
+        },
+        {
+            "id": 19,
+            "type": "math3d/xyz-to-vec3",
+            "pos": [-268, 154],
+            "size": [140, 102],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [
+                {
+                    "name": "x",
+                    "type": "number",
+                    "link": null,
+                    "socket_id": "27563bbb-a9fb-49bd-9854-70ed488abd77"
+                },
+                {
+                    "name": "y",
+                    "type": "number",
+                    "link": null,
+                    "socket_id": "01262f82-4f9d-4409-8496-f20a45920eda"
+                },
+                {
+                    "name": "z",
+                    "type": "number",
+                    "link": null,
+                    "socket_id": "6b6cbd5a-6947-4bd5-8a81-11551eb09c3a"
+                }
+            ],
+            "outputs": [
+                {
+                    "name": "vec3",
+                    "type": "vec3",
+                    "links": [35],
+                    "slot_index": 0,
+                    "socket_id": "9988b226-c5b8-422a-8def-52881b99b77a"
+                }
+            ],
+            "properties": {
+                "x": 0,
+                "y": 1,
+                "z": 1
+            },
+            "widgets_values": [0, 1, 1]
+        },
+        {
+            "id": 20,
+            "type": "geometry/drag_on_plane",
+            "pos": [-78, -81],
+            "size": [210, 246],
+            "flags": {},
+            "order": 6,
+            "mode": 0,
+            "inputs": [
+                {
+                    "name": "Geometry",
+                    "type": "geometry",
+                    "link": 32,
+                    "socket_id": "5f56d54e-3d7c-42c3-887e-b482b4b71d25"
+                },
+                {
+                    "name": "Origin",
+                    "type": "vec3",
+                    "link": 33,
+                    "socket_id": "a45142c1-2d71-49c7-8ee8-5d592098eac3"
+                },
+                {
+                    "name": "Normal",
+                    "type": "vec3",
+                    "link": 34,
+                    "socket_id": "347e93fd-ebff-448a-9f42-dbc40d6cacde"
+                },
+                {
+                    "name": "Front",
+                    "type": "vec3",
+                    "link": 35,
+                    "socket_id": "207727d1-753f-412f-8388-a684bf10083d"
+                },
+                {
+                    "name": "Field",
+                    "type": "vec3",
+                    "link": 38,
+                    "socket_id": "9e42a869-ff2e-4053-9731-8fb1d520579b",
+                    "isField": true
+                },
+                {
+                    "name": "X",
+                    "type": "number",
+                    "link": null,
+                    "socket_id": "e862ee65-1857-4c51-87f4-da2a76988c15"
+                },
+                {
+                    "name": "Y",
+                    "type": "number",
+                    "link": null,
+                    "socket_id": "94770825-9890-4baa-9f1b-9800f07f75df"
+                }
+            ],
+            "outputs": [
+                {
+                    "name": "X",
+                    "type": "number",
+                    "links": [36],
+                    "slot_index": 0,
+                    "socket_id": "385a8b58-1033-42ef-aa7d-2158064ab490"
+                },
+                {
+                    "name": "Y",
+                    "type": "number",
+                    "links": [37],
+                    "slot_index": 1,
+                    "socket_id": "2f14cd51-8137-4f93-b480-91e283336e97"
+                },
+                {
+                    "name": "Center",
+                    "type": "vec3",
+                    "links": null,
+                    "socket_id": "4b0544a1-f486-442f-8661-0237f03bf134"
+                }
+            ],
+            "properties": {
+                "x": 12,
+                "y": 16
+            },
+            "widgets_values": [12, 16]
+        },
+        {
+            "id": 21,
+            "type": "math3d/vector-formula",
+            "pos": [-968, 87],
+            "size": [200, 126],
+            "flags": {},
+            "order": 4,
+            "mode": 0,
+            "inputs": [
+                {
+                    "name": "Vector",
+                    "type": "vec3",
+                    "link": null,
+                    "socket_id": "da0bf809-c6e2-4652-b2a0-dd0c7cc98a4f"
+                }
+            ],
+            "outputs": [
+                {
+                    "name": "Vector",
+                    "type": "vec3",
+                    "links": [38],
+                    "slot_index": 0,
+                    "socket_id": "aa9f7785-1452-4cbe-99da-3fd946cc24cb"
+                }
+            ],
+            "properties": {
+                "formulaX": "max(x, 1)",
+                "formulaY": "max(y,1)",
+                "formulaZ": "z"
+            },
+            "widgets_values": ["max(x, 1)", "max(y,1)", "z"]
+        }
+    ],
+    "links": [
+        [4, 1, "76e1d771-870b-4bf1-ad5c-a57d8884a3e1", 3, "15ffedc9-c85c-4d9a-8b8c-f14d9663528d", "paths"],
+        [12, 12, "1bb6050f-b27f-4432-98e5-bcf60d5197a6", 6, "d24cd95e-a32b-49e0-92e6-f23207bdf29e", "number"],
+        [14, 3, "5898d0dd-ef03-43c9-9da2-3bf8a8ab78bd", 13, "c2c1534d-474f-406f-8002-94d9b62fa1e4", "geometry"],
+        [32, 6, "c731224f-1e81-42ad-9a79-c2e129803173", 20, "5f56d54e-3d7c-42c3-887e-b482b4b71d25", "geometry"],
+        [33, 8, "002758a3-2d10-4635-8d35-4f4785370c31", 20, "a45142c1-2d71-49c7-8ee8-5d592098eac3", "vec3"],
+        [34, 7, "86bb04c2-af98-4276-9e3e-679ffcec7ff5", 20, "347e93fd-ebff-448a-9f42-dbc40d6cacde", "vec3"],
+        [35, 19, "9988b226-c5b8-422a-8def-52881b99b77a", 20, "207727d1-753f-412f-8388-a684bf10083d", "vec3"],
+        [36, 20, "385a8b58-1033-42ef-aa7d-2158064ab490", 1, "1a69058e-99f3-4169-bf6f-26d2253ac821", "number"],
+        [37, 20, "2f14cd51-8137-4f93-b480-91e283336e97", 1, "01826a93-cd52-4fb5-bc41-bf6b5ec4ebb7", "number"],
+        [38, 21, "aa9f7785-1452-4cbe-99da-3fd946cc24cb", 20, "9e42a869-ff2e-4053-9731-8fb1d520579b", "vec3"]
+    ],
+    "config": {},
+    "extra": {},
+    "version": 0.4,
+    "viewState": {
+        "scale": 0.826446280991736,
+        "offset": [1094.054931640625, 238.62342834472656]
+    },
+    "dividerPosition": 37.0541,
+    "cameraState": {
+        "position": {
+            "x": 14.142855150566566,
+            "y": -35.03667811812606,
+            "z": 23.842217851385616
+        },
+        "target": {
+            "x": 14.142855150566566,
+            "y": 24.963321881873934,
+            "z": -11.157782148614384
+        },
+        "initialPosition": {
+            "x": 15,
+            "y": -60,
+            "z": 40
+        },
+        "initialTarget": {
+            "x": 15,
+            "y": 0,
+            "z": 5
+        }
+    }
+}

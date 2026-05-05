@@ -1,0 +1,257 @@
+{
+    "last_node_id": 9,
+    "last_link_id": 6,
+    "nodes": [
+        {
+            "id": 1,
+            "type": "io/image_url",
+            "pos": [127, -44],
+            "size": [308, 253],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+                {
+                    "link": null,
+                    "name": "URL",
+                    "type": "string",
+                    "socket_id": "a1bb1cff-65e2-490c-ba9c-f33da284bf74"
+                }
+            ],
+            "outputs": [
+                {
+                    "links": [1],
+                    "name": "Image",
+                    "slot_index": 0,
+                    "type": "image",
+                    "socket_id": "6ec8b7c8-1522-4c11-a416-1ae86b4d8640"
+                }
+            ],
+            "properties": {
+                "url": "/node-designer/static/test_json/images/round-cut.png"
+            },
+            "widgets_values": ["/node-designer/static/test_json/images/round-cut.png"],
+            "boxcolor": "#9F9"
+        },
+        {
+            "id": 2,
+            "type": "image/alpha_to_path",
+            "pos": [469, -44],
+            "size": [261, 350],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [
+                {
+                    "link": 1,
+                    "name": "Image",
+                    "type": "image",
+                    "socket_id": "3a22dd9b-599b-49c4-931e-20b3fe12feba"
+                },
+                {
+                    "link": null,
+                    "name": "Threshold",
+                    "type": "number",
+                    "socket_id": "3765a774-00ac-4a28-aa99-c8fa8cc91937"
+                },
+                {
+                    "link": null,
+                    "name": "Min Surface Area",
+                    "type": "number",
+                    "socket_id": "07bd46dd-ddee-490b-a4c1-3f57a5b49324"
+                },
+                {
+                    "link": 4,
+                    "name": "Alpha Field",
+                    "type": "field",
+                    "socket_id": "79a9845d-0aed-44c9-9822-8b8ec29ebc91"
+                }
+            ],
+            "outputs": [
+                {
+                    "links": [2],
+                    "name": "Paths",
+                    "slot_index": 0,
+                    "type": "paths",
+                    "socket_id": "0f6e3e7b-6ed4-4019-a669-0e6f8d6a4f99"
+                }
+            ],
+            "properties": {
+                "threshold": 0.05,
+                "minSurfaceArea": 0,
+                "useField": false
+            }
+        },
+        {
+            "id": 4,
+            "type": "field/color",
+            "pos": [-41, 253],
+            "size": [180, 60],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "outputs": [
+                {
+                    "links": [3],
+                    "name": "Color",
+                    "slot_index": 0,
+                    "type": "field",
+                    "socket_id": "80b2b3a6-e0a6-4b0f-b252-5f7d0b7e48fe"
+                }
+            ],
+            "properties": {}
+        },
+        {
+            "id": 5,
+            "type": "field/formula",
+            "pos": [173, 253],
+            "size": [262.280029296875, 158],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [
+                {
+                    "link": 3,
+                    "name": "Color",
+                    "type": "field",
+                    "socket_id": "642c43b6-4418-4a0b-a0df-4edfbf754930"
+                },
+                {
+                    "link": null,
+                    "name": "Position",
+                    "type": "field",
+                    "socket_id": "ab65c2b1-7706-4c52-be41-d698c4b28b55"
+                },
+                {
+                    "link": null,
+                    "name": "Index",
+                    "type": "field",
+                    "socket_id": "63c690f4-103e-40bc-bb74-574f1fafb1af"
+                }
+            ],
+            "outputs": [
+                {
+                    "links": [4],
+                    "name": "Value",
+                    "slot_index": 0,
+                    "type": "field",
+                    "socket_id": "cf101c00-62dd-4f42-8059-cf707b2a8534"
+                }
+            ],
+            "properties": {
+                "formula": "const intensity = color ? 1 - (color.r * 0.299 + color.g * 0.587 + color.b * 0.114) : 0\nconst dx = x - width/2;\nconst dy = y - height/2;\nconst maxDist = Math.sqrt((width/2)*(width/2) + (height/2)*(height/2));\nconst radial = 1 - (Math.sqrt(dx*dx + dy*dy) / maxDist);\nintensity * radial"
+            }
+        },
+        {
+            "id": 6,
+            "type": "geometry/smooth_paths",
+            "pos": [764, -44],
+            "size": [214.0698292968758, 102.42222248535157],
+            "flags": {},
+            "order": 4,
+            "mode": 0,
+            "inputs": [
+                {
+                    "link": 2,
+                    "name": "Paths",
+                    "type": "paths",
+                    "socket_id": "12cb163f-96e5-44cc-870e-1f719ef4a987"
+                },
+                {
+                    "link": null,
+                    "name": "Distance",
+                    "type": "number",
+                    "socket_id": "bd7b1df0-7be5-41bb-aad3-506766b5057f"
+                },
+                {
+                    "link": null,
+                    "name": "Iterations",
+                    "type": "number",
+                    "socket_id": "9436d1ca-ce5a-43ae-bd97-2aac348acfde"
+                }
+            ],
+            "outputs": [
+                {
+                    "links": [6],
+                    "name": "Paths",
+                    "slot_index": 0,
+                    "type": "paths",
+                    "socket_id": "492db51b-5c4f-460f-b4e2-f3d11279dec6"
+                }
+            ],
+            "properties": {
+                "distance": 0.3,
+                "iterations": 3
+            }
+        },
+        {
+            "id": 7,
+            "type": "graph/output",
+            "pos": [1012, -44],
+            "size": [180, 88],
+            "flags": {},
+            "order": 5,
+            "mode": 0,
+            "inputs": [
+                {
+                    "name": "Paths",
+                    "type": "paths",
+                    "link": 6,
+                    "socket_id": "f0c3860a-76d9-4f3b-bbbe-355bbbb36278"
+                },
+                {
+                    "name": "",
+                    "type": 0,
+                    "link": null,
+                    "socket_id": "16aba3bb-89d3-4af9-b62f-740924536e98"
+                }
+            ],
+            "properties": {
+                "inputs": [
+                    {
+                        "name": "Paths",
+                        "type": "paths",
+                        "name_in_graph": "Paths"
+                    }
+                ]
+            }
+        }
+    ],
+    "links": [
+        [1, 1, "6ec8b7c8-1522-4c11-a416-1ae86b4d8640", 2, "3a22dd9b-599b-49c4-931e-20b3fe12feba", "image"],
+        [2, 2, "0f6e3e7b-6ed4-4019-a669-0e6f8d6a4f99", 6, "12cb163f-96e5-44cc-870e-1f719ef4a987", "paths"],
+        [3, 4, "80b2b3a6-e0a6-4b0f-b252-5f7d0b7e48fe", 5, "642c43b6-4418-4a0b-a0df-4edfbf754930", "field"],
+        [4, 5, "cf101c00-62dd-4f42-8059-cf707b2a8534", 2, "79a9845d-0aed-44c9-9822-8b8ec29ebc91", "field"],
+        [6, 6, "492db51b-5c4f-460f-b4e2-f3d11279dec6", 7, "f0c3860a-76d9-4f3b-bbbe-355bbbb36278", "paths"]
+    ],
+    "config": {},
+    "extra": {},
+    "version": 0.4,
+    "viewState": {
+        "scale": 1,
+        "offset": [348.719970703125, 113.97007751464844]
+    },
+    "dividerPosition": 33.4868,
+    "cameraState": {
+        "position": {
+            "x": -7.490838004684084,
+            "y": -47.22109012524973,
+            "z": 40.38752775276168
+        },
+        "target": {
+            "x": 0.5019413678482447,
+            "y": 32.8377050725467,
+            "z": -20.129279313831184
+        },
+        "initialPosition": {
+            "x": -8.004779456455669,
+            "y": -80.04779456455668,
+            "z": 64.03823565164535
+        },
+        "initialTarget": {
+            "x": -0.012000083923339844,
+            "y": 0.011000633239746094,
+            "z": 3.5214285850524902
+        }
+    }
+}

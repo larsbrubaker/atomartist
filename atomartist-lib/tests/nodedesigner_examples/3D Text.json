@@ -1,0 +1,383 @@
+{
+    "last_node_id": 17,
+    "last_link_id": 23,
+    "nodes": [
+        {
+            "id": 8,
+            "type": "geometry/extrude",
+            "pos": [281, 110],
+            "size": {
+                "0": 210,
+                "1": 174
+            },
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [
+                {
+                    "link": 16,
+                    "name": "Paths",
+                    "type": "paths",
+                    "socket_id": "7f2b1f73-7c50-4d91-a5ea-3237525ad648"
+                },
+                {
+                    "link": 20,
+                    "name": "Height",
+                    "type": "number",
+                    "socket_id": "de7ce1ee-5baa-4dd2-8ef1-c9606452df25"
+                },
+                {
+                    "name": "Radius",
+                    "type": "number",
+                    "link": null,
+                    "socket_id": "d9afd671-87d0-4021-9e36-5ae49739eeb9"
+                },
+                {
+                    "name": "Segments",
+                    "type": "number",
+                    "link": null,
+                    "socket_id": "d2d5e19f-12ec-4ca3-9264-f69e433f9fd9"
+                },
+                {
+                    "name": "Color",
+                    "type": "color",
+                    "link": 22,
+                    "socket_id": "4b4b73f8-596b-4abc-afd9-2e4d783849fc"
+                },
+                {
+                    "name": "Matrix",
+                    "type": "matrix",
+                    "link": 23,
+                    "socket_id": "0c668d4b-fd0e-4ee3-b1e6-3991674eda1d"
+                }
+            ],
+            "outputs": [
+                {
+                    "links": [17],
+                    "name": "Geometry",
+                    "slot_index": 0,
+                    "type": "geometry",
+                    "socket_id": "645fb2aa-674b-4a79-99f1-138ac59565a1"
+                }
+            ],
+            "properties": {
+                "height": 3,
+                "bevelRadius": 0,
+                "bevelSegments": 1,
+                "color": "#f8fe86",
+                "matrix": null
+            }
+        },
+        {
+            "id": 13,
+            "type": "geometry/text",
+            "pos": [-43, 110],
+            "size": {
+                "0": 210,
+                "1": 150
+            },
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputs": [
+                {
+                    "link": 18,
+                    "name": "Text",
+                    "type": "string",
+                    "socket_id": "07638142-27a8-407a-93f7-24a24755618e"
+                },
+                {
+                    "link": 19,
+                    "name": "Size (pt)",
+                    "type": "number",
+                    "socket_id": "b709a21f-6f30-447c-a75a-0704cb2601ea"
+                },
+                {
+                    "link": 21,
+                    "name": "Font",
+                    "type": "string",
+                    "socket_id": "7c58b3a8-cfe4-4e76-85fb-2cb833c126b5"
+                },
+                {
+                    "link": null,
+                    "name": "Wrap (mm)",
+                    "type": "number",
+                    "socket_id": "2087d969-b18d-46aa-8c66-840899a2e928"
+                },
+                {
+                    "name": "Bold",
+                    "type": "boolean",
+                    "link": null,
+                    "socket_id": "8fb886f6-13db-43ab-b5ff-085b97fbc613"
+                }
+            ],
+            "outputs": [
+                {
+                    "links": [16],
+                    "name": "Paths",
+                    "slot_index": 0,
+                    "type": "paths",
+                    "socket_id": "74db193e-6813-4fbe-b36a-2f32805ccce1"
+                }
+            ],
+            "properties": {
+                "text": "Text",
+                "fontSize": 24,
+                "fontFamily": "Nunito",
+                "bold": true,
+                "wrapWidth": 0
+            }
+        },
+        {
+            "id": 16,
+            "type": "graph/output",
+            "pos": [537, 110],
+            "size": [180, 88],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [
+                {
+                    "name": "Geometry",
+                    "type": "geometry",
+                    "link": 17,
+                    "socket_id": "f5541473-b67a-44bd-9272-33c7dc5e19c8"
+                },
+                {
+                    "name": "",
+                    "type": 0,
+                    "link": null,
+                    "socket_id": "485640b2-a6df-4540-aa25-70bf970f5cef"
+                }
+            ],
+            "properties": {
+                "inputs": [
+                    {
+                        "name": "Geometry",
+                        "type": "geometry",
+                        "name_in_graph": "Geometry"
+                    }
+                ]
+            }
+        },
+        {
+            "id": 17,
+            "type": "graph/input",
+            "pos": [-289, 110],
+            "size": [200, 208],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "outputs": [
+                {
+                    "name": "",
+                    "type": "string",
+                    "links": [18],
+                    "socket_id": "73814563-27d2-4567-9dcd-9dbc647ce724",
+                    "slot_index": 0
+                },
+                {
+                    "name": "",
+                    "type": "number",
+                    "links": [19],
+                    "socket_id": "03d32a7c-9043-4ef1-ad14-11e3fe14934d",
+                    "slot_index": 1
+                },
+                {
+                    "name": "",
+                    "type": "number",
+                    "links": [20],
+                    "socket_id": "1080dcce-cb40-4e32-8f05-edefb40a1c1c",
+                    "slot_index": 2
+                },
+                {
+                    "name": "",
+                    "type": "string",
+                    "links": [21],
+                    "socket_id": "772d9259-a7a6-4d91-8c93-3f8342e096da",
+                    "slot_index": 3
+                },
+                {
+                    "name": "",
+                    "type": "color",
+                    "links": [22],
+                    "socket_id": "9d111423-7363-4283-84f6-2fbdadcac97f",
+                    "slot_index": 4
+                },
+                {
+                    "name": "",
+                    "type": "matrix",
+                    "links": [23],
+                    "socket_id": "1cd2638c-745e-4bed-b605-5127d74653f4",
+                    "slot_index": 5
+                },
+                {
+                    "name": "",
+                    "type": "",
+                    "links": null,
+                    "socket_id": "3bc0b812-3cbd-440a-ac2e-9841e86ebb95"
+                }
+            ],
+            "properties": {
+                "outputs": [
+                    {
+                        "name": "Text",
+                        "type": "string",
+                        "value": "Text",
+                        "widgetConfig": {
+                            "type": "text",
+                            "name": "Text",
+                            "value": "Text",
+                            "options": {
+                                "property": "text"
+                            }
+                        },
+                        "name_in_graph": "Text"
+                    },
+                    {
+                        "name": "Size (pt)",
+                        "type": "number",
+                        "value": 24,
+                        "widgetConfig": {
+                            "type": "slider",
+                            "name": "Size (pt)",
+                            "value": 24,
+                            "options": {
+                                "min": 1,
+                                "max": 200,
+                                "property": "fontSize"
+                            }
+                        },
+                        "name_in_graph": "Size (pt)"
+                    },
+                    {
+                        "name": "Height",
+                        "type": "number",
+                        "value": 3,
+                        "widgetConfig": {
+                            "type": "slider",
+                            "name": "Height",
+                            "value": 3,
+                            "options": {
+                                "min": 0.1,
+                                "max": 40,
+                                "property": "height",
+                                "easeIn": 2
+                            }
+                        },
+                        "name_in_graph": "Height"
+                    },
+                    {
+                        "name": "Font",
+                        "type": "string",
+                        "value": "Nunito",
+                        "widgetConfig": {
+                            "type": "combo",
+                            "name": "Font",
+                            "value": "Nunito",
+                            "options": {
+                                "property": "fontFamily",
+                                "values": [
+                                    "Anton",
+                                    "Bangers",
+                                    "Bebas Neue",
+                                    "Black Ops One",
+                                    "Bungee",
+                                    "Creepster",
+                                    "Crimson Text",
+                                    "Inter",
+                                    "Lato",
+                                    "Lora",
+                                    "Merriweather",
+                                    "Montserrat",
+                                    "Nunito",
+                                    "Open Sans",
+                                    "Oswald",
+                                    "Pacifico",
+                                    "Playfair Display",
+                                    "Poppins",
+                                    "PT Sans",
+                                    "Raleway",
+                                    "Righteous",
+                                    "Roboto",
+                                    "Russo One",
+                                    "Satisfy",
+                                    "Ubuntu"
+                                ]
+                            }
+                        },
+                        "name_in_graph": "Font"
+                    },
+                    {
+                        "name": "Color",
+                        "type": "color",
+                        "value": "#f8fe86",
+                        "widgetConfig": {
+                            "type": "color",
+                            "name": "Color",
+                            "value": "#f8fe86",
+                            "options": {
+                                "property": "color"
+                            }
+                        },
+                        "name_in_graph": "Color"
+                    },
+                    {
+                        "name": "Matrix",
+                        "type": "matrix",
+                        "value": null,
+                        "widgetConfig": {
+                            "type": "matrix",
+                            "name": "Matrix",
+                            "value": null,
+                            "options": {
+                                "property": "matrix"
+                            }
+                        },
+                        "name_in_graph": "Matrix"
+                    }
+                ]
+            }
+        }
+    ],
+    "links": [
+        [16, 13, "74db193e-6813-4fbe-b36a-2f32805ccce1", 8, "7f2b1f73-7c50-4d91-a5ea-3237525ad648", "paths"],
+        [17, 8, "645fb2aa-674b-4a79-99f1-138ac59565a1", 16, "f5541473-b67a-44bd-9272-33c7dc5e19c8", "geometry"],
+        [18, 17, "73814563-27d2-4567-9dcd-9dbc647ce724", 13, "07638142-27a8-407a-93f7-24a24755618e", "string"],
+        [19, 17, "03d32a7c-9043-4ef1-ad14-11e3fe14934d", 13, "b709a21f-6f30-447c-a75a-0704cb2601ea", "number"],
+        [20, 17, "1080dcce-cb40-4e32-8f05-edefb40a1c1c", 8, "de7ce1ee-5baa-4dd2-8ef1-c9606452df25", "number"],
+        [21, 17, "772d9259-a7a6-4d91-8c93-3f8342e096da", 13, "7c58b3a8-cfe4-4e76-85fb-2cb833c126b5", "string"],
+        [22, 17, "9d111423-7363-4283-84f6-2fbdadcac97f", 8, "4b4b73f8-596b-4abc-afd9-2e4d783849fc", "color"],
+        [23, 17, "1cd2638c-745e-4bed-b605-5127d74653f4", 8, "0c668d4b-fd0e-4ee3-b1e6-3991674eda1d", "matrix"]
+    ],
+    "config": {},
+    "extra": {},
+    "version": 0.4,
+    "viewState": {
+        "scale": 1,
+        "offset": [544.7000732421875, 7.201572418212891]
+    },
+    "dividerPosition": 52.7043,
+    "cameraState": {
+        "position": {
+            "x": 12.645899577505611,
+            "y": -22.964874023130008,
+            "z": 23.918530598391925
+        },
+        "target": {
+            "x": 22.94763202132433,
+            "y": 174.2259210884923,
+            "z": -123.52297489349377
+        },
+        "initialPosition": {
+            "x": -18.155213193124364,
+            "y": -181.55213193124362,
+            "z": 145.24170554499491
+        },
+        "initialTarget": {
+            "x": 50.71549969911575,
+            "y": 5.842000037431717,
+            "z": 0.7785714268684387
+        }
+    }
+}

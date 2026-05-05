@@ -1,0 +1,321 @@
+{
+    "last_node_id": 24,
+    "last_link_id": 35,
+    "nodes": [
+        {
+            "id": 6,
+            "type": "io/image_url",
+            "pos": [229, -41],
+            "size": [308, 253],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+                {
+                    "link": null,
+                    "name": "URL",
+                    "type": "string",
+                    "socket_id": "5e5c210f-7ae9-4c3c-8148-d0059031263d"
+                }
+            ],
+            "outputs": [
+                {
+                    "links": [4],
+                    "name": "Image",
+                    "slot_index": 0,
+                    "type": "image",
+                    "socket_id": "7a3e000f-12c9-453f-8dea-6eea9a8b3c6f"
+                }
+            ],
+            "properties": {
+                "url": "/node-designer/static/test_json/images/image-to-path.png"
+            },
+            "widgets_values": ["/node-designer/static/test_json/images/image-to-path.png"],
+            "boxcolor": "#9F9"
+        },
+        {
+            "id": 7,
+            "type": "image/alpha_to_path",
+            "pos": [575, -41],
+            "size": [261.20735977783215, 403.89366367187506],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [
+                {
+                    "link": 4,
+                    "name": "Image",
+                    "type": "image",
+                    "socket_id": "590e1a3d-1ba1-4ce0-a79c-edce63b7bca0"
+                },
+                {
+                    "link": null,
+                    "name": "Threshold",
+                    "type": "number",
+                    "socket_id": "c1b2354a-ab6f-49fc-bb88-fb97a1303b34"
+                },
+                {
+                    "link": null,
+                    "name": "Min Surface Area",
+                    "type": "number",
+                    "socket_id": "d37cefa5-4840-4d06-882f-2ee5e111a61d"
+                },
+                {
+                    "link": 27,
+                    "name": "Alpha Field",
+                    "type": "field",
+                    "socket_id": "a310dedf-2673-4530-b86a-f59a48766d2b"
+                }
+            ],
+            "outputs": [
+                {
+                    "links": [28],
+                    "name": "Paths",
+                    "slot_index": 0,
+                    "type": "paths",
+                    "socket_id": "c9230221-bab4-4584-82c9-7223b544c0d2"
+                }
+            ],
+            "properties": {
+                "threshold": 0.1,
+                "minSurfaceArea": 0,
+                "useField": false
+            }
+        },
+        {
+            "id": 8,
+            "type": "geometry/smooth_paths",
+            "pos": [874, -39.41000000000001],
+            "size": [210, 104.60733551025393],
+            "flags": {},
+            "order": 4,
+            "mode": 0,
+            "inputs": [
+                {
+                    "link": 28,
+                    "name": "Paths",
+                    "type": "paths",
+                    "socket_id": "5d103ad9-4b77-4fee-8fd7-7ca9aaa300f1"
+                },
+                {
+                    "link": null,
+                    "name": "Distance",
+                    "type": "number",
+                    "socket_id": "9500e1c2-ddec-42c5-aa28-2ea3d2587dde"
+                },
+                {
+                    "link": null,
+                    "name": "Iterations",
+                    "type": "number",
+                    "socket_id": "bca68b1f-63da-4b3e-a942-d1fa97184422"
+                }
+            ],
+            "outputs": [
+                {
+                    "links": [22],
+                    "name": "Paths",
+                    "slot_index": 0,
+                    "type": "paths",
+                    "socket_id": "f4413fe5-4273-43e8-9b0b-028a18c95684"
+                }
+            ],
+            "properties": {
+                "distance": 0.3,
+                "iterations": 3
+            }
+        },
+        {
+            "id": 10,
+            "type": "geometry/extrude",
+            "pos": [1122, -39],
+            "size": [215.37978881835966, 174],
+            "flags": {},
+            "order": 5,
+            "mode": 0,
+            "inputs": [
+                {
+                    "link": 22,
+                    "name": "Paths",
+                    "type": "paths",
+                    "socket_id": "417f1515-f44e-4711-83f6-51a0194d7fea"
+                },
+                {
+                    "link": null,
+                    "name": "Height",
+                    "type": "number",
+                    "socket_id": "8f5bf723-e826-4dc5-9cc3-981f89f43a77"
+                },
+                {
+                    "name": "Radius",
+                    "type": "number",
+                    "link": null,
+                    "socket_id": "40efa691-74b9-44b0-8cf4-7ac16930dc3d"
+                },
+                {
+                    "name": "Segments",
+                    "type": "number",
+                    "link": null,
+                    "socket_id": "bd1ca94a-1600-44c4-bcb9-d679e1fc2e80"
+                },
+                {
+                    "name": "Color",
+                    "type": "color",
+                    "link": null,
+                    "socket_id": "e8ee2cd6-2ecf-449b-9cb5-4702dcfe533a"
+                },
+                {
+                    "name": "Matrix",
+                    "type": "matrix",
+                    "link": null,
+                    "socket_id": "5a8041e2-7839-49e4-ba6f-b5dc02a357d7"
+                }
+            ],
+            "outputs": [
+                {
+                    "links": [35],
+                    "name": "Geometry",
+                    "slot_index": 0,
+                    "type": "geometry",
+                    "socket_id": "e713a4e9-fbb1-49db-8a65-ecf3ad2145af"
+                }
+            ],
+            "properties": {
+                "height": 7.042857142857184,
+                "bevelRadius": 0,
+                "bevelSegments": 3,
+                "color": "#ffffff",
+                "matrix": null
+            }
+        },
+        {
+            "id": 14,
+            "type": "field/color",
+            "pos": [64, 261],
+            "size": [180, 60],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "outputs": [
+                {
+                    "links": [26],
+                    "name": "Color",
+                    "slot_index": 0,
+                    "type": "field",
+                    "socket_id": "e54f677e-7ca0-4faa-b788-0c7b43fb47bf"
+                }
+            ],
+            "properties": {}
+        },
+        {
+            "id": 17,
+            "type": "field/formula",
+            "pos": [282, 261],
+            "size": [254.87978881835943, 158],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [
+                {
+                    "link": 26,
+                    "name": "Color",
+                    "type": "field",
+                    "socket_id": "e1991b41-d528-441d-8fda-af07e1f2b892"
+                },
+                {
+                    "link": null,
+                    "name": "Position",
+                    "type": "field",
+                    "socket_id": "c626308d-e5ae-4c30-8237-53091b374659"
+                },
+                {
+                    "link": null,
+                    "name": "Index",
+                    "type": "field",
+                    "socket_id": "a2b1da66-8896-4230-88d2-4f7f71281e61"
+                }
+            ],
+            "outputs": [
+                {
+                    "links": [27],
+                    "name": "Value",
+                    "slot_index": 0,
+                    "type": "field",
+                    "socket_id": "3e47d7fb-6a92-435e-9966-0c8b7955c344"
+                }
+            ],
+            "properties": {
+                "formula": "color ? 1 - (color.r * 0.299 + color.g * 0.587 + color.b * 0.114) : 0"
+            }
+        },
+        {
+            "id": 24,
+            "type": "graph/output",
+            "pos": [1375, -41],
+            "size": [180, 88],
+            "flags": {},
+            "order": 6,
+            "mode": 0,
+            "inputs": [
+                {
+                    "name": "Geometry",
+                    "type": "geometry",
+                    "link": 35,
+                    "socket_id": "2ca0e384-df21-4ca2-b286-fffa92f32a76"
+                },
+                {
+                    "name": "",
+                    "type": 0,
+                    "link": null,
+                    "socket_id": "d429667d-d828-41cd-9e64-bac251a7ce7c"
+                }
+            ],
+            "properties": {
+                "inputs": [
+                    {
+                        "name": "Geometry",
+                        "type": "geometry",
+                        "name_in_graph": "Geometry"
+                    }
+                ]
+            }
+        }
+    ],
+    "links": [
+        [4, 6, "7a3e000f-12c9-453f-8dea-6eea9a8b3c6f", 7, "590e1a3d-1ba1-4ce0-a79c-edce63b7bca0", "image"],
+        [22, 8, "f4413fe5-4273-43e8-9b0b-028a18c95684", 10, "417f1515-f44e-4711-83f6-51a0194d7fea", "paths"],
+        [26, 14, "e54f677e-7ca0-4faa-b788-0c7b43fb47bf", 17, "e1991b41-d528-441d-8fda-af07e1f2b892", "field"],
+        [27, 17, "3e47d7fb-6a92-435e-9966-0c8b7955c344", 7, "a310dedf-2673-4530-b86a-f59a48766d2b", "field"],
+        [28, 7, "c9230221-bab4-4584-82c9-7223b544c0d2", 8, "5d103ad9-4b77-4fee-8fd7-7ca9aaa300f1", "paths"],
+        [35, 10, "e713a4e9-fbb1-49db-8a65-ecf3ad2145af", 24, "2ca0e384-df21-4ca2-b286-fffa92f32a76", "geometry"]
+    ],
+    "config": {},
+    "extra": {},
+    "version": 0.4,
+    "viewState": {
+        "scale": 0.8264462809917354,
+        "offset": [332.420166015625, 100.59159088134766]
+    },
+    "dividerPosition": 43.7284,
+    "cameraState": {
+        "position": {
+            "x": 2.6336367877768754,
+            "y": -30.89020554228318,
+            "z": 49.20073476374927
+        },
+        "target": {
+            "x": 28.844841356786155,
+            "y": 90.77437524489542,
+            "z": -163.49631610140062
+        },
+        "initialPosition": {
+            "x": -18.155213193124364,
+            "y": -181.55213193124362,
+            "z": 145.24170554499491
+        },
+        "initialTarget": {
+            "x": 50.71549969911575,
+            "y": 5.842000037431717,
+            "z": 0.7785714268684387
+        }
+    }
+}

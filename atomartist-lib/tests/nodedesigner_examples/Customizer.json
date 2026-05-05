@@ -1,0 +1,130 @@
+{
+    "last_node_id": 5,
+    "last_link_id": 6,
+    "nodes": [
+        {
+            "id": 4,
+            "type": "graph/output",
+            "pos": [850, 100],
+            "size": [379.6000061035156, 57.4],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "Edge Bracket - Boolean - Geometry",
+                    "type": "geometry",
+                    "noodle": 6,
+                    "socket_id": "ba685b60-8b45-4afe-88ce-887ac062ff73",
+                    "_labelHovered": false
+                },
+                {
+                    "name": "",
+                    "type": 0,
+                    "noodle": null,
+                    "socket_id": "c16cd1eb-0aad-4056-a573-31781e32e6aa"
+                }
+            ],
+            "properties": {
+                "inputSockets": [
+                    {
+                        "name": "Edge Bracket - Boolean - Geometry",
+                        "type": "geometry",
+                        "name_in_graph": "Boolean - Geometry"
+                    }
+                ]
+            }
+        },
+        {
+            "id": 5,
+            "type": "graph/component-instance",
+            "pos": [447, 100],
+            "size": [320.79998779296875, 183],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "Diameter",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "3da70c74-19db-4766-b1cc-3ad4c2928d61"
+                },
+                {
+                    "name": "Head",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "c05c1640-9c5a-4b45-a2ae-dd362974e33e"
+                },
+                {
+                    "name": "Width",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "52d7258a-2f80-4e4f-9b44-558365c090ed"
+                },
+                {
+                    "name": "Depth",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "3b211256-3c55-4fc5-95a8-b58c96049efd"
+                },
+                {
+                    "name": "Height",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "5f7b4e25-bcc4-4ea4-84ff-2b13dc4a2b3c"
+                }
+            ],
+            "outputSockets": [
+                {
+                    "name": "Boolean - Geometry",
+                    "type": "geometry",
+                    "noodles": [6],
+                    "socket_id": "e6432bc2-7845-4837-94b8-f87f6543c4c1",
+                    "socket_index": 0
+                }
+            ],
+            "title": "Edge Bracket",
+            "properties": {
+                "componentId": null,
+                "componentName": "Edge Bracket",
+                "inputValues": {},
+                "examplePath": "Components/Edge Bracket/Edge Bracket.example"
+            }
+        }
+    ],
+    "noodles": [
+        [5, 5, "00b63ee7-510c-4e57-a7da-85a9433a71b2", 4, "ba685b60-8b45-4afe-88ce-887ac062ff73", "geometry"],
+        [6, 5, "e6432bc2-7845-4837-94b8-f87f6543c4c1", 4, "ba685b60-8b45-4afe-88ce-887ac062ff73", "geometry"]
+    ],
+    "config": {},
+    "extra": {},
+    "version": 0.4,
+    "viewState": {
+        "scale": 1.1987577639751552,
+        "offset": [-293.3181457519531, -16]
+    },
+    "dividerPosition": 55.633,
+    "cameraState": {
+        "position": {
+            "x": -4.739360294326125,
+            "y": -47.39360294326124,
+            "z": 37.914882354609
+        },
+        "target": {
+            "x": 0,
+            "y": 0,
+            "z": 2.5
+        },
+        "initialPosition": {
+            "x": -4.739360294326125,
+            "y": -47.39360294326124,
+            "z": 37.914882354609
+        },
+        "initialTarget": {
+            "x": 0,
+            "y": 0,
+            "z": 2.5
+        }
+    }
+}

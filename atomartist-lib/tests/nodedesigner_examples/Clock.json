@@ -1,0 +1,1256 @@
+{
+    "last_node_id": 27,
+    "last_link_id": 30,
+    "nodes": [
+        {
+            "id": 1,
+            "type": "basic/time",
+            "pos": [-32, 256],
+            "size": {
+                "0": 210,
+                "1": 78
+            },
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputSockets": [],
+            "outputSockets": [
+                {
+                    "name": "in ms",
+                    "type": "number",
+                    "noodles": [],
+                    "socket_id": "time-ms-out"
+                },
+                {
+                    "name": "in sec",
+                    "type": "number",
+                    "noodles": [1, 2, 3],
+                    "socket_id": "time-sec-out"
+                }
+            ],
+            "properties": {
+                "useRealTime": true
+            },
+            "widgets_values": [true]
+        },
+        {
+            "id": 2,
+            "type": "math/formula",
+            "pos": [250, 50],
+            "size": {
+                "0": 260,
+                "1": 126
+            },
+            "flags": {},
+            "order": 8,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "in_sec",
+                    "type": "number",
+                    "noodle": 1,
+                    "socket_id": "hour-angle-a"
+                },
+                {
+                    "name": "",
+                    "type": "",
+                    "noodle": null,
+                    "socket_id": "hour-angle-empty"
+                }
+            ],
+            "outputSockets": [
+                {
+                    "name": "Value",
+                    "type": "number",
+                    "noodles": [4],
+                    "socket_id": "hour-angle-out"
+                }
+            ],
+            "properties": {
+                "formula": "180 - (in_sec % 43200) / 120",
+                "inputSockets": [
+                    {
+                        "name": "in sec",
+                        "type": "number",
+                        "name_in_formula": "in_sec"
+                    }
+                ]
+            }
+        },
+        {
+            "id": 3,
+            "type": "math/formula",
+            "pos": [250, 250],
+            "size": {
+                "0": 260,
+                "1": 126
+            },
+            "flags": {},
+            "order": 9,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "in_sec",
+                    "type": "number",
+                    "noodle": 2,
+                    "socket_id": "min-angle-a"
+                },
+                {
+                    "name": "",
+                    "type": "",
+                    "noodle": null,
+                    "socket_id": "min-angle-empty"
+                }
+            ],
+            "outputSockets": [
+                {
+                    "name": "Value",
+                    "type": "number",
+                    "noodles": [5],
+                    "socket_id": "min-angle-out"
+                }
+            ],
+            "properties": {
+                "formula": "180 - (in_sec % 3600) / 10",
+                "inputSockets": [
+                    {
+                        "name": "in sec",
+                        "type": "number",
+                        "name_in_formula": "in_sec"
+                    }
+                ]
+            }
+        },
+        {
+            "id": 4,
+            "type": "math/formula",
+            "pos": [250, 450],
+            "size": {
+                "0": 260,
+                "1": 126
+            },
+            "flags": {},
+            "order": 10,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "in_sec",
+                    "type": "number",
+                    "noodle": 3,
+                    "socket_id": "sec-angle-a"
+                },
+                {
+                    "name": "",
+                    "type": "",
+                    "noodle": null,
+                    "socket_id": "sec-angle-empty"
+                }
+            ],
+            "outputSockets": [
+                {
+                    "name": "Value",
+                    "type": "number",
+                    "noodles": [6],
+                    "socket_id": "sec-angle-out"
+                }
+            ],
+            "properties": {
+                "formula": "180 - (in_sec % 60) * 6",
+                "inputSockets": [
+                    {
+                        "name": "in sec",
+                        "type": "number",
+                        "name_in_formula": "in_sec"
+                    }
+                ]
+            }
+        },
+        {
+            "id": 5,
+            "type": "math3d/xyz-to-vec3",
+            "pos": [560, 50],
+            "size": [180, 120],
+            "flags": {},
+            "order": 11,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "x",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "hour-rot-x"
+                },
+                {
+                    "name": "y",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "hour-rot-y"
+                },
+                {
+                    "name": "z",
+                    "type": "number",
+                    "noodle": 4,
+                    "socket_id": "hour-rot-z"
+                }
+            ],
+            "outputSockets": [
+                {
+                    "name": "vec3",
+                    "type": "vec3",
+                    "noodles": [7],
+                    "socket_id": "hour-rot-out"
+                }
+            ],
+            "properties": {
+                "x": 0,
+                "y": 0,
+                "z": 0
+            },
+            "widgets_values": [0, 0, 0]
+        },
+        {
+            "id": 6,
+            "type": "math3d/xyz-to-vec3",
+            "pos": [560, 250],
+            "size": [180, 120],
+            "flags": {},
+            "order": 12,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "x",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "min-rot-x"
+                },
+                {
+                    "name": "y",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "min-rot-y"
+                },
+                {
+                    "name": "z",
+                    "type": "number",
+                    "noodle": 5,
+                    "socket_id": "min-rot-z"
+                }
+            ],
+            "outputSockets": [
+                {
+                    "name": "vec3",
+                    "type": "vec3",
+                    "noodles": [8],
+                    "socket_id": "min-rot-out"
+                }
+            ],
+            "properties": {
+                "x": 0,
+                "y": 0,
+                "z": 0
+            },
+            "widgets_values": [0, 0, 0]
+        },
+        {
+            "id": 7,
+            "type": "math3d/xyz-to-vec3",
+            "pos": [560, 450],
+            "size": [180, 120],
+            "flags": {},
+            "order": 13,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "x",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "sec-rot-x"
+                },
+                {
+                    "name": "y",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "sec-rot-y"
+                },
+                {
+                    "name": "z",
+                    "type": "number",
+                    "noodle": 6,
+                    "socket_id": "sec-rot-z"
+                }
+            ],
+            "outputSockets": [
+                {
+                    "name": "vec3",
+                    "type": "vec3",
+                    "noodles": [9],
+                    "socket_id": "sec-rot-out"
+                }
+            ],
+            "properties": {
+                "x": 0,
+                "y": 0,
+                "z": 0
+            },
+            "widgets_values": [0, 0, 0]
+        },
+        {
+            "id": 8,
+            "type": "math3d/combine_transform",
+            "pos": [790, 20],
+            "size": {
+                "0": 210,
+                "1": 318
+            },
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "Location",
+                    "type": "vec3",
+                    "noodle": null,
+                    "socket_id": "hour-pivot-t"
+                },
+                {
+                    "name": "Rotation",
+                    "type": "vec3",
+                    "noodle": null,
+                    "socket_id": "hour-pivot-r"
+                },
+                {
+                    "name": "Scale",
+                    "type": "vec3",
+                    "noodle": null,
+                    "socket_id": "hour-pivot-s"
+                }
+            ],
+            "outputSockets": [
+                {
+                    "name": "Transform",
+                    "type": "matrix",
+                    "noodles": [10],
+                    "socket_id": "hour-pivot-out"
+                }
+            ],
+            "properties": {
+                "location": [0, -9, 0],
+                "rotation": [0, 0, 0],
+                "scale": [1, 1, 1]
+            },
+            "widgets_values": [0, 0, 0, 0, 0, 0, 1, 1, 1]
+        },
+        {
+            "id": 9,
+            "type": "math3d/combine_transform",
+            "pos": [790, 320],
+            "size": {
+                "0": 210,
+                "1": 318
+            },
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "Location",
+                    "type": "vec3",
+                    "noodle": null,
+                    "socket_id": "min-pivot-t"
+                },
+                {
+                    "name": "Rotation",
+                    "type": "vec3",
+                    "noodle": null,
+                    "socket_id": "min-pivot-r"
+                },
+                {
+                    "name": "Scale",
+                    "type": "vec3",
+                    "noodle": null,
+                    "socket_id": "min-pivot-s"
+                }
+            ],
+            "outputSockets": [
+                {
+                    "name": "Transform",
+                    "type": "matrix",
+                    "noodles": [11],
+                    "socket_id": "min-pivot-out"
+                }
+            ],
+            "properties": {
+                "location": [0, -12.5, 0],
+                "rotation": [0, 0, 0],
+                "scale": [1, 1, 1]
+            },
+            "widgets_values": [0, 0, 0, 0, 0, 0, 1, 1, 1]
+        },
+        {
+            "id": 10,
+            "type": "math3d/combine_transform",
+            "pos": [790, 620],
+            "size": {
+                "0": 210,
+                "1": 318
+            },
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "Location",
+                    "type": "vec3",
+                    "noodle": null,
+                    "socket_id": "sec-pivot-t"
+                },
+                {
+                    "name": "Rotation",
+                    "type": "vec3",
+                    "noodle": null,
+                    "socket_id": "sec-pivot-r"
+                },
+                {
+                    "name": "Scale",
+                    "type": "vec3",
+                    "noodle": null,
+                    "socket_id": "sec-pivot-s"
+                }
+            ],
+            "outputSockets": [
+                {
+                    "name": "Transform",
+                    "type": "matrix",
+                    "noodles": [12],
+                    "socket_id": "sec-pivot-out"
+                }
+            ],
+            "properties": {
+                "location": [0, -14, 0],
+                "rotation": [0, 0, 0],
+                "scale": [1, 1, 1]
+            },
+            "widgets_values": [0, 0, 0, 0, 0, 0, 1, 1, 1]
+        },
+        {
+            "id": 11,
+            "type": "math3d/combine_transform",
+            "pos": [1020, 20],
+            "size": {
+                "0": 210,
+                "1": 246
+            },
+            "flags": {},
+            "order": 14,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "Location",
+                    "type": "vec3",
+                    "noodle": null,
+                    "socket_id": "hour-rot-mat-t"
+                },
+                {
+                    "name": "Rotation",
+                    "type": "vec3",
+                    "noodle": 7,
+                    "socket_id": "hour-rot-mat-r"
+                },
+                {
+                    "name": "Scale",
+                    "type": "vec3",
+                    "noodle": null,
+                    "socket_id": "hour-rot-mat-s"
+                }
+            ],
+            "outputSockets": [
+                {
+                    "name": "Transform",
+                    "type": "matrix",
+                    "noodles": [13],
+                    "socket_id": "hour-rot-mat-out"
+                }
+            ],
+            "properties": {
+                "location": [0, 0, 0],
+                "rotation": [0, 0, 0],
+                "scale": [1, 1, 1]
+            },
+            "widgets_values": [0, 0, 0, 0, 0, -6.008333206176758, 1, 1, 1]
+        },
+        {
+            "id": 12,
+            "type": "math3d/combine_transform",
+            "pos": [1020, 320],
+            "size": {
+                "0": 210,
+                "1": 246
+            },
+            "flags": {},
+            "order": 15,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "Location",
+                    "type": "vec3",
+                    "noodle": null,
+                    "socket_id": "min-rot-mat-t"
+                },
+                {
+                    "name": "Rotation",
+                    "type": "vec3",
+                    "noodle": 8,
+                    "socket_id": "min-rot-mat-r"
+                },
+                {
+                    "name": "Scale",
+                    "type": "vec3",
+                    "noodle": null,
+                    "socket_id": "min-rot-mat-s"
+                }
+            ],
+            "outputSockets": [
+                {
+                    "name": "Transform",
+                    "type": "matrix",
+                    "noodles": [14],
+                    "socket_id": "min-rot-mat-out"
+                }
+            ],
+            "properties": {
+                "location": [0, 0, 0],
+                "rotation": [0, 0, 0],
+                "scale": [1, 1, 1]
+            },
+            "widgets_values": [0, 0, 0, 0, 0, 107.9000015258789, 1, 1, 1]
+        },
+        {
+            "id": 13,
+            "type": "math3d/combine_transform",
+            "pos": [1020, 620],
+            "size": {
+                "0": 210,
+                "1": 246
+            },
+            "flags": {},
+            "order": 16,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "Location",
+                    "type": "vec3",
+                    "noodle": null,
+                    "socket_id": "sec-rot-mat-t"
+                },
+                {
+                    "name": "Rotation",
+                    "type": "vec3",
+                    "noodle": 9,
+                    "socket_id": "sec-rot-mat-r"
+                },
+                {
+                    "name": "Scale",
+                    "type": "vec3",
+                    "noodle": null,
+                    "socket_id": "sec-rot-mat-s"
+                }
+            ],
+            "outputSockets": [
+                {
+                    "name": "Transform",
+                    "type": "matrix",
+                    "noodles": [15],
+                    "socket_id": "sec-rot-mat-out"
+                }
+            ],
+            "properties": {
+                "location": [0, 0, 0],
+                "rotation": [0, 0, 0],
+                "scale": [1, 1, 1]
+            },
+            "widgets_values": [0, 0, 0, 0, 0, 174, 1, 1, 1]
+        },
+        {
+            "id": 14,
+            "type": "math3d/combine_transform",
+            "pos": [1250, 20],
+            "size": {
+                "0": 210,
+                "1": 318
+            },
+            "flags": {},
+            "order": 4,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "Location",
+                    "type": "vec3",
+                    "noodle": null,
+                    "socket_id": "hour-final-t"
+                },
+                {
+                    "name": "Rotation",
+                    "type": "vec3",
+                    "noodle": null,
+                    "socket_id": "hour-final-r"
+                },
+                {
+                    "name": "Scale",
+                    "type": "vec3",
+                    "noodle": null,
+                    "socket_id": "hour-final-s"
+                }
+            ],
+            "outputSockets": [
+                {
+                    "name": "Transform",
+                    "type": "matrix",
+                    "noodles": [16],
+                    "socket_id": "hour-final-out"
+                }
+            ],
+            "properties": {
+                "location": [0, 0, 3],
+                "rotation": [0, 0, 0],
+                "scale": [1, 1, 1]
+            },
+            "widgets_values": [0, 0, 0, 0, 0, 0, 1, 1, 1]
+        },
+        {
+            "id": 15,
+            "type": "math3d/combine_transform",
+            "pos": [1250, 320],
+            "size": {
+                "0": 210,
+                "1": 318
+            },
+            "flags": {},
+            "order": 5,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "Location",
+                    "type": "vec3",
+                    "noodle": null,
+                    "socket_id": "min-final-t"
+                },
+                {
+                    "name": "Rotation",
+                    "type": "vec3",
+                    "noodle": null,
+                    "socket_id": "min-final-r"
+                },
+                {
+                    "name": "Scale",
+                    "type": "vec3",
+                    "noodle": null,
+                    "socket_id": "min-final-s"
+                }
+            ],
+            "outputSockets": [
+                {
+                    "name": "Transform",
+                    "type": "matrix",
+                    "noodles": [17],
+                    "socket_id": "min-final-out"
+                }
+            ],
+            "properties": {
+                "location": [0, 0, 3.5],
+                "rotation": [0, 0, 0],
+                "scale": [1, 1, 1]
+            },
+            "widgets_values": [0, 0, 0, 0, 0, 0, 1, 1, 1]
+        },
+        {
+            "id": 16,
+            "type": "math3d/combine_transform",
+            "pos": [1250, 620],
+            "size": {
+                "0": 210,
+                "1": 318
+            },
+            "flags": {},
+            "order": 6,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "Location",
+                    "type": "vec3",
+                    "noodle": null,
+                    "socket_id": "sec-final-t"
+                },
+                {
+                    "name": "Rotation",
+                    "type": "vec3",
+                    "noodle": null,
+                    "socket_id": "sec-final-r"
+                },
+                {
+                    "name": "Scale",
+                    "type": "vec3",
+                    "noodle": null,
+                    "socket_id": "sec-final-s"
+                }
+            ],
+            "outputSockets": [
+                {
+                    "name": "Transform",
+                    "type": "matrix",
+                    "noodles": [18],
+                    "socket_id": "sec-final-out"
+                }
+            ],
+            "properties": {
+                "location": [0, 0, 4],
+                "rotation": [0, 0, 0],
+                "scale": [1, 1, 1]
+            },
+            "widgets_values": [0, 0, 0, 0, 0, 0, 1, 1, 1]
+        },
+        {
+            "id": 17,
+            "type": "math3d/multiply_matrices",
+            "pos": [1480, 50],
+            "size": [160, 78],
+            "flags": {},
+            "order": 17,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "Matrix A",
+                    "type": "matrix",
+                    "noodle": 13,
+                    "socket_id": "hour-mult1-a"
+                },
+                {
+                    "name": "Matrix B",
+                    "type": "matrix",
+                    "noodle": 10,
+                    "socket_id": "hour-mult1-b"
+                }
+            ],
+            "outputSockets": [
+                {
+                    "name": "Result",
+                    "type": "matrix",
+                    "noodles": [19],
+                    "socket_id": "hour-mult1-out"
+                }
+            ],
+            "properties": {}
+        },
+        {
+            "id": 18,
+            "type": "math3d/multiply_matrices",
+            "pos": [1480, 250],
+            "size": [160, 78],
+            "flags": {},
+            "order": 18,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "Matrix A",
+                    "type": "matrix",
+                    "noodle": 14,
+                    "socket_id": "min-mult1-a"
+                },
+                {
+                    "name": "Matrix B",
+                    "type": "matrix",
+                    "noodle": 11,
+                    "socket_id": "min-mult1-b"
+                }
+            ],
+            "outputSockets": [
+                {
+                    "name": "Result",
+                    "type": "matrix",
+                    "noodles": [20],
+                    "socket_id": "min-mult1-out"
+                }
+            ],
+            "properties": {}
+        },
+        {
+            "id": 19,
+            "type": "math3d/multiply_matrices",
+            "pos": [1480, 450],
+            "size": [160, 78],
+            "flags": {},
+            "order": 19,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "Matrix A",
+                    "type": "matrix",
+                    "noodle": 15,
+                    "socket_id": "sec-mult1-a"
+                },
+                {
+                    "name": "Matrix B",
+                    "type": "matrix",
+                    "noodle": 12,
+                    "socket_id": "sec-mult1-b"
+                }
+            ],
+            "outputSockets": [
+                {
+                    "name": "Result",
+                    "type": "matrix",
+                    "noodles": [21],
+                    "socket_id": "sec-mult1-out"
+                }
+            ],
+            "properties": {}
+        },
+        {
+            "id": 20,
+            "type": "math3d/multiply_matrices",
+            "pos": [1680, 50],
+            "size": [160, 78],
+            "flags": {},
+            "order": 20,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "Matrix A",
+                    "type": "matrix",
+                    "noodle": 16,
+                    "socket_id": "hour-mult2-a"
+                },
+                {
+                    "name": "Matrix B",
+                    "type": "matrix",
+                    "noodle": 19,
+                    "socket_id": "hour-mult2-b"
+                }
+            ],
+            "outputSockets": [
+                {
+                    "name": "Result",
+                    "type": "matrix",
+                    "noodles": [22],
+                    "socket_id": "hour-mult2-out"
+                }
+            ],
+            "properties": {}
+        },
+        {
+            "id": 21,
+            "type": "math3d/multiply_matrices",
+            "pos": [1680, 250],
+            "size": [160, 78],
+            "flags": {},
+            "order": 21,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "Matrix A",
+                    "type": "matrix",
+                    "noodle": 17,
+                    "socket_id": "min-mult2-a"
+                },
+                {
+                    "name": "Matrix B",
+                    "type": "matrix",
+                    "noodle": 20,
+                    "socket_id": "min-mult2-b"
+                }
+            ],
+            "outputSockets": [
+                {
+                    "name": "Result",
+                    "type": "matrix",
+                    "noodles": [23],
+                    "socket_id": "min-mult2-out"
+                }
+            ],
+            "properties": {}
+        },
+        {
+            "id": 22,
+            "type": "math3d/multiply_matrices",
+            "pos": [1680, 450],
+            "size": [160, 78],
+            "flags": {},
+            "order": 22,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "Matrix A",
+                    "type": "matrix",
+                    "noodle": 18,
+                    "socket_id": "sec-mult2-a"
+                },
+                {
+                    "name": "Matrix B",
+                    "type": "matrix",
+                    "noodle": 21,
+                    "socket_id": "sec-mult2-b"
+                }
+            ],
+            "outputSockets": [
+                {
+                    "name": "Result",
+                    "type": "matrix",
+                    "noodles": [24],
+                    "socket_id": "sec-mult2-out"
+                }
+            ],
+            "properties": {}
+        },
+        {
+            "id": 23,
+            "type": "geometry/box",
+            "pos": [1890, 20],
+            "size": [210, 150],
+            "flags": {},
+            "order": 23,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "Width",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "hour-box-width"
+                },
+                {
+                    "name": "Depth",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "hour-box-depth"
+                },
+                {
+                    "name": "Height",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "hour-box-height"
+                },
+                {
+                    "name": "Color",
+                    "type": "color",
+                    "noodle": null,
+                    "socket_id": "hour-box-color"
+                },
+                {
+                    "name": "Matrix",
+                    "type": "matrix",
+                    "noodle": 22,
+                    "socket_id": "hour-box-matrix"
+                }
+            ],
+            "outputSockets": [
+                {
+                    "name": "Geometry",
+                    "type": "geometry",
+                    "noodles": [25],
+                    "socket_id": "hour-box-out"
+                }
+            ],
+            "properties": {
+                "width": 3,
+                "depth": 18,
+                "height": 2,
+                "color": "#444444",
+                "matrix": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+            }
+        },
+        {
+            "id": 24,
+            "type": "geometry/box",
+            "pos": [1890, 220],
+            "size": [210, 150],
+            "flags": {},
+            "order": 24,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "Width",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "min-box-width"
+                },
+                {
+                    "name": "Depth",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "min-box-depth"
+                },
+                {
+                    "name": "Height",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "min-box-height"
+                },
+                {
+                    "name": "Color",
+                    "type": "color",
+                    "noodle": null,
+                    "socket_id": "min-box-color"
+                },
+                {
+                    "name": "Matrix",
+                    "type": "matrix",
+                    "noodle": 23,
+                    "socket_id": "min-box-matrix"
+                }
+            ],
+            "outputSockets": [
+                {
+                    "name": "Geometry",
+                    "type": "geometry",
+                    "noodles": [26],
+                    "socket_id": "min-box-out"
+                }
+            ],
+            "properties": {
+                "width": 2,
+                "depth": 25,
+                "height": 1.5,
+                "color": "#666666",
+                "matrix": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+            }
+        },
+        {
+            "id": 25,
+            "type": "geometry/box",
+            "pos": [1890, 420],
+            "size": [210, 150],
+            "flags": {},
+            "order": 25,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "Width",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "sec-box-width"
+                },
+                {
+                    "name": "Depth",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "sec-box-depth"
+                },
+                {
+                    "name": "Height",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "sec-box-height"
+                },
+                {
+                    "name": "Color",
+                    "type": "color",
+                    "noodle": null,
+                    "socket_id": "sec-box-color"
+                },
+                {
+                    "name": "Matrix",
+                    "type": "matrix",
+                    "noodle": 24,
+                    "socket_id": "sec-box-matrix"
+                }
+            ],
+            "outputSockets": [
+                {
+                    "name": "Geometry",
+                    "type": "geometry",
+                    "noodles": [27],
+                    "socket_id": "sec-box-out"
+                }
+            ],
+            "properties": {
+                "width": 1,
+                "depth": 28,
+                "height": 1,
+                "color": "#ff0000",
+                "matrix": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+            }
+        },
+        {
+            "id": 26,
+            "type": "geometry/cylinder",
+            "pos": [1890, 620],
+            "size": [210, 150],
+            "flags": {},
+            "order": 7,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "Radius",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "face-radius"
+                },
+                {
+                    "name": "Height",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "face-height"
+                },
+                {
+                    "name": "Segments",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "face-segments"
+                },
+                {
+                    "name": "Color",
+                    "type": "color",
+                    "noodle": null,
+                    "socket_id": "face-color"
+                },
+                {
+                    "name": "Matrix",
+                    "type": "matrix",
+                    "noodle": null,
+                    "socket_id": "face-matrix"
+                }
+            ],
+            "outputSockets": [
+                {
+                    "name": "Geometry",
+                    "type": "geometry",
+                    "noodles": [28],
+                    "socket_id": "face-out"
+                }
+            ],
+            "properties": {
+                "radius": 30,
+                "height": 2,
+                "segments": 60,
+                "color": "#e0e0e0",
+                "matrix": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1]
+            }
+        },
+        {
+            "id": 27,
+            "type": "graph/output",
+            "pos": [2150, 300],
+            "size": {
+                "0": 196.60000610351562,
+                "1": 126
+            },
+            "flags": {},
+            "order": 26,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "Box - Geometry",
+                    "type": "geometry",
+                    "noodle": 25,
+                    "socket_id": "out-hour"
+                },
+                {
+                    "name": "Box - Geometry",
+                    "type": "geometry",
+                    "noodle": 26,
+                    "socket_id": "out-min"
+                },
+                {
+                    "name": "Box - Geometry",
+                    "type": "geometry",
+                    "noodle": 27,
+                    "socket_id": "out-sec"
+                },
+                {
+                    "name": "Cylinder - Geometry",
+                    "type": "geometry",
+                    "noodle": 28,
+                    "socket_id": "out-face"
+                },
+                {
+                    "name": "",
+                    "type": 0,
+                    "noodle": null,
+                    "socket_id": "out-empty"
+                }
+            ],
+            "properties": {
+                "inputSockets": [
+                    {
+                        "name": "Box - Geometry",
+                        "type": "geometry",
+                        "name_in_graph": "Geometry"
+                    },
+                    {
+                        "name": "Box - Geometry",
+                        "type": "geometry",
+                        "name_in_graph": "Geometry"
+                    },
+                    {
+                        "name": "Box - Geometry",
+                        "type": "geometry",
+                        "name_in_graph": "Geometry"
+                    },
+                    {
+                        "name": "Cylinder - Geometry",
+                        "type": "geometry",
+                        "name_in_graph": "Geometry"
+                    }
+                ]
+            }
+        }
+    ],
+    "noodles": [
+        [1, 1, "time-sec-out", 2, "hour-angle-a", "number"],
+        [2, 1, "time-sec-out", 3, "min-angle-a", "number"],
+        [3, 1, "time-sec-out", 4, "sec-angle-a", "number"],
+        [4, 2, "hour-angle-out", 5, "hour-rot-z", "number"],
+        [5, 3, "min-angle-out", 6, "min-rot-z", "number"],
+        [6, 4, "sec-angle-out", 7, "sec-rot-z", "number"],
+        [7, 5, "hour-rot-out", 11, "hour-rot-mat-r", "vec3"],
+        [8, 6, "min-rot-out", 12, "min-rot-mat-r", "vec3"],
+        [9, 7, "sec-rot-out", 13, "sec-rot-mat-r", "vec3"],
+        [10, 8, "hour-pivot-out", 17, "hour-mult1-b", "matrix"],
+        [11, 9, "min-pivot-out", 18, "min-mult1-b", "matrix"],
+        [12, 10, "sec-pivot-out", 19, "sec-mult1-b", "matrix"],
+        [13, 11, "hour-rot-mat-out", 17, "hour-mult1-a", "matrix"],
+        [14, 12, "min-rot-mat-out", 18, "min-mult1-a", "matrix"],
+        [15, 13, "sec-rot-mat-out", 19, "sec-mult1-a", "matrix"],
+        [16, 14, "hour-final-out", 20, "hour-mult2-a", "matrix"],
+        [17, 15, "min-final-out", 21, "min-mult2-a", "matrix"],
+        [18, 16, "sec-final-out", 22, "sec-mult2-a", "matrix"],
+        [19, 17, "hour-mult1-out", 20, "hour-mult2-b", "matrix"],
+        [20, 18, "min-mult1-out", 21, "min-mult2-b", "matrix"],
+        [21, 19, "sec-mult1-out", 22, "sec-mult2-b", "matrix"],
+        [22, 20, "hour-mult2-out", 23, "hour-box-matrix", "matrix"],
+        [23, 21, "min-mult2-out", 24, "min-box-matrix", "matrix"],
+        [24, 22, "sec-mult2-out", 25, "sec-box-matrix", "matrix"],
+        [25, 23, "hour-box-out", 27, "out-hour", "geometry"],
+        [26, 24, "min-box-out", 27, "out-min", "geometry"],
+        [27, 25, "sec-box-out", 27, "out-sec", "geometry"],
+        [28, 26, "face-out", 27, "out-face", "geometry"]
+    ],
+    "config": {},
+    "extra": {},
+    "version": 0.4,
+    "viewState": {
+        "scale": 0.6655000000000012,
+        "offset": [243.9490966796875, 31.542783737182617]
+    },
+    "dividerPosition": 40.4181,
+    "cameraState": {
+        "position": {
+            "x": -5.737104039808004,
+            "y": -33.580519984725306,
+            "z": 63.7582263934802
+        },
+        "target": {
+            "x": -4.552368566282942,
+            "y": 13.799025749273039,
+            "z": -37.423664515405946
+        },
+        "initialPosition": {
+            "x": 0,
+            "y": -80,
+            "z": 80
+        },
+        "initialTarget": {
+            "x": 0,
+            "y": 0,
+            "z": 2
+        }
+    }
+}

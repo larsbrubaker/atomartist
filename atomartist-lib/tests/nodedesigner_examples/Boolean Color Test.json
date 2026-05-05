@@ -1,0 +1,403 @@
+{
+    "last_node_id": 12,
+    "last_link_id": 22,
+    "nodes": [
+        {
+            "id": 4,
+            "type": "graph/output",
+            "pos": [1823, 65],
+            "size": {
+                "0": 188.1999969482422,
+                "1": 102
+            },
+            "flags": {},
+            "order": 5,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "Extrude - Geometry",
+                    "type": "geometry",
+                    "noodle": 21,
+                    "socket_id": "6707c8e4-78a7-4722-9679-9d6fb21bc5b6"
+                },
+                {
+                    "name": "Boolean - Geometry",
+                    "type": "geometry",
+                    "noodle": 19,
+                    "socket_id": "9b353b19-ee22-4201-afcd-a90b54579371"
+                },
+                {
+                    "name": "Box - Geometry",
+                    "type": "geometry",
+                    "noodle": 20,
+                    "socket_id": "8058b471-9942-4624-a62f-c34c60328072"
+                },
+                {
+                    "name": "",
+                    "type": 0,
+                    "noodle": null,
+                    "socket_id": "430ae619-c039-4036-be3c-3147cf674c23"
+                }
+            ],
+            "properties": {
+                "inputSockets": [
+                    {
+                        "name": "Extrude - Geometry",
+                        "type": "geometry",
+                        "name_in_graph": "Geometry"
+                    },
+                    {
+                        "name": "Boolean - Geometry",
+                        "type": "geometry",
+                        "name_in_graph": "Geometry"
+                    },
+                    {
+                        "name": "Box - Geometry",
+                        "type": "geometry",
+                        "name_in_graph": "Geometry"
+                    }
+                ]
+            }
+        },
+        {
+            "id": 6,
+            "type": "geometry/text",
+            "pos": [100, 65],
+            "size": [320, 150],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "Text",
+                    "type": "string",
+                    "noodle": null,
+                    "socket_id": "6deb5182-f54c-4b38-bbad-218665bac9d5"
+                },
+                {
+                    "name": "Size (pt)",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "d307ba1e-6005-40e7-8a9b-9b99d4538393"
+                },
+                {
+                    "name": "Font",
+                    "type": "string",
+                    "noodle": null,
+                    "socket_id": "1464ef28-fe0c-4ddf-9350-bf28ba9afc23"
+                },
+                {
+                    "name": "Wrap (mm)",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "c1a9a3a4-a2a7-4177-8c90-2e11ff3671ed"
+                },
+                {
+                    "name": "Bold",
+                    "type": "boolean",
+                    "noodle": null,
+                    "socket_id": "9f0cb22d-0232-44f5-ab96-9fbb10f90cc6"
+                }
+            ],
+            "outputSockets": [
+                {
+                    "name": "Paths",
+                    "type": "paths",
+                    "noodles": [11],
+                    "socket_id": "0b3bdfb0-67b9-4d58-8903-935f4672e39b",
+                    "socket_index": 0
+                }
+            ],
+            "properties": {
+                "text": "K TEST",
+                "fontSize": 173,
+                "fontFamily": "Oswald",
+                "bold": false,
+                "wrapWidth": 0
+            }
+        },
+        {
+            "id": 7,
+            "type": "geometry/bevel_path",
+            "pos": [449, 65],
+            "size": [584.4232363281253, 168.67632574462897],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "Paths",
+                    "type": "paths",
+                    "noodle": 11,
+                    "socket_id": "a9fb0270-f43d-470a-bee9-b270b9b87b64"
+                },
+                {
+                    "name": "Selection",
+                    "type": "boolean",
+                    "noodle": null,
+                    "socket_id": "e8e469ec-0c08-488d-b30c-6865e3f58bba"
+                },
+                {
+                    "name": "Radius",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "bb19e374-e171-44b1-a54d-2c8f46576bf9"
+                },
+                {
+                    "name": "Segments",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "82b10e72-5406-49a8-91bc-4e8b63b7497f"
+                },
+                {
+                    "name": "Bend Threshold",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "d317e1a2-3429-4d0f-bc12-5b7a395f956d"
+                }
+            ],
+            "outputSockets": [
+                {
+                    "name": "Paths",
+                    "type": "paths",
+                    "noodles": [16],
+                    "socket_id": "ce56a019-91a9-43f7-9c77-d174cd5b8620",
+                    "socket_index": 0
+                }
+            ],
+            "properties": {
+                "radius": 0,
+                "segments": 6,
+                "bendThreshold": 10
+            }
+        },
+        {
+            "id": 10,
+            "type": "geometry/box",
+            "pos": [736, 264],
+            "size": [210, 150],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "Width",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "a57d3983-9b3b-4cc8-a395-88ed435ed35c"
+                },
+                {
+                    "name": "Depth",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "0a4c93af-e8e1-4b37-a4c5-e9ae46c3a126"
+                },
+                {
+                    "name": "Height",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "60c14337-d2cf-4523-be30-da9ed569f77d"
+                },
+                {
+                    "name": "Color",
+                    "type": "color",
+                    "noodle": null,
+                    "socket_id": "3cd3c055-34d0-450d-9587-50383cd31020"
+                },
+                {
+                    "name": "Matrix",
+                    "type": "matrix",
+                    "noodle": null,
+                    "socket_id": "1a272a9b-b4e2-4e0c-a4f1-a3d4e0251197"
+                }
+            ],
+            "outputSockets": [
+                {
+                    "name": "Geometry",
+                    "type": "geometry",
+                    "noodles": [20, 22],
+                    "socket_id": "899af5f6-b364-48a4-8b33-63e346a1b695",
+                    "socket_index": 0
+                }
+            ],
+            "properties": {
+                "width": 20,
+                "depth": 20,
+                "height": 20,
+                "color": "#fe8d86",
+                "matrix": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -40.86589813232422, 73.42082977294922, 10, 1]
+            }
+        },
+        {
+            "id": 11,
+            "type": "geometry/combine",
+            "pos": [1471, 204],
+            "size": [210, 150],
+            "flags": {},
+            "order": 4,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "Primary",
+                    "type": "geometry",
+                    "noodle": 17,
+                    "socket_id": "7cf44001-420c-400b-b99f-8e2259f3cc5b"
+                },
+                {
+                    "name": "Secondary",
+                    "type": "geometry",
+                    "noodle": 22,
+                    "socket_id": "7261c934-ac0f-491c-a668-addaf031e280"
+                },
+                {
+                    "name": "Operation",
+                    "type": "string",
+                    "noodle": null,
+                    "socket_id": "5e48d929-25d8-429d-950b-3d6cbd4d7f87"
+                },
+                {
+                    "name": "Color",
+                    "type": "color",
+                    "noodle": null,
+                    "socket_id": "adfb65b7-cb8a-4f37-9048-e16a51ee7c37"
+                },
+                {
+                    "name": "Matrix",
+                    "type": "matrix",
+                    "noodle": null,
+                    "socket_id": "1fbc0142-3d8a-4c52-af41-cbacf48101ba"
+                }
+            ],
+            "outputSockets": [
+                {
+                    "name": "Geometry",
+                    "type": "geometry",
+                    "noodles": [19],
+                    "socket_id": "fbd6fa7b-c312-4b84-a32d-1b6b4711094d",
+                    "socket_index": 0
+                }
+            ],
+            "properties": {
+                "operation": "difference",
+                "color": null,
+                "matrix": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 36.20000457763672, -56.69999694824219, 0, 1]
+            }
+        },
+        {
+            "id": 12,
+            "type": "geometry/extrude",
+            "pos": [1078, 65],
+            "size": [274.8631347656253, 247.20533349609383],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "Paths",
+                    "type": "paths",
+                    "noodle": 16,
+                    "socket_id": "06419af5-a35f-44ec-a072-a126f54c9e9a"
+                },
+                {
+                    "name": "Height",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "f7110372-2e57-4b04-b3ff-5aef7a84d80f"
+                },
+                {
+                    "name": "Radius",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "a378780b-1e7e-4286-8b1a-949fb8820c64"
+                },
+                {
+                    "name": "Segments",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "fe760925-e6b7-41dd-937f-22b83d87619e"
+                },
+                {
+                    "name": "Bottom Radius",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "7f1a3a79-a758-48f0-8349-df88fca7d8b0"
+                },
+                {
+                    "name": "Bottom Segments",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "66983d6b-e5a1-4fe1-a186-765cb83820e8"
+                },
+                {
+                    "name": "Color",
+                    "type": "color",
+                    "noodle": null,
+                    "socket_id": "c6231fe7-1381-4f9f-ad7a-4c306cb930fe"
+                },
+                {
+                    "name": "Matrix",
+                    "type": "matrix",
+                    "noodle": null,
+                    "socket_id": "69314651-925c-4e30-b63c-6a617494bc26"
+                }
+            ],
+            "outputSockets": [
+                {
+                    "name": "Geometry",
+                    "type": "geometry",
+                    "noodles": [17, 18, 21],
+                    "socket_id": "d79d5403-7aa3-4e8f-bf33-4206abe86656",
+                    "socket_index": 0
+                }
+            ],
+            "properties": {
+                "height": 5,
+                "bevelRadius": 0.7657762578596156,
+                "bevelSegments": 6,
+                "bottomRadius": 1.3148405664082015,
+                "bottomSegments": 6,
+                "color": "#ffffff",
+                "matrix": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -58.94499969482422, 46.13800048828125, 0, 1]
+            }
+        }
+    ],
+    "noodles": [
+        [11, 6, "0b3bdfb0-67b9-4d58-8903-935f4672e39b", 7, "a9fb0270-f43d-470a-bee9-b270b9b87b64", "paths"],
+        [16, 7, "ce56a019-91a9-43f7-9c77-d174cd5b8620", 12, "06419af5-a35f-44ec-a072-a126f54c9e9a", "paths"],
+        [17, 12, "d79d5403-7aa3-4e8f-bf33-4206abe86656", 11, "7cf44001-420c-400b-b99f-8e2259f3cc5b", "geometry"],
+        [19, 11, "fbd6fa7b-c312-4b84-a32d-1b6b4711094d", 4, "9b353b19-ee22-4201-afcd-a90b54579371", "geometry"],
+        [20, 10, "899af5f6-b364-48a4-8b33-63e346a1b695", 4, "8058b471-9942-4624-a62f-c34c60328072", "geometry"],
+        [21, 12, "d79d5403-7aa3-4e8f-bf33-4206abe86656", 4, "6707c8e4-78a7-4722-9679-9d6fb21bc5b6", "geometry"],
+        [22, 10, "899af5f6-b364-48a4-8b33-63e346a1b695", 11, "7261c934-ac0f-491c-a668-addaf031e280", "geometry"]
+    ],
+    "config": {},
+    "extra": {},
+    "version": 0.4,
+    "viewState": {
+        "scale": 0.7513148009015777,
+        "offset": [177.786865234375, 48.49566650390625]
+    },
+    "dividerPosition": 48.5482,
+    "cameraState": {
+        "position": {
+            "x": 12.309285684688366,
+            "y": -54.670932632788116,
+            "z": 76.8718222728857
+        },
+        "target": {
+            "x": 29.08274204716224,
+            "y": -17.077052038309652,
+            "z": 34.114596782470755
+        },
+        "initialPosition": {
+            "x": -4.739360294326125,
+            "y": -47.39360294326124,
+            "z": 37.914882354609
+        },
+        "initialTarget": {
+            "x": 0,
+            "y": 0,
+            "z": 2.5
+        }
+    }
+}

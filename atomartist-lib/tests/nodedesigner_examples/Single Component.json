@@ -1,0 +1,142 @@
+{
+    "last_node_id": 20,
+    "last_link_id": 27,
+    "nodes": [
+        {
+            "id": 17,
+            "type": "graph/output",
+            "pos": [750, 50],
+            "size": {
+                "0": 205,
+                "1": 56
+            },
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "Component - Geometry",
+                    "type": "geometry",
+                    "noodle": 27,
+                    "socket_id": "5a06295c-b405-4d74-9dd4-a55ba6077ca2"
+                },
+                {
+                    "name": "",
+                    "type": 0,
+                    "noodle": null,
+                    "socket_id": "cc8239f7-4a23-4b19-bc61-de137c8c02ee"
+                }
+            ],
+            "properties": {
+                "inputSockets": [
+                    {
+                        "name": "Component - Geometry",
+                        "type": "geometry",
+                        "name_in_graph": "Geometry"
+                    }
+                ]
+            }
+        },
+        {
+            "id": 19,
+            "type": "graph/component-instance",
+            "pos": [488.00000000000114, 49.500000000000036],
+            "size": {
+                "0": 210,
+                "1": 174
+            },
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputSockets": [
+                {
+                    "name": "Text",
+                    "type": "string",
+                    "noodle": null,
+                    "socket_id": "3bc13b63-81bc-414b-8394-5ae6fce9a1cc"
+                },
+                {
+                    "name": "Size (pt)",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "32571d3e-ab16-4222-b1c5-5eb957e8d613"
+                },
+                {
+                    "name": "Height",
+                    "type": "number",
+                    "noodle": null,
+                    "socket_id": "a3076072-83a7-48c2-83ea-e40ed30589db"
+                },
+                {
+                    "name": "Font",
+                    "type": "string",
+                    "noodle": null,
+                    "socket_id": "3adef455-6748-4b74-9b0b-3b71eeebe3a3"
+                },
+                {
+                    "name": "Color",
+                    "type": "color",
+                    "noodle": null,
+                    "socket_id": "baa5bfeb-f2c6-4a39-8e23-ea9c7137f06c"
+                },
+                {
+                    "name": "Matrix",
+                    "type": "matrix",
+                    "noodle": null,
+                    "socket_id": "b55ad3c7-1bc2-484a-9e72-a18692ea5193"
+                }
+            ],
+            "outputSockets": [
+                {
+                    "name": "Geometry",
+                    "type": "geometry",
+                    "noodles": [27],
+                    "socket_id": "141d98cf-8c14-4121-9e3a-a0a328ec677f",
+                    "socket_index": 0
+                }
+            ],
+            "title": "3D Text",
+            "properties": {
+                "componentId": null,
+                "componentName": "3D Text",
+                "inputValues": {
+                    "Matrix": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -7.619442939758301, 7.665091514587402, 0, 1]
+                },
+                "examplePath": "3D Primitives/3D Text.example"
+            }
+        }
+    ],
+    "noodles": [
+        [27, 19, "141d98cf-8c14-4121-9e3a-a0a328ec677f", 17, "5a06295c-b405-4d74-9dd4-a55ba6077ca2", "geometry"]
+    ],
+    "config": {},
+    "extra": {},
+    "version": 0.4,
+    "viewState": {
+        "scale": 0.7513148009015777,
+        "offset": [256.43084716796875, 154.0475311279297]
+    },
+    "dividerPosition": 43.554,
+    "cameraState": {
+        "position": {
+            "x": -0.244870342736641,
+            "y": -4.956703822985238,
+            "z": 16.78591615391195
+        },
+        "target": {
+            "x": 2.2353730833568197,
+            "y": 36.56089568339487,
+            "z": -25.557517243828357
+        },
+        "initialPosition": {
+            "x": -4.739360294326125,
+            "y": -47.39360294326124,
+            "z": 37.914882354609
+        },
+        "initialTarget": {
+            "x": 0,
+            "y": 0,
+            "z": 2.5
+        }
+    }
+}
