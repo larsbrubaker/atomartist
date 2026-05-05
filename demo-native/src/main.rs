@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agg_gui::{App, DrawCtx, Key, Modifiers, MouseButton, Size, text::Font, theme::{set_visuals, Visuals}};
-use atomartist_ui::{build_app, fresh_state_with_starter_graph};
+use atomartist_ui::{build_app, fresh_state_with_starter_graph, top_menu_bar::FileDialogProvider};
 use demo_wgpu::{begin_frame, WgpuGfxCtx};
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, Event, MouseScrollDelta, WindowEvent};
@@ -235,7 +235,8 @@ fn main() {
 
     // Build the AtomArtist UI with a starter Box visible in the viewport.
     let state = fresh_state_with_starter_graph();
-    let root = build_app(state);
+    let dialogs: std::sync::Arc<dyn FileDialogProvider> = std::sync::Arc::new(NativeDialogs);
+    let root = build_app(state, dialogs);
     let mut app = App::new(root);
 
     let mut win_w = gpu.config.width;
@@ -352,6 +353,37 @@ fn main() {
             }
         })
         .expect("event loop run");
+}
+
+/// File-dialog provider for native — backed by `rfd`. Blocking dialogs
+/// are fine: the agg-gui App's render loop is paused while the modal is
+/// up, and the user's response unblocks it.
+struct NativeDialogs;
+impl FileDialogProvider for NativeDialogs {
+    fn pick_open_project(&self) -> Option<PathBuf> {
+        rfd::FileDialog::new()
+            .add_filter("AtomArtist project", &["json"])
+            .pick_file()
+    }
+    fn pick_save_project(&self, default_name: &str) -> Option<PathBuf> {
+        rfd::FileDialog::new()
+            .add_filter("AtomArtist project", &["json"])
+            .set_file_name(default_name)
+            .save_file()
+    }
+    fn pick_save_stl(&self, default_name: &str) -> Option<PathBuf> {
+        rfd::FileDialog::new()
+            .add_filter("Binary STL", &["stl"])
+            .set_file_name(default_name)
+            .save_file()
+    }
+    fn show_error(&self, message: &str) {
+        rfd::MessageDialog::new()
+            .set_title("AtomArtist")
+            .set_description(message)
+            .set_level(rfd::MessageLevel::Error)
+            .show();
+    }
 }
 
 /// Encode an RGBA8 buffer to PNG. The capture path returns Y-down rows

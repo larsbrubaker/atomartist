@@ -7,6 +7,7 @@
 //! computed mesh into `last_mesh_output`). On WASM the evaluator is invoked
 //! synchronously each frame, but the same shape works without modification.
 
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -14,6 +15,9 @@ use agg_gui::undo::UndoBuffer;
 use atomartist_lib::graph::executor::evaluate_dirty;
 use atomartist_lib::graph::node::{NodeId, PortValue};
 use atomartist_lib::registry::NodeRegistry;
+use atomartist_lib::serialization::{
+    export_stl, graph_from_json_str, graph_to_json_string,
+};
 use atomartist_lib::Graph;
 use manifold_rust::types::MeshGL;
 
@@ -33,6 +37,9 @@ pub struct AppState {
     /// `None`, the viewport shows nothing (empty grid). Phase 4+ wires this
     /// up to user selection.
     pub display_node: Arc<Mutex<Option<NodeId>>>,
+    /// Path of the currently-open project file (`Save` writes here without
+    /// re-prompting). `None` when the project has never been saved.
+    pub current_file: Arc<Mutex<Option<PathBuf>>>,
 }
 
 impl AppState {
@@ -44,6 +51,7 @@ impl AppState {
             last_mesh_output: Arc::new(Mutex::new(None)),
             viewport_dirty: Arc::new(AtomicBool::new(false)),
             display_node: Arc::new(Mutex::new(None)),
+            current_file: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -158,6 +166,62 @@ impl Clone for AppState {
             last_mesh_output: self.last_mesh_output.clone(),
             viewport_dirty: self.viewport_dirty.clone(),
             display_node: self.display_node.clone(),
+            current_file: self.current_file.clone(),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// File operations — invoked from menu actions in `top_menu_bar`.
+// ---------------------------------------------------------------------------
+
+impl AppState {
+    /// Replace the current graph with an empty one. Clears undo history
+    /// and the current-file slot.
+    pub fn new_empty_project(&self) {
+        *self.graph.lock().unwrap() = Graph::new();
+        self.undo.lock().unwrap().clear_history();
+        *self.current_file.lock().unwrap() = None;
+        *self.display_node.lock().unwrap() = None;
+        *self.last_mesh_output.lock().unwrap() = None;
+        self.mark_viewport_dirty();
+    }
+
+    /// Load a graph from `path`. Replaces the current graph wholesale,
+    /// clears undo history, and runs an initial evaluation so the
+    /// viewport repopulates. Returns `Err` with a user-readable message
+    /// on parse / IO failure.
+    pub fn load_graph_from_path(&self, path: &Path) -> Result<(), String> {
+        let s = std::fs::read_to_string(path).map_err(|e| format!("read {}: {}", path.display(), e))?;
+        let result = graph_from_json_str(&s, &self.registry).map_err(|e| e.to_string())?;
+        *self.graph.lock().unwrap() = result.graph;
+        self.undo.lock().unwrap().clear_history();
+        *self.current_file.lock().unwrap() = Some(path.to_path_buf());
+        // Pick a default display node — the highest-id node with a
+        // Geometry3d output, matching what evaluate_now does.
+        *self.display_node.lock().unwrap() = None;
+        self.evaluate_now();
+        Ok(())
+    }
+
+    /// Save the current graph to `path` (JSON). Updates `current_file`.
+    pub fn save_graph_to_path(&self, path: &Path) -> Result<(), String> {
+        let json = graph_to_json_string(&self.graph.lock().unwrap());
+        std::fs::write(path, json).map_err(|e| format!("write {}: {}", path.display(), e))?;
+        *self.current_file.lock().unwrap() = Some(path.to_path_buf());
+        Ok(())
+    }
+
+    /// Save the current displayed mesh as a binary STL.
+    pub fn export_stl_to_path(&self, path: &Path) -> Result<(), String> {
+        let mesh = self
+            .last_mesh_output
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| "no geometry to export — wire up a node with a 3D output".to_string())?;
+        let bytes = export_stl(&mesh);
+        std::fs::write(path, bytes).map_err(|e| format!("write {}: {}", path.display(), e))?;
+        Ok(())
     }
 }

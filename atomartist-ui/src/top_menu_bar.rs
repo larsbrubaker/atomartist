@@ -5,15 +5,45 @@
 //! For now the action strings are surfaced via the `on_action` callback
 //! handed to `MenuBar`; future iterations wire them up to `AppState`.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use agg_gui::{text::Font, MenuBar, MenuEntry, MenuItem, TopMenu};
 
 use crate::app_state::AppState;
 
+/// Platform-supplied file-picker hooks. demo-native provides an `rfd`-
+/// backed implementation; demo-wasm will provide a browser File API
+/// version. The trait is invoked from the menu's action callback so the
+/// platform can put up a modal dialog and return the chosen path.
+pub trait FileDialogProvider: Send + Sync {
+    fn pick_open_project(&self) -> Option<PathBuf>;
+    fn pick_save_project(&self, default_name: &str) -> Option<PathBuf>;
+    fn pick_save_stl(&self, default_name: &str) -> Option<PathBuf>;
+    /// User-facing error notice — typically a message dialog. Returning
+    /// nothing keeps the trait simple; severity is implicit "error".
+    fn show_error(&self, message: &str);
+}
+
+/// No-op file-dialog provider used by tests / WASM (until Phase 10 wires
+/// up the browser File API). Every call returns `None`.
+pub struct NoFileDialogs;
+impl FileDialogProvider for NoFileDialogs {
+    fn pick_open_project(&self) -> Option<PathBuf> { None }
+    fn pick_save_project(&self, _name: &str) -> Option<PathBuf> { None }
+    fn pick_save_stl(&self, _name: &str) -> Option<PathBuf> { None }
+    fn show_error(&self, _message: &str) {}
+}
+
 /// Build the application's top menu bar widget. `state` is captured so
 /// menu actions can mutate the graph (load/save, undo/redo, add-node).
-pub fn build_menu_bar(state: AppState, font: Arc<Font>) -> MenuBar {
+/// `dialogs` injects platform-specific file pickers; pass
+/// `NoFileDialogs` from tests / non-native shells.
+pub fn build_menu_bar(
+    state: AppState,
+    font: Arc<Font>,
+    dialogs: Arc<dyn FileDialogProvider>,
+) -> MenuBar {
     let menus = vec![
         TopMenu::new(
             "File",
@@ -56,8 +86,9 @@ pub fn build_menu_bar(state: AppState, font: Arc<Font>) -> MenuBar {
     ];
 
     let dispatch_state = state;
+    let dispatch_dialogs = dialogs;
     MenuBar::new(font, menus, move |action| {
-        handle_action(&dispatch_state, action);
+        handle_action(&dispatch_state, dispatch_dialogs.as_ref(), action);
     })
     .with_font_size(13.0)
 }
@@ -84,7 +115,7 @@ fn build_add_node_entries(state: &AppState) -> Vec<MenuEntry> {
     out
 }
 
-fn handle_action(state: &AppState, action: &str) {
+fn handle_action(state: &AppState, dialogs: &dyn FileDialogProvider, action: &str) {
     use agg_gui::theme::{set_visuals, Visuals};
     if let Some(type_id) = action.strip_prefix("add.") {
         // Find the action's NodeDef by its dynamic type_id string and
@@ -121,7 +152,48 @@ fn handle_action(state: &AppState, action: &str) {
             buf.redo();
             state.schedule_evaluate();
         }
-        // Stubs — wire to file dialogs / save / load in a follow-up.
+        "file.new" => state.new_empty_project(),
+        "file.open" => {
+            if let Some(path) = dialogs.pick_open_project() {
+                if let Err(e) = state.load_graph_from_path(&path) {
+                    dialogs.show_error(&format!("Open failed: {}", e));
+                }
+            }
+        }
+        "file.save" => {
+            // If we already have a path, save directly. Otherwise prompt.
+            let existing = state.current_file.lock().unwrap().clone();
+            let path = match existing {
+                Some(p) => Some(p),
+                None => dialogs.pick_save_project("untitled.atomartist.json"),
+            };
+            if let Some(p) = path {
+                if let Err(e) = state.save_graph_to_path(&p) {
+                    dialogs.show_error(&format!("Save failed: {}", e));
+                }
+            }
+        }
+        "file.save_as" => {
+            let suggested = state
+                .current_file
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()))
+                .unwrap_or_else(|| "untitled.atomartist.json".to_string());
+            if let Some(path) = dialogs.pick_save_project(&suggested) {
+                if let Err(e) = state.save_graph_to_path(&path) {
+                    dialogs.show_error(&format!("Save failed: {}", e));
+                }
+            }
+        }
+        "file.export_stl" => {
+            if let Some(path) = dialogs.pick_save_stl("export.stl") {
+                if let Err(e) = state.export_stl_to_path(&path) {
+                    dialogs.show_error(&format!("Export failed: {}", e));
+                }
+            }
+        }
         _ => {}
     }
 }

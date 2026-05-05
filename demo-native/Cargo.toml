@@ -21,6 +21,7 @@ winit               = "0.30"
 pollster            = "0.4"
 raw-window-handle   = "0.6"
 image               = { version = "0.24", default-features = false, features = ["png"] }
+rfd                 = "0.15"
 
 [dependencies.wgpu]
 version = "29"
