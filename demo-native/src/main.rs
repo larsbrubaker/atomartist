@@ -271,11 +271,14 @@ fn main() {
                 Event::WindowEvent {
                     event: WindowEvent::CursorMoved { position, .. }, ..
                 } => {
-                    let scale = window.scale_factor();
-                    let (lx, ly) = (position.x / scale, position.y / scale);
-                    // Y-flip: agg-gui is Y-up.
-                    cursor_x = lx;
-                    cursor_y = (win_h as f64 / scale) - ly;
+                    // agg-gui's App::on_mouse_* expects RAW physical coords
+                    // from winit (Y-down) — it handles scale + Y-flip
+                    // internally via the registered device_scale and the
+                    // viewport size passed to app.layout. Don't pre-convert
+                    // here; that double-flips and causes hit-testing to
+                    // route every event to the viewport at the bottom.
+                    cursor_x = position.x;
+                    cursor_y = position.y;
                     app.on_mouse_move(cursor_x, cursor_y);
                     window.request_redraw();
                 }
