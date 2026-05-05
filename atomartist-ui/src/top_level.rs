@@ -7,13 +7,14 @@
 use std::sync::Arc;
 
 use agg_gui::{
-    font_settings::current_system_font, FlexColumn, HAnchor, Splitter, VAnchor, Widget,
+    font_settings::current_system_font, Button, FlexColumn, FlexRow, HAnchor, Insets, Label,
+    Spacer, Splitter, VAnchor, Widget,
 };
 use atomartist_renderer::{Viewport3dWidget, ViewportInputs};
 
 use crate::app_state::AppState;
 use crate::canvas_widget::NodeCanvas;
-use crate::top_menu_bar::{build_menu_bar, FileDialogProvider};
+use crate::top_menu_bar::{build_menu_bar_sized, FileDialogProvider};
 #[cfg(test)]
 use crate::top_menu_bar::NoFileDialogs;
 
@@ -31,7 +32,38 @@ pub fn build_app(state: AppState, dialogs: Arc<dyn FileDialogProvider>) -> Box<d
     // font_settings before building the tree, so this fall-through is safe.
     let font: Arc<agg_gui::text::Font> =
         current_system_font().expect("system font must be installed before build_app");
-    let menu_bar: Box<dyn Widget> = Box::new(build_menu_bar(state.clone(), font, dialogs));
+    let menu_bar: Box<dyn Widget> = build_menu_bar_sized(state.clone(), font.clone(), dialogs);
+
+    // Top chrome row: menu bar on the left, spacer pushes title + License
+    // + About to the right (matching NodeDesigner's reference layout).
+    // Constrain max height so the row doesn't claim the full column.
+    let project_title: Box<dyn Widget> = Box::new(
+        Label::new("Untitled Project", font.clone())
+            .with_align(agg_gui::widgets::label::LabelAlign::Right)
+            .with_margin(Insets::symmetric(8.0, 6.0)),
+    );
+    let license_btn: Box<dyn Widget> = Box::new(
+        Button::new("License", font.clone())
+            .with_margin(Insets::symmetric(4.0, 4.0))
+            .on_click(|| {})
+    );
+    let about_btn: Box<dyn Widget> = Box::new(
+        Button::new("About", font.clone())
+            .with_margin(Insets::symmetric(4.0, 4.0))
+            .on_click(|| {})
+    );
+
+    let top_row: Box<dyn Widget> = Box::new(
+        FlexRow::new()
+            .with_h_anchor(HAnchor::STRETCH)
+            .with_v_anchor(VAnchor::FIT)
+            .with_max_size(agg_gui::Size::new(f64::INFINITY, 36.0))
+            .add(menu_bar)
+            .add_flex(Box::new(Spacer::new().with_h_anchor(HAnchor::STRETCH)), 1.0)
+            .add(project_title)
+            .add(license_btn)
+            .add(about_btn),
+    );
 
     // Vertical Splitter sits below the menu bar so the user can drag
     // the divider between viewport and canvas. ratio=0.6 = top pane gets
@@ -46,7 +78,7 @@ pub fn build_app(state: AppState, dialogs: Arc<dyn FileDialogProvider>) -> Box<d
     let column = FlexColumn::new()
         .with_h_anchor(HAnchor::STRETCH)
         .with_v_anchor(VAnchor::STRETCH)
-        .add(menu_bar)
+        .add(top_row)
         .add_flex(split, 1.0);
     Box::new(column)
 }

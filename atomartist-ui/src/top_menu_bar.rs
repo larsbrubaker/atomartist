@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use agg_gui::{text::Font, MenuBar, MenuEntry, MenuItem, TopMenu};
+use agg_gui::{text::Font, MenuBar, MenuEntry, MenuItem, SizedBox, TopMenu, Widget};
 
 use crate::app_state::AppState;
 
@@ -91,6 +91,28 @@ pub fn build_menu_bar(
         handle_action(&dispatch_state, dispatch_dialogs.as_ref(), action);
     })
     .with_font_size(13.0)
+}
+
+/// Build the menu bar wrapped in a SizedBox sized to its natural content
+/// width. Required because agg-gui's `MenuBar::layout` returns the full
+/// available width (claiming all of a parent FlexRow's space), preventing
+/// sibling chrome (project title, License/About) from getting any room.
+/// Returns a `Box<dyn Widget>` ready to drop into a FlexRow.
+pub fn build_menu_bar_sized(
+    state: AppState,
+    font: Arc<Font>,
+    dialogs: Arc<dyn FileDialogProvider>,
+) -> Box<dyn Widget> {
+    let bar = build_menu_bar(state, font, dialogs);
+    // Compute tight width using the same per-menu math agg-gui's MenuBar
+    // uses (8px per char + 22 padding, min 52). Conservative add-7 here
+    // to account for sub-pixel rendering.
+    let labels = ["File", "Edit", "Settings", "Help", "Add Node"];
+    let total: f64 = labels
+        .iter()
+        .map(|l| (l.chars().count() as f64 * 8.0 + 22.0).max(52.0))
+        .sum();
+    Box::new(SizedBox::new().with_width(total + 8.0).with_child(Box::new(bar)))
 }
 
 /// Walk the `NodeRegistry` and build a category-grouped Add Node submenu
