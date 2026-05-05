@@ -14,8 +14,8 @@
 use std::collections::HashSet;
 
 use agg_gui::{
-    Color, DrawCtx, Event, EventResult, HAnchor, Key, Modifiers, MouseButton, Point, Rect, Size,
-    VAnchor, Widget, WidgetBase,
+    Color, DrawCtx, Event, EventResult, HAnchor, Key, MenuEntry, MenuItem, MenuResponse,
+    Modifiers, MouseButton, Point, PopupMenu, Rect, Size, VAnchor, Widget, WidgetBase,
 };
 
 use atomartist_lib::graph::graph::{Edge, GraphError};
@@ -80,10 +80,15 @@ pub struct NodeCanvas {
     /// Spacebar pan modifier — when held, mouse-left drag pans the canvas
     /// instead of selecting / dragging nodes.
     space_held: bool,
+    /// Right-click add-node popup menu, plus the canvas-space position
+    /// where the user clicked (used as the new node's position).
+    popup: PopupMenu,
+    popup_canvas_pos: [f64; 2],
 }
 
 impl NodeCanvas {
     pub fn new(state: AppState) -> Self {
+        let popup_items = build_add_node_popup_items(&state);
         Self {
             bounds: Rect::new(0.0, 0.0, 0.0, 0.0),
             children: Vec::new(),
@@ -97,6 +102,8 @@ impl NodeCanvas {
             palette: CanvasPalette::dark(),
             interaction: CanvasState::Idle,
             space_held: false,
+            popup: PopupMenu::new(popup_items),
+            popup_canvas_pos: [0.0, 0.0],
         }
     }
 
@@ -162,6 +169,27 @@ impl NodeCanvas {
             }
         }
         None
+    }
+
+    /// Action callback for the right-click popup — currently only handles
+    /// `"add.{type_id}"` entries. The new node is positioned at the
+    /// canvas-space click location captured when the popup opened.
+    fn handle_popup_action(&mut self, action: &str) {
+        if let Some(type_id) = action.strip_prefix("add.") {
+            let interned = self
+                .state
+                .registry
+                .iter()
+                .map(|d| d.type_id())
+                .find(|s| *s == type_id);
+            if let Some(static_id) = interned {
+                let pos = self.popup_canvas_pos;
+                let mut g = self.state.graph.lock().unwrap();
+                let _ = add_node_with_defaults(&mut g, &self.state.registry, static_id, pos);
+                drop(g);
+                self.state.schedule_evaluate();
+            }
+        }
     }
 
     /// If `node_id` has a Geometry3d output, set it as the viewport's
@@ -343,6 +371,14 @@ impl Widget for NodeCanvas {
         }
 
         ctx.restore();
+
+        // Right-click popup paints last so it sits above nodes & connections.
+        if self.popup.is_open() {
+            if let Some(font) = agg_gui::font_settings::current_system_font() {
+                let viewport = Size::new(self.bounds.width, self.bounds.height);
+                self.popup.paint(ctx, font, 13.0, viewport);
+            }
+        }
     }
 
     fn hit_test(&self, local_pos: Point) -> bool {
@@ -357,6 +393,22 @@ impl Widget for NodeCanvas {
     }
 
     fn on_event(&mut self, event: &Event) -> EventResult {
+        // Popup gets first crack when open; on Action, add the chosen node
+        // and close. Anything not consumed by the popup falls through to
+        // the canvas's normal handling below.
+        if self.popup.is_open() {
+            let viewport = Size::new(self.bounds.width, self.bounds.height);
+            let (result, response) = self.popup.handle_event(event, viewport);
+            if let MenuResponse::Action(action) = response {
+                self.handle_popup_action(&action);
+                self.popup.close();
+            } else if let MenuResponse::Closed = response {
+                self.popup.close();
+            }
+            if result == EventResult::Consumed {
+                return EventResult::Consumed;
+            }
+        }
         match event {
             Event::MouseDown { pos, button, modifiers } => self.on_mouse_down(*pos, *button, *modifiers),
             Event::MouseUp { pos, button, modifiers } => self.on_mouse_up(*pos, *button, *modifiers),
@@ -443,8 +495,10 @@ impl NodeCanvas {
                 EventResult::Consumed
             }
             MouseButton::Right => {
-                // Phase 4 will spawn the add-node menu here. For now, eat
-                // the event so the parent doesn't get it.
+                // Open the add-node popup at the cursor. Remember the
+                // canvas-space position so the new node anchors there.
+                self.popup_canvas_pos = canvas_pos;
+                self.popup.open_at(pos);
                 EventResult::Consumed
             }
             _ => EventResult::Ignored,
@@ -596,6 +650,29 @@ impl NodeCanvas {
         }
         EventResult::Ignored
     }
+}
+
+/// Build the right-click "Add Node" menu — category-grouped submenus
+/// containing every registered node type. Action ids are
+/// `"add.{type_id}"` matching the top menu bar's convention.
+fn build_add_node_popup_items(state: &AppState) -> Vec<MenuEntry> {
+    let mut out = Vec::new();
+    for (cat, defs) in state.registry.by_category() {
+        if defs.is_empty() {
+            continue;
+        }
+        let items = defs
+            .iter()
+            .map(|d| {
+                MenuEntry::Item(MenuItem::action(
+                    d.display_name(),
+                    format!("add.{}", d.type_id()),
+                ))
+            })
+            .collect();
+        out.push(MenuEntry::Item(MenuItem::submenu(cat, items)));
+    }
+    out
 }
 
 /// Free function for tests / external callers — adds a node with default
