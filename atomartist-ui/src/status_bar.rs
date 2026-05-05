@@ -61,6 +61,9 @@ impl Widget for StatusBar {
         let h = self.bounds.height;
         if w <= 0.0 || h <= 0.0 { return; }
 
+        ctx.save();
+        ctx.clip_rect(0.0, 0.0, w, h);
+
         let visuals = ctx.visuals();
         // Thin separator above + tinted strip — distinct from canvas + viewport.
         ctx.set_fill_color(visuals.panel_fill);
@@ -105,6 +108,8 @@ impl Widget for StatusBar {
         ctx.fill_text(&right_text, w - est_w - 12.0, y);
 
         let _ = Color::transparent(); // Color import kept for future use
+
+        ctx.restore();
     }
 
     fn hit_test(&self, _local_pos: Point) -> bool {

@@ -322,6 +322,13 @@ impl Widget for Viewport3dWidget {
             ctx.set_font(f);
         }
 
+        // Clip 2-D paint calls to widget bounds so the empty-state hint
+        // text and border can't bleed into siblings when the splitter
+        // shrinks our pane. The wgpu pass below uses set_scissor_rect
+        // for the same purpose on the 3-D side.
+        ctx.save();
+        ctx.clip_rect(0.0, 0.0, w, h);
+
         // Background fill always painted via the 2-D ctx so the underlying
         // surface gets a solid backdrop before the 3-D pass overdraws on top.
         ctx.set_fill_color(self.bg_color);
@@ -370,6 +377,8 @@ impl Widget for Viewport3dWidget {
         ctx.begin_path();
         ctx.rect(0.5, 0.5, (w - 1.0).max(0.0), (h - 1.0).max(0.0));
         ctx.stroke();
+
+        ctx.restore(); // pop clip
     }
 
     fn claims_pointer_exclusively(&self, _local_pos: Point) -> bool {

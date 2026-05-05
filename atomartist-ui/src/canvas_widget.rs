@@ -296,6 +296,13 @@ impl Widget for NodeCanvas {
             ctx.set_font(f);
         }
 
+        // Outer save: the clip and any subsequent transforms restore back
+        // to whatever the parent gave us. Without this, nodes drawn at
+        // canvas-y > self.bounds.height bleed into the sibling pane above
+        // when the splitter shrinks the canvas.
+        ctx.save();
+        ctx.clip_rect(0.0, 0.0, w, h);
+
         // Background
         ctx.set_fill_color(self.palette.canvas_bg);
         ctx.begin_path();
@@ -370,15 +377,18 @@ impl Widget for NodeCanvas {
             draw_node(ctx, l, selected, &self.palette);
         }
 
-        ctx.restore();
+        ctx.restore();   // pop pan/zoom transform
 
         // Right-click popup paints last so it sits above nodes & connections.
+        // Painted INSIDE the clip so the menu also can't escape canvas bounds.
         if self.popup.is_open() {
             if let Some(font) = agg_gui::font_settings::current_system_font() {
                 let viewport = Size::new(self.bounds.width, self.bounds.height);
                 self.popup.paint(ctx, font, 13.0, viewport);
             }
         }
+
+        ctx.restore();   // pop clip rect
     }
 
     fn hit_test(&self, local_pos: Point) -> bool {
