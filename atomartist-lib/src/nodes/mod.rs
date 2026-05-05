@@ -12,6 +12,9 @@ pub mod ops_3d;
 pub mod output_node;
 pub mod primitives_2d;
 pub mod primitives_3d;
+pub mod subgraph_node;
+
+pub use subgraph_node::{register_subgraph, SubgraphNodeDef};
 
 use crate::registry::NodeRegistry;
 

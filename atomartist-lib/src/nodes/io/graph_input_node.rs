@@ -30,16 +30,17 @@ impl NodeDef for GraphInputNode {
     fn properties(&self) -> Vec<PropDef> {
         vec![
             PropDef::new("name", PortValue::StringVal(Arc::new("input".into()))),
+            // Set by SubgraphNodeDef::evaluate before running the
+            // executor on the cloned template; standalone (non-subgraph)
+            // usage leaves it `None` and the node emits `None`.
+            PropDef::new("_injected", PortValue::None),
         ]
     }
 
-    fn evaluate(&self, _inputs: &NodeInputs, _props: &NodeProperties) -> Result<NodeOutputs, NodeError> {
-        // Standalone (non-subgraph) usage emits None — the parent has
-        // nothing to inject. When this node is hosted inside a Subgraph,
-        // the SubgraphNodeDef::evaluate sets `out` directly via cached
-        // override before calling the executor.
+    fn evaluate(&self, _inputs: &NodeInputs, props: &NodeProperties) -> Result<NodeOutputs, NodeError> {
+        let value = props.get("_injected").clone();
         let mut out = NodeOutputs::default();
-        out.set("out", PortValue::None);
+        out.set("out", value);
         Ok(out)
     }
 }

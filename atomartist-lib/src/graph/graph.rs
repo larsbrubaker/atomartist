@@ -73,6 +73,13 @@ impl Graph {
         self.nodes.values()
     }
 
+    /// Mutable iteration over every node — used by `SubgraphNodeDef` to
+    /// flag every node dirty before re-evaluating a freshly-cloned
+    /// template.
+    pub fn nodes_mut(&mut self) -> impl Iterator<Item = &mut NodeInstance> {
+        self.nodes.values_mut()
+    }
+
     pub fn node_count(&self) -> usize {
         self.nodes.len()
     }
