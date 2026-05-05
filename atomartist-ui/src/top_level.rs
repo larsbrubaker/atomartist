@@ -6,7 +6,9 @@
 
 use std::sync::Arc;
 
-use agg_gui::{font_settings::current_system_font, FlexColumn, HAnchor, VAnchor, Widget};
+use agg_gui::{
+    font_settings::current_system_font, FlexColumn, HAnchor, Splitter, VAnchor, Widget,
+};
 use atomartist_renderer::{Viewport3dWidget, ViewportInputs};
 
 use crate::app_state::AppState;
@@ -31,12 +33,21 @@ pub fn build_app(state: AppState, dialogs: Arc<dyn FileDialogProvider>) -> Box<d
         current_system_font().expect("system font must be installed before build_app");
     let menu_bar: Box<dyn Widget> = Box::new(build_menu_bar(state.clone(), font, dialogs));
 
+    // Vertical Splitter sits below the menu bar so the user can drag
+    // the divider between viewport and canvas. ratio=0.6 = top pane gets
+    // 60% of the height (matching NodeDesigner's default).
+    let split: Box<dyn Widget> = Box::new(
+        Splitter::vertical(viewport, canvas)
+            .with_ratio(0.6)
+            .with_h_anchor(HAnchor::STRETCH)
+            .with_v_anchor(VAnchor::STRETCH),
+    );
+
     let column = FlexColumn::new()
         .with_h_anchor(HAnchor::STRETCH)
         .with_v_anchor(VAnchor::STRETCH)
         .add(menu_bar)
-        .add_flex(viewport, 1.5)
-        .add_flex(canvas, 1.0);
+        .add_flex(split, 1.0);
     Box::new(column)
 }
 
