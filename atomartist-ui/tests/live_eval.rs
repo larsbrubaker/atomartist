@@ -7,7 +7,7 @@ use atomartist_lib::nodes;
 use atomartist_lib::registry::NodeRegistry;
 use atomartist_lib::Graph;
 use atomartist_ui::AppState;
-use atomartist_ui::canvas_widget::add_node_with_defaults;
+use atomartist_ui::add_node_with_defaults;
 
 fn fresh_state() -> AppState {
     let mut reg = NodeRegistry::new();

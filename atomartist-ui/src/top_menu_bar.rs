@@ -145,7 +145,7 @@ fn handle_action(state: &AppState, dialogs: &dyn FileDialogProvider, action: &st
             .find(|s| *s == type_id);
         if let Some(static_id) = interned {
             let mut g = state.graph.lock().unwrap();
-            let _ = crate::canvas_widget::add_node_with_defaults(
+            let _ = crate::node_helpers::add_node_with_defaults(
                 &mut g,
                 &state.registry,
                 static_id,

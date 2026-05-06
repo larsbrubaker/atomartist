@@ -47,6 +47,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "agg-gui-node-editor"
+version = "0.0.1"
+dependencies = [
+ "agg-gui",
+]
+
+[[package]]
 name = "agg-rust"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -352,6 +359,7 @@ name = "atomartist-ui"
 version = "0.0.1"
 dependencies = [
  "agg-gui",
+ "agg-gui-node-editor",
  "atomartist-lib",
  "atomartist-renderer",
  "manifold-rust",

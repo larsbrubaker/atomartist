@@ -14,7 +14,9 @@ use atomartist_ui_test::TestHarness;
 fn canvas_widget_has_stable_id() {
     let h = TestHarness::new();
     let canvas = h.find_by_id("node-canvas").expect("canvas widget");
-    assert_eq!(canvas.type_name(), "NodeCanvas");
+    // Type name now reflects the generic agg-gui-node-editor widget;
+    // the id stays stable so existing test selectors still hit it.
+    assert_eq!(canvas.type_name(), "NodeEditor");
 }
 
 #[test]
@@ -34,7 +36,7 @@ fn status_bar_has_stable_id() {
 #[test]
 fn find_by_type_locates_canvas() {
     let h = TestHarness::new();
-    let canvas = h.find_by_type("NodeCanvas").expect("by-type lookup");
+    let canvas = h.find_by_type("NodeEditor").expect("by-type lookup");
     assert!(canvas.id() == Some("node-canvas"));
 }
 
@@ -46,7 +48,7 @@ fn snapshot_includes_all_three_atomartist_widgets() {
     let h = TestHarness::new();
     let snap = h.snapshot();
     let types: Vec<&str> = snap.iter().map(|n| n.type_name).collect();
-    assert!(types.contains(&"NodeCanvas"));
+    assert!(types.contains(&"NodeEditor"));
     assert!(types.contains(&"Viewport3dWidget"));
     assert!(types.contains(&"StatusBar"));
 }

@@ -13,7 +13,8 @@ use agg_gui::{
 use atomartist_renderer::{Viewport3dWidget, ViewportInputs};
 
 use crate::app_state::AppState;
-use crate::canvas_widget::NodeCanvas;
+use agg_gui_node_editor::NodeEditor;
+use crate::app_state_model::shared_model_for;
 use crate::status_bar::StatusBar;
 use crate::top_menu_bar::{build_menu_bar_sized, FileDialogProvider};
 #[cfg(test)]
@@ -24,7 +25,13 @@ use crate::top_menu_bar::NoFileDialogs;
 /// Layout (matching NodeDesigner): vertical stack — top menu bar, then
 /// 3D viewport (60% of remaining height), then node canvas (40%).
 pub fn build_app(state: AppState, dialogs: Arc<dyn FileDialogProvider>) -> Box<dyn Widget> {
-    let canvas: Box<dyn Widget> = Box::new(NodeCanvas::new(state.clone()));
+    // The node-canvas widget is now the generic `agg_gui_node_editor::NodeEditor`
+    // driven by an `AppStateModel` adapter. We keep the widget id "node-canvas"
+    // so existing tests (find_widget_by_id("node-canvas")) and external
+    // selection mirroring continue to work.
+    let canvas: Box<dyn Widget> = Box::new(
+        NodeEditor::new(shared_model_for(state.clone())).with_id("node-canvas"),
+    );
     let viewport: Box<dyn Widget> = Box::new(Viewport3dWidget::new(ViewportInputs {
         last_mesh_output: state.last_mesh_output.clone(),
         display_node: state.display_node.clone(),
