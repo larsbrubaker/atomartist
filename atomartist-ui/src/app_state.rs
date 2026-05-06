@@ -37,6 +37,12 @@ pub struct AppState {
     /// `None`, the viewport shows nothing (empty grid). Phase 4+ wires this
     /// up to user selection.
     pub display_node: Arc<Mutex<Option<NodeId>>>,
+    /// The node id currently highlighted as "selected" — drives the
+    /// outline silhouette in the 3-D viewport and the canvas-side highlight
+    /// of the source node.  Synchronised between the canvas (left-click on
+    /// a node) and the viewport (left-click on a mesh).  `None` when nothing
+    /// is selected.
+    pub selection: Arc<Mutex<Option<NodeId>>>,
     /// Path of the currently-open project file (`Save` writes here without
     /// re-prompting). `None` when the project has never been saved.
     pub current_file: Arc<Mutex<Option<PathBuf>>>,
@@ -54,9 +60,18 @@ impl AppState {
             last_mesh_output: Arc::new(Mutex::new(None)),
             viewport_dirty: Arc::new(AtomicBool::new(false)),
             display_node: Arc::new(Mutex::new(None)),
+            selection: Arc::new(Mutex::new(None)),
             current_file: Arc::new(Mutex::new(None)),
             canvas_zoom: Arc::new(Mutex::new(1.0)),
         }
+    }
+
+    /// Update the visual selection — the canvas highlights the source
+    /// node, and the viewport draws an outline around its mesh. Bumps the
+    /// viewport dirty flag so the outline pass re-runs.
+    pub fn set_selection(&self, id: Option<NodeId>) {
+        *self.selection.lock().unwrap() = id;
+        self.mark_viewport_dirty();
     }
 
     /// Set the dirty flag so the viewport repaints next frame.
@@ -170,6 +185,7 @@ impl Clone for AppState {
             last_mesh_output: self.last_mesh_output.clone(),
             viewport_dirty: self.viewport_dirty.clone(),
             display_node: self.display_node.clone(),
+            selection: self.selection.clone(),
             current_file: self.current_file.clone(),
             canvas_zoom: self.canvas_zoom.clone(),
         }
@@ -188,6 +204,7 @@ impl AppState {
         self.undo.lock().unwrap().clear_history();
         *self.current_file.lock().unwrap() = None;
         *self.display_node.lock().unwrap() = None;
+        *self.selection.lock().unwrap() = None;
         *self.last_mesh_output.lock().unwrap() = None;
         self.mark_viewport_dirty();
     }
@@ -205,6 +222,7 @@ impl AppState {
         // Pick a default display node — the highest-id node with a
         // Geometry3d output, matching what evaluate_now does.
         *self.display_node.lock().unwrap() = None;
+        *self.selection.lock().unwrap() = None;
         self.evaluate_now();
         Ok(())
     }

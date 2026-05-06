@@ -8,12 +8,21 @@
 //! wireframe approach is sufficient for the first MVP and works on every
 //! platform agg-gui already runs on.
 //!
-//! Camera controls:
-//!   - Left-drag      → orbit
-//!   - Right-drag     → pan
-//!   - Middle-drag    → pan (alias)
-//!   - Scroll wheel   → zoom
-//!   - F key          → fit camera to current mesh bounds
+//! Camera controls (matches MatterCAD's documented viewport navigation —
+//! `MatterCAD/MatterCAD_Docs/docs/Help/getting-started/viewport-navigation.md`):
+//!
+//! | Action       | Primary           | Modifier alternative              |
+//! |--------------|-------------------|-----------------------------------|
+//! | Selection    | Left-click / drag | —                                 |
+//! | Orbit        | Right-drag        | Ctrl + Left-drag                  |
+//! | Pan          | Middle-drag       | Ctrl + Shift + Left-drag          |
+//! | Zoom         | Scroll wheel      | Ctrl + Alt + Left-drag (vertical) |
+//!
+//! Keyboard:
+//!   - `W` — fit-all (canonical MatterCAD shortcut). `F` is kept as a legacy alias.
+//!   - `Z` — zoom-to-selected (falls back to fit-all when nothing is selected).
+//!   - Arrow keys — small-step orbit; **Shift + Arrow keys** small-step pan.
+//!   - Ctrl + `+` / Ctrl + `-` — zoom in / out.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -23,16 +32,27 @@ use agg_gui::{
     Color, DrawCtx, Event, EventResult, HAnchor, Key, Modifiers, MouseButton, Point, Rect, Size,
     VAnchor, Widget, WidgetBase,
 };
+use atomartist_lib::graph::node::NodeId;
 use manifold_rust::types::MeshGL;
 
 use crate::camera::{mul4, transform_point4, OrbitCamera};
+use crate::picking::{project_to_view_plane, raycast_mesh};
 use crate::scene_renderer::WgpuSceneRenderer;
 
 /// External hooks the widget needs from the app: where to read the latest
-/// mesh from, and how to mark the viewport as repainted (so `needs_draw`
-/// in a future render-loop integration can be derived).
+/// mesh from, the live `display_node` so a left-click selection mirrors
+/// into the canvas, and a writable selection slot.
 pub struct ViewportInputs {
     pub last_mesh_output: Arc<Mutex<Option<Arc<MeshGL>>>>,
+    /// The display node whose mesh is currently rendered. Read-only from
+    /// the viewport's perspective — used to know which node id to write
+    /// into `selection` when the user left-clicks the displayed mesh.
+    pub display_node: Arc<Mutex<Option<NodeId>>>,
+    /// The currently-selected node id (mirrored to / from the canvas).
+    /// The viewport writes here when the user left-clicks a hit; the
+    /// canvas writes here when the user clicks a node. Both paint sides
+    /// read it to render highlights / outlines.
+    pub selection: Arc<Mutex<Option<NodeId>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -40,6 +60,12 @@ enum CameraDrag {
     None,
     Orbit { start_local: Point, start_az: f32, start_el: f32 },
     Pan { start_local: Point, start_center: [f32; 3] },
+    /// Left-button down — pending selection.  Becomes a click-or-drag
+    /// selection on mouse-up (Phase A4 wires the selection write).
+    Selecting { start_local: Point, moved: bool },
+    /// Ctrl + Alt + Left-drag — zoom by vertical drag distance (matches
+    /// MatterCAD's modifier-only zoom path).
+    Zooming { start_local: Point, start_radius: f32 },
 }
 
 pub struct Viewport3dWidget {
@@ -212,6 +238,35 @@ impl Viewport3dWidget {
     }
 }
 
+/// Pick an outline thickness scaled to the model's bounding-box extent so
+/// the silhouette reads at any model size without micro-tuning per scene.
+/// 0.6% of the largest dimension is enough to be visible from typical
+/// orbit distances, small enough not to obscure surface detail.
+fn estimate_outline_width(mesh: &MeshGL) -> f32 {
+    if mesh.num_prop == 0 || mesh.vert_properties.is_empty() {
+        return 0.05;
+    }
+    let stride = mesh.num_prop as usize;
+    let n = mesh.vert_properties.len() / stride;
+    let mut mn = [f32::INFINITY; 3];
+    let mut mx = [f32::NEG_INFINITY; 3];
+    for i in 0..n {
+        for k in 0..3 {
+            let v = mesh.vert_properties[i * stride + k];
+            if v < mn[k] { mn[k] = v; }
+            if v > mx[k] { mx[k] = v; }
+        }
+    }
+    if !mn[0].is_finite() || !mx[0].is_finite() {
+        return 0.05;
+    }
+    let dx = mx[0] - mn[0];
+    let dy = mx[1] - mn[1];
+    let dz = mx[2] - mn[2];
+    let extent = dx.max(dy).max(dz).max(1e-3);
+    (extent * 0.006).max(0.005)
+}
+
 fn vert_pos(mesh: &MeshGL, i: usize, stride: usize) -> [f32; 3] {
     [
         mesh.vert_properties[i * stride],
@@ -267,6 +322,9 @@ impl Widget for Viewport3dWidget {
     fn children(&self) -> &[Box<dyn Widget>] { &self.children }
     fn children_mut(&mut self) -> &mut Vec<Box<dyn Widget>> { &mut self.children }
     fn type_name(&self) -> &'static str { "Viewport3dWidget" }
+
+    /// Stable instance id for the test harness — see [`NodeCanvas::id`].
+    fn id(&self) -> Option<&str> { Some("viewport-3d") }
     fn h_anchor(&self) -> HAnchor { self.base.h_anchor }
     fn v_anchor(&self) -> VAnchor { self.base.v_anchor }
     fn widget_base(&self) -> Option<&WidgetBase> { Some(&self.base) }
@@ -343,10 +401,31 @@ impl Widget for Viewport3dWidget {
         if let Some(mesh) = &mesh_opt {
             self.maybe_auto_fit(mesh);
         }
+        // Read the selection slot once per paint to drive the outline
+        // pass: an outline shows whenever something is selected and we
+        // have a mesh to draw it around. With one displayed mesh today
+        // the selected node *is* the displayed node by construction; A4+
+        // generalise that.
+        let selection_active = self.inputs.selection.lock().unwrap().is_some();
+        // Scale the outline thickness off the model's current AABB so it
+        // stays visible across model sizes — the auto-fit path captured
+        // bounds in `last_mesh_ptr`/grid_y; recompute briefly here from
+        // the live mesh.
+        let outline_width = mesh_opt.as_deref().map(estimate_outline_width).unwrap_or(0.05);
         {
             let mut s = self.scene.borrow_mut();
             s.mesh = mesh_opt.clone();
             s.camera = self.camera.clone();
+            s.outline_enabled = selection_active;
+            s.outline_width = outline_width;
+            // Theme-driven outline colour: warm orange against either
+            // dark or light backgrounds reads as "selected" without
+            // clashing with the model's surface tint.
+            s.outline_color = if dark {
+                [1.00, 0.65, 0.20, 1.0]
+            } else {
+                [0.95, 0.50, 0.10, 1.0]
+            };
         }
 
         // Try the wgpu path. The widget's `bounds` are widget-local — the
@@ -387,7 +466,9 @@ impl Widget for Viewport3dWidget {
 
     fn on_event(&mut self, event: &Event) -> EventResult {
         match event {
-            Event::MouseDown { pos, button, .. } => self.on_mouse_down(*pos, *button),
+            Event::MouseDown { pos, button, modifiers, .. } => {
+                self.on_mouse_down(*pos, *button, *modifiers)
+            }
             Event::MouseUp { pos, button, .. } => self.on_mouse_up(*pos, *button),
             Event::MouseMove { pos } => self.on_mouse_move(*pos),
             Event::MouseWheel { delta_y, .. } => self.on_wheel(*delta_y),
@@ -398,9 +479,46 @@ impl Widget for Viewport3dWidget {
 }
 
 impl Viewport3dWidget {
-    fn on_mouse_down(&mut self, pos: Point, button: MouseButton) -> EventResult {
+    /// Compute the world-space pivot for an orbit drag started at the
+    /// given widget-local cursor position.
+    ///
+    /// 1. If the cursor's ray hits the live mesh, the hit point becomes
+    ///    the new orbit center and the eye-to-hit distance becomes the
+    ///    new orbit radius.
+    /// 2. If the cursor misses, project the ray onto the plane through
+    ///    the current `center` perpendicular to forward (matches
+    ///    MatterCAD / NodeDesigner).
+    ///
+    /// `pos` is the agg-gui Y-up local coord; we flip Y to top-down for
+    /// `screen_to_ray` since that's the convention the unprojection
+    /// expects.
+    fn orbit_pivot_from_cursor(&self, pos: Point) -> ([f32; 3], f32) {
+        let w = self.bounds.width.max(1.0);
+        let h = self.bounds.height.max(1.0);
+        // agg-gui events are in widget-local Y-up coords. screen_to_ray
+        // expects top-down (origin top-left), so flip Y.
+        let cursor_top_down = (pos.x, h - pos.y);
+        let (origin, dir) = self.camera.screen_to_ray(cursor_top_down, (w, h));
+        let pivot = match self.current_mesh().as_ref() {
+            Some(mesh) => raycast_mesh(mesh, origin, dir)
+                .unwrap_or_else(|| project_to_view_plane(&self.camera, origin, dir)),
+            None => project_to_view_plane(&self.camera, origin, dir),
+        };
+        let eye = self.camera.eye();
+        let dx = pivot[0] - eye[0];
+        let dy = pivot[1] - eye[1];
+        let dz = pivot[2] - eye[2];
+        let radius = (dx * dx + dy * dy + dz * dz).sqrt().max(0.05);
+        (pivot, radius)
+    }
+
+    fn on_mouse_down(&mut self, pos: Point, button: MouseButton, mods: Modifiers) -> EventResult {
         match button {
-            MouseButton::Left => {
+            MouseButton::Right => {
+                // Right-drag → orbit, pivoting at the cursor hit point.
+                let (pivot, radius) = self.orbit_pivot_from_cursor(pos);
+                self.camera.center = pivot;
+                self.camera.radius = radius;
                 self.drag = CameraDrag::Orbit {
                     start_local: pos,
                     start_az: self.camera.azimuth,
@@ -408,26 +526,62 @@ impl Viewport3dWidget {
                 };
                 EventResult::Consumed
             }
-            MouseButton::Right | MouseButton::Middle => {
+            MouseButton::Middle => {
                 self.drag = CameraDrag::Pan {
                     start_local: pos,
                     start_center: self.camera.center,
                 };
                 EventResult::Consumed
             }
+            MouseButton::Left => {
+                // Modifier-aware fallbacks for users without dedicated
+                // middle/right buttons (trackpads). Match MatterCAD's docs.
+                if mods.ctrl && mods.alt {
+                    self.drag = CameraDrag::Zooming {
+                        start_local: pos,
+                        start_radius: self.camera.radius,
+                    };
+                    EventResult::Consumed
+                } else if mods.ctrl && mods.shift {
+                    self.drag = CameraDrag::Pan {
+                        start_local: pos,
+                        start_center: self.camera.center,
+                    };
+                    EventResult::Consumed
+                } else if mods.ctrl {
+                    let (pivot, radius) = self.orbit_pivot_from_cursor(pos);
+                    self.camera.center = pivot;
+                    self.camera.radius = radius;
+                    self.drag = CameraDrag::Orbit {
+                        start_local: pos,
+                        start_az: self.camera.azimuth,
+                        start_el: self.camera.elevation,
+                    };
+                    EventResult::Consumed
+                } else {
+                    // Plain left-click → pending selection. The mouse-up
+                    // handler is responsible for resolving click-or-drag
+                    // into a selection write (Phase A4).
+                    self.drag = CameraDrag::Selecting {
+                        start_local: pos,
+                        moved: false,
+                    };
+                    EventResult::Consumed
+                }
+            }
             _ => EventResult::Ignored,
         }
     }
 
     fn on_mouse_move(&mut self, pos: Point) -> EventResult {
-        match &self.drag {
+        match &mut self.drag {
             CameraDrag::None => EventResult::Ignored,
             CameraDrag::Orbit { start_local, start_az, start_el } => {
                 let dx = (pos.x - start_local.x) as f32;
                 let dy = (pos.y - start_local.y) as f32;
                 let scale = 0.005;
-                self.camera.azimuth = start_az + dx * scale;
-                self.camera.elevation = start_el - dy * scale;
+                self.camera.azimuth = *start_az + dx * scale;
+                self.camera.elevation = *start_el - dy * scale;
                 let limit = std::f32::consts::PI * 0.49;
                 self.camera.elevation = self.camera.elevation.clamp(-limit, limit);
                 EventResult::Consumed
@@ -436,25 +590,70 @@ impl Viewport3dWidget {
                 let dx = (pos.x - start_local.x) as f32;
                 let dy = (pos.y - start_local.y) as f32;
                 // Pan scales with distance so the world point under the
-                // cursor stays roughly under the cursor.
+                // cursor stays roughly under the cursor. Drag-down (negative
+                // dy in agg-gui Y-up coords) lowers the look-at point — see
+                // `OrbitCamera::pan` and the regression test for the bug.
                 let pan_scale = self.camera.radius * 0.0025;
                 let (right, up, _fwd) = self.camera.basis();
                 self.camera.center = [
-                    start_center[0] - right[0] * dx * pan_scale + up[0] * dy * pan_scale,
-                    start_center[1] - right[1] * dx * pan_scale + up[1] * dy * pan_scale,
-                    start_center[2] - right[2] * dx * pan_scale + up[2] * dy * pan_scale,
+                    start_center[0] - right[0] * dx * pan_scale - up[0] * dy * pan_scale,
+                    start_center[1] - right[1] * dx * pan_scale - up[1] * dy * pan_scale,
+                    start_center[2] - right[2] * dx * pan_scale - up[2] * dy * pan_scale,
                 ];
+                EventResult::Consumed
+            }
+            CameraDrag::Zooming { start_local, start_radius } => {
+                // Vertical drag distance maps to a multiplicative zoom in
+                // the same direction as MatterCAD's documented modifier
+                // path (drag up = zoom out, drag down = zoom in).
+                let dy = (pos.y - start_local.y) as f32;
+                // 200-pixel drag ≈ 2.7× zoom in either direction.
+                let factor = (dy * 0.005).exp();
+                let r = (*start_radius * factor).clamp(0.05, 10_000.0);
+                if r.is_finite() {
+                    self.camera.radius = r;
+                }
+                EventResult::Consumed
+            }
+            CameraDrag::Selecting { start_local, moved } => {
+                let dx = (pos.x - start_local.x).abs();
+                let dy = (pos.y - start_local.y).abs();
+                if dx > 2.0 || dy > 2.0 {
+                    *moved = true;
+                }
                 EventResult::Consumed
             }
         }
     }
 
-    fn on_mouse_up(&mut self, _pos: Point, _button: MouseButton) -> EventResult {
-        if matches!(self.drag, CameraDrag::None) {
-            EventResult::Ignored
-        } else {
-            self.drag = CameraDrag::None;
-            EventResult::Consumed
+    fn on_mouse_up(&mut self, pos: Point, _button: MouseButton) -> EventResult {
+        let prev = std::mem::replace(&mut self.drag, CameraDrag::None);
+        match prev {
+            CameraDrag::None => EventResult::Ignored,
+            CameraDrag::Selecting { moved, .. } if !moved => {
+                // Treat as a click: raycast against the displayed mesh
+                // and, if hit, mark its source node as selected. With
+                // only one displayed mesh today, that's whatever node
+                // the host is rendering.
+                let mesh_opt = self.current_mesh();
+                let display_id = *self.inputs.display_node.lock().unwrap();
+                if let (Some(mesh), Some(id)) = (mesh_opt, display_id) {
+                    let w = self.bounds.width.max(1.0);
+                    let h = self.bounds.height.max(1.0);
+                    let cursor_top_down = (pos.x, h - pos.y);
+                    let (origin, dir) = self.camera.screen_to_ray(cursor_top_down, (w, h));
+                    if raycast_mesh(&mesh, origin, dir).is_some() {
+                        *self.inputs.selection.lock().unwrap() = Some(id);
+                    } else {
+                        // Click on empty space clears selection.
+                        *self.inputs.selection.lock().unwrap() = None;
+                    }
+                } else {
+                    *self.inputs.selection.lock().unwrap() = None;
+                }
+                EventResult::Consumed
+            }
+            _ => EventResult::Consumed,
         }
     }
 
@@ -467,15 +666,66 @@ impl Viewport3dWidget {
         EventResult::Consumed
     }
 
-    fn on_key_down(&mut self, key: &Key, _mods: Modifiers) -> EventResult {
-        if let Key::Char(c) = key {
-            if c.eq_ignore_ascii_case(&'f') {
-                if let Some(mesh) = self.current_mesh() {
-                    self.last_mesh_ptr = 0;
-                    self.maybe_auto_fit(&mesh);
+    /// Keyboard navigation. Mirrors MatterCAD's documented shortcuts —
+    /// see the file-header table.
+    fn on_key_down(&mut self, key: &Key, mods: Modifiers) -> EventResult {
+        // Pan / orbit step constants in physical-pixel deltas — sized so
+        // a single arrow press feels like a deliberate small adjustment.
+        const ARROW_PAN_PX: f32 = 24.0;
+        const ARROW_ORBIT_PX: f32 = 24.0;
+        const KEYBOARD_ZOOM_FACTOR: f32 = 1.1;
+
+        match key {
+            Key::Char(c) => {
+                if c.eq_ignore_ascii_case(&'w') || c.eq_ignore_ascii_case(&'f') {
+                    // W = canonical fit-all (MatterCAD); F kept as legacy alias.
+                    if let Some(mesh) = self.current_mesh() {
+                        self.last_mesh_ptr = 0;
+                        self.maybe_auto_fit(&mesh);
+                    }
+                    return EventResult::Consumed;
+                }
+                if c.eq_ignore_ascii_case(&'z') {
+                    // Z = zoom-to-selected. With no per-node mesh tracking
+                    // yet, fall through to fit-all (Phase A4 will tighten
+                    // this to use the selected node's bounds when one is
+                    // selected).
+                    if let Some(mesh) = self.current_mesh() {
+                        self.last_mesh_ptr = 0;
+                        self.maybe_auto_fit(&mesh);
+                    }
+                    return EventResult::Consumed;
+                }
+                // Ctrl + +/- → zoom in/out.
+                if mods.ctrl {
+                    if *c == '+' || *c == '=' {
+                        self.camera.zoom(1.0 / KEYBOARD_ZOOM_FACTOR);
+                        return EventResult::Consumed;
+                    }
+                    if *c == '-' || *c == '_' {
+                        self.camera.zoom(KEYBOARD_ZOOM_FACTOR);
+                        return EventResult::Consumed;
+                    }
+                }
+            }
+            Key::ArrowLeft | Key::ArrowRight | Key::ArrowUp | Key::ArrowDown => {
+                let (dx, dy) = match key {
+                    Key::ArrowLeft => (-1.0f32, 0.0),
+                    Key::ArrowRight => (1.0, 0.0),
+                    Key::ArrowUp => (0.0, 1.0),
+                    Key::ArrowDown => (0.0, -1.0),
+                    _ => unreachable!(),
+                };
+                if mods.shift {
+                    let scale = self.camera.radius * 0.0025;
+                    self.camera.pan(dx * ARROW_PAN_PX * scale, dy * ARROW_PAN_PX * scale);
+                } else {
+                    let scale = 0.005;
+                    self.camera.orbit(dx * ARROW_ORBIT_PX * scale, -dy * ARROW_ORBIT_PX * scale);
                 }
                 return EventResult::Consumed;
             }
+            _ => {}
         }
         EventResult::Ignored
     }
@@ -489,6 +739,8 @@ mod tests {
     fn empty_inputs() -> ViewportInputs {
         ViewportInputs {
             last_mesh_output: Arc::new(Mutex::new(None)),
+            display_node: Arc::new(Mutex::new(None)),
+            selection: Arc::new(Mutex::new(None)),
         }
     }
 

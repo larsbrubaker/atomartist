@@ -1,25 +1,46 @@
 //! wgpu scene renderer — implements `WgpuCustomRender` to draw the latest
 //! mesh as a shaded 3D scene through agg-gui's custom-render hook.
 //!
-//! The renderer keeps its GPU state lazily: pipeline + depth buffer are
-//! created on the first frame (when device + surface format are known),
-//! and the vertex buffer is re-uploaded only when a new mesh arrives
-//! (detected via `Arc::ptr_eq` on the cached mesh handle).
+//! ## Offscreen-buffered viewport (Phase A0)
 //!
-//! The shader is a single Blinn-Phong-ish lighting model: vertex carries
-//! position + normal; fragment shades against a fixed key + fill light
-//! plus ambient. Output writes RGBA8 with `LoadOp::Load` against the
-//! active 2-D surface — content beneath the viewport rect remains and 2-D
-//! UI on top composites cleanly afterward.
+//! Rather than injecting render commands into the same wgpu encoder + target
+//! view that the 2-D UI pipeline uses (which couples 3-D anti-aliasing
+//! settings to the 2-D pipeline and forces every viewport-overlay control
+//! to live inside the 3-D pass), the renderer owns a dedicated
+//! [`MsaaFramebuffer`] sized to the viewport widget's pixel rect:
+//!
+//! 1. Allocate an offscreen colour texture (4× MSAA + matching depth) at
+//!    the widget's pixel size.
+//! 2. Render the 3-D scene (floor grid + selected mesh + outline pass +
+//!    future gizmos) into the MSAA color attachment with depth on.
+//! 3. Resolve MSAA → the single-sample colour texture (built-in wgpu
+//!    `resolve_target` on the colour attachment).
+//! 4. Composite the resolved colour onto the active 2-D target through the
+//!    shared `tex_pipeline` (alpha-blended) so 2-D content beneath the
+//!    widget rect shows through transparent pixels and 2-D content drawn
+//!    on top of the widget composites cleanly.
+//!
+//! This keeps 4× sampling scoped to the 3-D content alone — UI overlays
+//! drawn on top stay sharp, and future viewport-corner toolbars / gizmos
+//! drop into a clean 2-D layer.
+//!
+//! The shader stack is single Blinn-Phong-ish: vertex carries position +
+//! normal; fragment shades against a fixed key + fill light plus ambient.
 
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
-use demo_wgpu::{WgpuCustomRender, WgpuCustomRenderCtx};
+use demo_wgpu::{MsaaFramebuffer, WgpuCustomRender, WgpuCustomRenderCtx};
 use manifold_rust::types::MeshGL;
 use wgpu::util::DeviceExt;
 
 use crate::camera::{mul4, OrbitCamera};
+
+/// Sample count for the offscreen 3-D framebuffer.  4× is the WebGPU
+/// guaranteed-supported MSAA value (matches what `MsaaFramebuffer::new`
+/// clamps anything > 1 to).  Higher values would require feature opt-in
+/// and aren't supported on every backend.
+const SAMPLE_COUNT: u32 = 4;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -157,9 +178,6 @@ struct GpuState {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     surface_format: wgpu::TextureFormat,
-    /// Lazy depth buffer; recreated on size change.
-    depth_view: Option<wgpu::TextureView>,
-    depth_size: (u32, u32),
     /// Cached vertex/index buffers and the source mesh pointer they were built from.
     mesh_ptr: usize,
     vbuf: Option<wgpu::Buffer>,
@@ -171,7 +189,57 @@ struct GpuState {
     grid_pipeline: wgpu::RenderPipeline,
     grid_bind_group_layout: wgpu::BindGroupLayout,
     grid_vbuf: wgpu::Buffer,
+    /// Inverted-hull outline pipeline — inflates each vertex along its
+    /// normal in the vertex shader, draws *only* the back-faces (so the
+    /// inflated rim peeks out from behind the regular front-face render).
+    /// Pairs with the same vbuf/ibuf as the main mesh.
+    outline_pipeline: wgpu::RenderPipeline,
+    outline_bind_group_layout: wgpu::BindGroupLayout,
+    /// Offscreen MSAA framebuffer + matching depth attachment, sized to
+    /// the viewport widget's pixel rect.  The 3-D pass renders into this
+    /// framebuffer's colour attachment (4× MSAA), which resolves into a
+    /// single-sample colour texture; that resolved texture is then
+    /// composited onto the surface via the shared 2-D `tex_pipeline`.
+    framebuffer: Option<MsaaFramebuffer>,
 }
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct OutlineUniforms {
+    mvp: [f32; 16],
+    color: [f32; 4],
+    /// World-space outline thickness, applied along each vertex's normal.
+    /// `[0]` is the actual width; `[1..3]` are pad bytes for std140
+    /// alignment.
+    width: [f32; 4],
+}
+
+const OUTLINE_SHADER: &str = r#"
+struct U {
+    mvp: mat4x4<f32>,
+    color: vec4<f32>,
+    width: vec4<f32>, // x = world-space inflation distance
+};
+
+@group(0) @binding(0) var<uniform> u: U;
+
+struct VOut {
+    @builtin(position) clip: vec4<f32>,
+};
+
+@vertex
+fn vs(@location(0) pos: vec3<f32>, @location(1) normal: vec3<f32>) -> VOut {
+    var o: VOut;
+    let inflated = pos + normalize(normal) * u.width.x;
+    o.clip = u.mvp * vec4<f32>(inflated, 1.0);
+    return o;
+}
+
+@fragment
+fn fs(_in: VOut) -> @location(0) vec4<f32> {
+    return u.color;
+}
+"#;
 
 pub struct WgpuSceneRenderer {
     state: Option<GpuState>,
@@ -190,6 +258,16 @@ pub struct WgpuSceneRenderer {
     /// World Y where the floor grid sits — `Viewport3dWidget` updates this
     /// to the model's bounds-min Y so the grid always feels like a floor.
     pub grid_y: f32,
+    /// Render the inverted-hull outline pass. The host sets this when a
+    /// node is selected — the outline is drawn around `mesh` (the
+    /// currently-displayed mesh; per-node mesh tracking lands later).
+    pub outline_enabled: bool,
+    /// RGBA colour of the outline silhouette. Theme-driven — viewport sets
+    /// it to a high-contrast colour against the current bg.
+    pub outline_color: [f32; 4],
+    /// World-space outline thickness — set by the host based on the mesh's
+    /// bounding-box extent so it scales sensibly across model sizes.
+    pub outline_width: f32,
 }
 
 impl WgpuSceneRenderer {
@@ -205,6 +283,9 @@ impl WgpuSceneRenderer {
             grid_bg_color: [1.0, 1.0, 1.0, 0.0],
             draw_grid: true,
             grid_y: 0.0,
+            outline_enabled: false,
+            outline_color: [1.0, 0.55, 0.10, 1.0],
+            outline_width: 0.05,
         }
     }
 
@@ -270,7 +351,11 @@ impl WgpuSceneRenderer {
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
-            multisample: wgpu::MultisampleState::default(),
+            multisample: wgpu::MultisampleState {
+                count: SAMPLE_COUNT,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs"),
@@ -339,7 +424,11 @@ impl WgpuSceneRenderer {
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
-            multisample: wgpu::MultisampleState::default(),
+            multisample: wgpu::MultisampleState {
+                count: SAMPLE_COUNT,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
             fragment: Some(wgpu::FragmentState {
                 module: &grid_shader,
                 entry_point: Some("fs"),
@@ -368,12 +457,88 @@ impl WgpuSceneRenderer {
             usage: wgpu::BufferUsages::VERTEX,
         });
 
+        // ── Outline (inverted-hull) pipeline ───────────────────────────────
+        let outline_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("atomartist outline shader"),
+            source: wgpu::ShaderSource::Wgsl(OUTLINE_SHADER.into()),
+        });
+        let outline_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("atomartist outline bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let outline_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("atomartist outline pl"),
+            bind_group_layouts: &[Some(&outline_bgl)],
+            immediate_size: 0,
+        });
+        let outline_vert_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Vertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute { offset: 0,  shader_location: 0, format: wgpu::VertexFormat::Float32x3 },
+                wgpu::VertexAttribute { offset: 12, shader_location: 1, format: wgpu::VertexFormat::Float32x3 },
+            ],
+        };
+        let outline_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("atomartist outline pipeline"),
+            layout: Some(&outline_pl),
+            vertex: wgpu::VertexState {
+                module: &outline_shader,
+                entry_point: Some("vs"),
+                buffers: &[outline_vert_layout],
+                compilation_options: Default::default(),
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                // Cull *front*-faces so only the inflated *back*-faces draw —
+                // they peek out from behind the regular front-face render
+                // wherever they extend beyond its silhouette, producing a
+                // constant-thickness rim.
+                cull_mode: Some(wgpu::Face::Front),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                // Don't write depth — the main mesh has already populated
+                // depth, and we want subsequent passes to compete against
+                // the original geometry rather than the inflated rim.
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: SAMPLE_COUNT,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &outline_shader,
+                entry_point: Some("fs"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
         self.state = Some(GpuState {
             pipeline,
             bind_group_layout: bgl,
             surface_format,
-            depth_view: None,
-            depth_size: (0, 0),
             mesh_ptr: 0,
             vbuf: None,
             ibuf: None,
@@ -381,26 +546,27 @@ impl WgpuSceneRenderer {
             grid_pipeline,
             grid_bind_group_layout: grid_bgl,
             grid_vbuf,
+            outline_pipeline,
+            outline_bind_group_layout: outline_bgl,
+            framebuffer: None,
         });
     }
 
-    fn ensure_depth(&mut self, device: &wgpu::Device, size: (u32, u32)) {
+    /// Lazily allocate (or resize) the offscreen MSAA framebuffer to match
+    /// the widget's pixel rect.  Cheap when the size is stable.
+    fn ensure_framebuffer(&mut self, device: &wgpu::Device, w: u32, h: u32) {
         let s = match &mut self.state { Some(s) => s, None => return };
-        if s.depth_view.is_some() && s.depth_size == size {
-            return;
+        let format = s.surface_format;
+        let w = w.max(1);
+        let h = h.max(1);
+        match &mut s.framebuffer {
+            Some(fb) => fb.ensure_size(device, w, h),
+            None => {
+                s.framebuffer = Some(MsaaFramebuffer::new(
+                    device, w, h, SAMPLE_COUNT, format, /* with_depth */ true,
+                ));
+            }
         }
-        let tex = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("atomartist scene depth"),
-            size: wgpu::Extent3d { width: size.0.max(1), height: size.1.max(1), depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        s.depth_view = Some(tex.create_view(&Default::default()));
-        s.depth_size = size;
     }
 
     /// Re-upload mesh buffers if the mesh changed since the last frame.
@@ -451,30 +617,25 @@ impl WgpuCustomRender for WgpuSceneRenderer {
         // Lazy GPU init — runs once.
         self.ensure_state(ctx.device, ctx.surface_format);
 
-        // Compute viewport rect in wgpu's top-down screen space.
-        // ctx.screen_rect is Y-up (origin bottom-left); convert to top-down.
-        let target_h = ctx.target_size.1 as f32;
-        let vp_x = ctx.screen_rect.x.max(0.0) as f32;
-        let vp_w = ctx.screen_rect.width.max(1.0) as f32;
-        let vp_h = ctx.screen_rect.height.max(1.0) as f32;
-        let vp_y_topdown = target_h - (ctx.screen_rect.y as f32) - vp_h;
-
-        // Depth attachment MUST match the color attachment size (the full
-        // target_view), not the viewport rect — wgpu validates this. We
-        // limit drawing to the widget's rect via set_viewport / scissor.
-        self.ensure_depth(ctx.device, ctx.target_size);
-        self.ensure_mesh_buffers(ctx.device);
-
-        let s = match &self.state { Some(s) => s, None => return };
-        let depth = match &s.depth_view { Some(d) => d, None => return };
-        let vbuf = match &s.vbuf { Some(v) => v, None => return };
-        let ibuf = match &s.ibuf { Some(i) => i, None => return };
-        if s.index_count == 0 {
+        // Pixel size of the viewport widget rect.  The framebuffer matches
+        // this exactly (1:1 mapping), so blit_to runs a no-op bilinear
+        // sampler — the 4× MSAA in the offscreen pass is the only AA.
+        let fb_w = ctx.screen_rect.width.max(1.0) as u32;
+        let fb_h = ctx.screen_rect.height.max(1.0) as u32;
+        if fb_w == 0 || fb_h == 0 {
             return;
         }
 
-        // Build uniforms.
-        let aspect = vp_w / vp_h.max(1.0);
+        self.ensure_framebuffer(ctx.device, fb_w, fb_h);
+        self.ensure_mesh_buffers(ctx.device);
+
+        let s = match &self.state { Some(s) => s, None => return };
+        let fb = match &s.framebuffer { Some(fb) => fb, None => return };
+        let depth = match fb.depth_view() { Some(d) => d, None => return };
+
+        // Build uniforms — projection uses the widget's aspect ratio (the
+        // framebuffer matches that aspect 1:1).
+        let aspect = fb_w as f32 / fb_h.max(1) as f32;
         let view = self.camera.view_matrix();
         let proj = self.camera.projection_matrix(aspect);
         let mvp = mul4(&proj, &view);
@@ -502,72 +663,132 @@ impl WgpuCustomRender for WgpuSceneRenderer {
             }],
         });
 
-        // Open a render pass against the active target (color = Load,
-        // depth = Clear). Scissor + viewport limit drawing to our rect.
-        let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("atomartist scene pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: ctx.target_view,
-                resolve_target: None,
-                depth_slice: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: depth,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
-                    store: wgpu::StoreOp::Discard,
+        // ── Pass 1: render 3-D into the offscreen MSAA framebuffer ─────────
+        // The colour attachment is the multisample colour view; on store
+        // the implicit resolve writes into the single-sample resolve view.
+        // No 2-D content beneath the widget bleeds through because we
+        // clear to fully transparent and the composite pass below
+        // alpha-blends only where the 3-D content covered pixels.
+        {
+            let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("atomartist scene offscreen"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: fb.render_view(),
+                    resolve_target: fb.resolve_target(),
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
                 }),
-                stencil_ops: None,
-            }),
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-
-        pass.set_viewport(vp_x, vp_y_topdown.max(0.0), vp_w, vp_h, 0.0, 1.0);
-        let scissor_x = vp_x as u32;
-        let scissor_y = vp_y_topdown.max(0.0) as u32;
-        pass.set_scissor_rect(scissor_x, scissor_y, vp_w as u32, vp_h as u32);
-
-        // Draw the floor grid first (depth-write on so the mesh occludes
-        // lines hidden behind it).
-        if self.draw_grid {
-            let grid_uniforms = GridUniforms {
-                mvp,
-                cell: [1.0, 10.0, self.grid_y, 0.0],
-                line_color: self.grid_line_color,
-                bg_color: self.grid_bg_color,
-            };
-            let grid_ub = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("atomartist grid ub"),
-                contents: bytemuck::bytes_of(&grid_uniforms),
-                usage: wgpu::BufferUsages::UNIFORM,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
             });
-            let grid_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("atomartist grid bg"),
-                layout: &s.grid_bind_group_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: grid_ub.as_entire_binding(),
-                }],
-            });
-            pass.set_pipeline(&s.grid_pipeline);
-            pass.set_bind_group(0, &grid_bg, &[]);
-            pass.set_vertex_buffer(0, s.grid_vbuf.slice(..));
-            pass.draw(0..6, 0..1);
-        }
 
-        pass.set_pipeline(&s.pipeline);
-        pass.set_bind_group(0, &bg, &[]);
-        pass.set_vertex_buffer(0, vbuf.slice(..));
-        pass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
-        pass.draw_indexed(0..s.index_count, 0, 0..1);
+            pass.set_viewport(0.0, 0.0, fb_w as f32, fb_h as f32, 0.0, 1.0);
+            pass.set_scissor_rect(0, 0, fb_w, fb_h);
 
-        // Pass drops here — encoder is freed for caller to continue.
+            // Floor grid first — depth-write on so the mesh occludes lines
+            // hidden behind it.
+            if self.draw_grid {
+                let grid_uniforms = GridUniforms {
+                    mvp,
+                    cell: [1.0, 10.0, self.grid_y, 0.0],
+                    line_color: self.grid_line_color,
+                    bg_color: self.grid_bg_color,
+                };
+                let grid_ub = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("atomartist grid ub"),
+                    contents: bytemuck::bytes_of(&grid_uniforms),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+                let grid_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("atomartist grid bg"),
+                    layout: &s.grid_bind_group_layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: grid_ub.as_entire_binding(),
+                    }],
+                });
+                pass.set_pipeline(&s.grid_pipeline);
+                pass.set_bind_group(0, &grid_bg, &[]);
+                pass.set_vertex_buffer(0, s.grid_vbuf.slice(..));
+                pass.draw(0..6, 0..1);
+                drop(grid_bg);
+                drop(grid_ub);
+            }
+
+            // Mesh — only when both a vertex buffer and index buffer are
+            // present.  Skipping leaves the grid + transparent pixels
+            // composited as the empty viewport hint.
+            if let (Some(vbuf), Some(ibuf)) = (&s.vbuf, &s.ibuf) {
+                if s.index_count > 0 {
+                    pass.set_pipeline(&s.pipeline);
+                    pass.set_bind_group(0, &bg, &[]);
+                    pass.set_vertex_buffer(0, vbuf.slice(..));
+                    pass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..s.index_count, 0, 0..1);
+
+                    // Outline silhouette — runs *after* the mesh so the
+                    // inflated back-faces can be depth-tested against the
+                    // already-written front-face depth and only show
+                    // beyond the original silhouette. Skipped when no
+                    // selection is active.
+                    if self.outline_enabled && self.outline_width > 0.0 {
+                        let outline_uniforms = OutlineUniforms {
+                            mvp,
+                            color: self.outline_color,
+                            width: [self.outline_width, 0.0, 0.0, 0.0],
+                        };
+                        let outline_ub = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("atomartist outline ub"),
+                            contents: bytemuck::bytes_of(&outline_uniforms),
+                            usage: wgpu::BufferUsages::UNIFORM,
+                        });
+                        let outline_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("atomartist outline bg"),
+                            layout: &s.outline_bind_group_layout,
+                            entries: &[wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: outline_ub.as_entire_binding(),
+                            }],
+                        });
+                        pass.set_pipeline(&s.outline_pipeline);
+                        pass.set_bind_group(0, &outline_bg, &[]);
+                        pass.set_vertex_buffer(0, vbuf.slice(..));
+                        pass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.draw_indexed(0..s.index_count, 0, 0..1);
+                        drop(outline_bg);
+                        drop(outline_ub);
+                    }
+                }
+            }
+        } // pass dropped — encoder freed for the composite pass.
+
+        // ── Pass 2: composite resolved colour onto the active 2-D target ───
+        // 1:1 size mapping (framebuffer matches widget pixel rect), so
+        // the bilinear sampler in the shared `tex_pipeline` is identity-
+        // equivalent.  Alpha-blends through `BLEND_STANDARD` so transparent
+        // pixels (where the 3-D scene didn't draw) preserve the 2-D
+        // backdrop underneath.
+        fb.blit_to(
+            ctx.device,
+            ctx.encoder,
+            ctx.target_view,
+            ctx.target_size,
+            ctx.screen_rect,
+            ctx.parent_clip,
+            ctx.pipelines,
+        );
     }
 }
 

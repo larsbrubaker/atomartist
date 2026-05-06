@@ -39,6 +39,8 @@ impl StatusBar {
 
 impl Widget for StatusBar {
     fn type_name(&self) -> &'static str { "StatusBar" }
+    /// Stable instance id for the test harness.
+    fn id(&self) -> Option<&str> { Some("status-bar") }
     fn bounds(&self) -> Rect { self.bounds }
     fn set_bounds(&mut self, b: Rect) { self.bounds = b; }
     fn children(&self) -> &[Box<dyn Widget>] { &self.children }

@@ -267,6 +267,12 @@ impl Widget for NodeCanvas {
 
     fn type_name(&self) -> &'static str { "NodeCanvas" }
 
+    /// Stable instance id for the test harness — `find_widget_by_id`
+    /// uses this to locate the canvas without depending on widget-tree
+    /// position. Mirrors the pattern in agg-gui's reflection-driven
+    /// inspector (see `agg-gui/src/widget/tree.rs`).
+    fn id(&self) -> Option<&str> { Some("node-canvas") }
+
     fn h_anchor(&self) -> HAnchor { self.base.h_anchor }
     fn v_anchor(&self) -> VAnchor { self.base.v_anchor }
     fn widget_base(&self) -> Option<&WidgetBase> { Some(&self.base) }
@@ -371,9 +377,13 @@ impl Widget for NodeCanvas {
             draw_bezier_connection(ctx, *from_canvas, *cursor_canvas, col, 2.0);
         }
 
-        // Nodes on top.
+        // Nodes on top. Pull the AppState-side selection so a viewport
+        // left-click that selects a mesh is reflected here even if the
+        // canvas's own `selected` set hasn't been touched.
+        let app_selection = *self.state.selection.lock().unwrap();
         for l in &layouts {
-            let selected = self.selected.contains(&l.node_id);
+            let selected = self.selected.contains(&l.node_id)
+                || app_selection == Some(l.node_id);
             draw_node(ctx, l, selected, &self.palette);
         }
 
@@ -463,6 +473,7 @@ impl NodeCanvas {
                         self.selected.clear();
                         self.selected.insert(node_id);
                         self.update_display_node_for(node_id);
+                        self.state.set_selection(Some(node_id));
                         self.interaction = CanvasState::DraggingProperty {
                             node_id,
                             prop_name: prop.name,
@@ -488,12 +499,17 @@ impl NodeCanvas {
                     }
                     self.selected.insert(node_id);
                     self.update_display_node_for(node_id);
+                    // Mirror to AppState so the viewport outline + any
+                    // other widgets that read `state.selection` stay in
+                    // sync with this canvas-side click.
+                    self.state.set_selection(Some(node_id));
                     self.begin_drag_node(node_id, canvas_pos);
                     return EventResult::Consumed;
                 }
                 // Empty canvas — clear selection.
                 if !modifiers.shift {
                     self.selected.clear();
+                    self.state.set_selection(None);
                 }
                 EventResult::Consumed
             }

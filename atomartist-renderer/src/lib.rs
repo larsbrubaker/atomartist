@@ -13,10 +13,12 @@
 //! designed to be stable across that swap.
 
 pub mod camera;
+pub mod picking;
 pub mod scene_renderer;
 pub mod viewport_widget;
 
 pub use camera::OrbitCamera;
+pub use picking::{project_to_view_plane, raycast_mesh};
 pub use scene_renderer::WgpuSceneRenderer;
 pub use viewport_widget::{Viewport3dWidget, ViewportInputs};
 

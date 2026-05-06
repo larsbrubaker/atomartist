@@ -3,6 +3,7 @@ members = [
     "atomartist-lib",
     "atomartist-renderer",
     "atomartist-ui",
+    "atomartist-ui-test",
     "demo-native",
     "demo-wasm",
 ]

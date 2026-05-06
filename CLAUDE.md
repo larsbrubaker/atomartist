@@ -128,6 +128,32 @@ Follow Rust conventions (`snake_case` functions/variables, `PascalCase` types,
 ### Refactoring
 Improve code when it serves a purpose, not for aesthetics.
 
+## UI / UX testing
+
+Drive the live widget tree without a window or GPU via **`atomartist-ui-test`**.
+The harness boots the real `build_app(state, dialogs)` widget tree, runs
+`App::layout` once, and exposes synthetic event helpers that wrap agg-gui's
+public `App::on_mouse_*` / `App::on_key_*`. Tests assert against the
+shared `AppState` (the same `Arc`s the production widgets mutate) and look
+up widgets by id (`"node-canvas"`, `"viewport-3d"`, `"status-bar"`) via
+`find_by_id` / `find_by_type` — these are agg-gui's reflection-driven
+helpers.
+
+```rust
+use atomartist_ui_test::TestHarness;
+use agg_gui::MouseButton;
+
+let mut h = TestHarness::with_starter_graph();
+h.click(640.0, 360.0, MouseButton::Left);   // synthetic event
+h.evaluate_now();                            // sync graph eval
+assert!(h.state().last_mesh_output.lock().unwrap().is_some());
+```
+
+Place ports of NodeDesigner UI tests under `atomartist-ui-test/tests/` —
+one file per topical batch (canvas interactions, widget behaviour, file
+workflows, …). At the top of each file leave a one-line comment citing
+the source path in NodeDesigner so future readers can cross-check.
+
 ## Shell
 
 This project uses **PowerShell** on Windows for build scripts. Claude Code's shell

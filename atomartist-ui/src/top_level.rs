@@ -27,6 +27,8 @@ pub fn build_app(state: AppState, dialogs: Arc<dyn FileDialogProvider>) -> Box<d
     let canvas: Box<dyn Widget> = Box::new(NodeCanvas::new(state.clone()));
     let viewport: Box<dyn Widget> = Box::new(Viewport3dWidget::new(ViewportInputs {
         last_mesh_output: state.last_mesh_output.clone(),
+        display_node: state.display_node.clone(),
+        selection: state.selection.clone(),
     }));
 
     // Menu bar needs a font; the demo shells install one into

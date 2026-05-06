@@ -1,0 +1,19 @@
+[package]
+name = "atomartist-ui-test"
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+description = "UI test harness for AtomArtist — synthetic event dispatch + state assertions over agg-gui's reflection plumbing."
+authors = ["Lars Brubaker <larsbrubaker@matterhackers.com>"]
+repository = "https://github.com/larsbrubaker/atomartist"
+
+[lib]
+name = "atomartist_ui_test"
+path = "src/lib.rs"
+
+[dependencies]
+agg-gui            = { path = "../../agg-gui/agg-gui" }
+atomartist-lib     = { path = "../atomartist-lib" }
+atomartist-renderer = { path = "../atomartist-renderer" }
+atomartist-ui      = { path = "../atomartist-ui" }
+manifold-rust      = { path = "../../manifold-rust" }
