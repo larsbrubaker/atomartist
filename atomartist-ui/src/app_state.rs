@@ -68,6 +68,14 @@ pub struct AppState {
     /// Render style picker beneath the tumble cube (Shaded / Wireframe /
     /// OutlineOnly).
     pub render_style: Arc<Mutex<RenderStyle>>,
+    /// Bed-toggle button beneath the cube.  Drives the floor-grid pass
+    /// in `WgpuSceneRenderer` so the user can hide the grid when it
+    /// distracts from the model.  Default `true` — grid on.
+    pub show_bed: Arc<Mutex<bool>>,
+    /// Snap-amount picker beneath the cube.  Stub for now (AtomArtist
+    /// has no node-snap behaviour yet); selection is recorded so
+    /// future grid-snap features can read it. Default `1.0`.
+    pub snap_amount: Arc<Mutex<f64>>,
 }
 
 impl AppState {
@@ -87,6 +95,8 @@ impl AppState {
             turntable: Arc::new(Mutex::new(true)),
             perspective: Arc::new(Mutex::new(true)),
             render_style: Arc::new(Mutex::new(RenderStyle::default())),
+            show_bed: Arc::new(Mutex::new(true)),
+            snap_amount: Arc::new(Mutex::new(1.0)),
         }
     }
 
@@ -217,6 +227,8 @@ impl Clone for AppState {
             turntable: self.turntable.clone(),
             perspective: self.perspective.clone(),
             render_style: self.render_style.clone(),
+            show_bed: self.show_bed.clone(),
+            snap_amount: self.snap_amount.clone(),
         }
     }
 }

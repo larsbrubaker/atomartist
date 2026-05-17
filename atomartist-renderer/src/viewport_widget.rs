@@ -83,6 +83,10 @@ pub struct ViewportInputs {
     pub tool: Arc<Mutex<ViewportTool>>,
     /// Render style picker beneath the tumble cube.
     pub render_style: Arc<Mutex<RenderStyle>>,
+    /// Bed-toggle state.  Mirrored into
+    /// `WgpuSceneRenderer::draw_grid` each paint so flipping the
+    /// button hides / shows the floor grid on the next frame.
+    pub show_bed: Arc<Mutex<bool>>,
 }
 
 impl ViewportInputs {
@@ -97,6 +101,7 @@ impl ViewportInputs {
             camera: Arc::new(Mutex::new(OrbitCamera::default())),
             tool: Arc::new(Mutex::new(ViewportTool::default())),
             render_style: Arc::new(Mutex::new(RenderStyle::default())),
+            show_bed: Arc::new(Mutex::new(true)),
         }
     }
 }
@@ -511,6 +516,8 @@ impl Widget for Viewport3dWidget {
             // tumble cube takes effect on the next frame without any
             // extra plumbing.
             s.render_style = *self.inputs.render_style.lock().unwrap();
+            // Sync bed toggle → floor-grid pass.
+            s.draw_grid = *self.inputs.show_bed.lock().unwrap();
         }
 
         // Try the wgpu path. The widget's `bounds` are widget-local — the
@@ -703,7 +710,12 @@ impl Viewport3dWidget {
                 let dy = (pos.y - start_local.y) as f32;
                 let scale = 0.005;
                 let mut c = self.inputs.camera.lock().unwrap();
-                c.azimuth = *start_az + dx * scale;
+                // Drag right (dx > 0) should turn the world right
+                // (object follows the cursor) — that's the camera
+                // orbiting counter-clockwise around world-up, i.e.
+                // azimuth DECREASING under our `eye = [r*ce*sin(az),
+                // r*se, r*ce*cos(az)]` formula.
+                c.azimuth = *start_az - dx * scale;
                 c.elevation = *start_el - dy * scale;
                 let limit = std::f32::consts::PI * 0.49;
                 c.elevation = c.elevation.clamp(-limit, limit);

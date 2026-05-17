@@ -124,21 +124,32 @@ impl HitData {
     }
 }
 
-/// MatterCAD's connection table, indexed by face index `0..6`.  Order
-/// matches `Face::ALL` and the `connections.Add(...)` calls in the
-/// original C# code.
+/// Connection table, indexed by face index `0..6`.  Re-derived for
+/// AtomArtist's **Y-up** world from MatterCAD's Z-up table — neighbour
+/// indices are recomputed from the viewer-frame "what face is on my
+/// left / right / top / bottom" mapping for each face.
+///
+/// Axis: 0=X, 1=Y, 2=Z. Direction: +1 / -1 of that axis.
 pub fn connections() -> [ConnectedFaces; 6] {
     [
-        // 0: Top   axis=Z dir=+1, left=Left(1), bottom=Front(5), right=Right(2), top=Back(4)
+        // 0: Top   (+Y).  Viewer above looking down, label-up = -Z.
+        //   neighbour on viewer's right (+X) = Right (2)
+        //   neighbour on viewer's left  (-X) = Left  (1)
+        //   neighbour on viewer's top   (-Z) = Back  (4)
+        //   neighbour on viewer's bottom(+Z) = Front (5)
         ConnectedFaces {
-            axis: 2,
+            axis: 1,
             direction: 1.0,
             left: 1,
             bottom: 5,
             right: 2,
             top: 4,
         },
-        // 1: Left  axis=X dir=-1, left=Back(4), bottom=Bottom(3), right=Front(5), top=Top(0)
+        // 1: Left  (-X).  Viewer at -X looking +X, label-up = +Y.
+        //   right (+Z) = Front (5)
+        //   left  (-Z) = Back  (4)
+        //   top   (+Y) = Top   (0)
+        //   bottom(-Y) = Bottom(3)
         ConnectedFaces {
             axis: 0,
             direction: -1.0,
@@ -147,7 +158,11 @@ pub fn connections() -> [ConnectedFaces; 6] {
             right: 5,
             top: 0,
         },
-        // 2: Right axis=X dir=+1, left=Front(5), bottom=Bottom(3), right=Back(4), top=Top(0)
+        // 2: Right (+X).  Viewer at +X looking -X, label-up = +Y.
+        //   right (-Z) = Back  (4)
+        //   left  (+Z) = Front (5)
+        //   top   (+Y) = Top   (0)
+        //   bottom(-Y) = Bottom(3)
         ConnectedFaces {
             axis: 0,
             direction: 1.0,
@@ -156,28 +171,40 @@ pub fn connections() -> [ConnectedFaces; 6] {
             right: 4,
             top: 0,
         },
-        // 3: Bottom axis=Z dir=-1, left=Left(1), bottom=Back(4), right=Right(2), top=Front(5)
+        // 3: Bottom(-Y).  Viewer below looking up, label-up = +Z.
+        //   right (+X) = Right (2)
+        //   left  (-X) = Left  (1)
+        //   top   (+Z) = Front (5)
+        //   bottom(-Z) = Back  (4)
         ConnectedFaces {
-            axis: 2,
+            axis: 1,
             direction: -1.0,
             left: 1,
             bottom: 4,
             right: 2,
             top: 5,
         },
-        // 4: Back  axis=Y dir=+1, left=Right(2), bottom=Bottom(3), right=Left(1), top=Top(0)
+        // 4: Back  (-Z).  Viewer at -Z looking +Z, label-up = +Y.
+        //   right (-X) = Left  (1)
+        //   left  (+X) = Right (2)
+        //   top   (+Y) = Top   (0)
+        //   bottom(-Y) = Bottom(3)
         ConnectedFaces {
-            axis: 1,
-            direction: 1.0,
+            axis: 2,
+            direction: -1.0,
             left: 2,
             bottom: 3,
             right: 1,
             top: 0,
         },
-        // 5: Front axis=Y dir=-1, left=Left(1), bottom=Bottom(3), right=Right(2), top=Top(0)
+        // 5: Front (+Z).  Viewer at +Z looking -Z, label-up = +Y.
+        //   right (+X) = Right (2)
+        //   left  (-X) = Left  (1)
+        //   top   (+Y) = Top   (0)
+        //   bottom(-Y) = Bottom(3)
         ConnectedFaces {
-            axis: 1,
-            direction: -1.0,
+            axis: 2,
+            direction: 1.0,
             left: 1,
             bottom: 3,
             right: 2,
@@ -356,46 +383,50 @@ mod tests {
 
     #[test]
     fn centre_hit_on_each_face_resolves_to_tile_4() {
-        // Six face-centre hits — pick a small offset to ensure the
-        // "near 1" axis check matches but the tile decision lands in
-        // the centre (tile 4).
+        // Y-up world: hits on the +/- of each world axis match the
+        // corresponding face label.
         let cases = [
-            (Face::Top, [0.0, 0.0, 1.0]),
-            (Face::Bottom, [0.0, 0.0, -1.0]),
-            (Face::Left, [1.0, 0.0, 0.0]),
-            (Face::Right, [-1.0, 0.0, 0.0]),
-            (Face::Back, [0.0, 1.0, 0.0]),
-            (Face::Front, [0.0, -1.0, 0.0]),
+            (Face::Top, [0.0, 1.0, 0.0]),    // +Y
+            (Face::Bottom, [0.0, -1.0, 0.0]), // -Y
+            (Face::Right, [1.0, 0.0, 0.0]),  // +X
+            (Face::Left, [-1.0, 0.0, 0.0]),  // -X
+            (Face::Front, [0.0, 0.0, 1.0]),  // +Z
+            (Face::Back, [0.0, 0.0, -1.0]),  // -Z
         ];
         for (face, pos) in cases.iter() {
             let hit = get_hit_data(*pos);
-            assert_eq!(hit.face_tile[0], Some((face_idx(*face), 4)),
-                "face {:?} centre hit should be tile 4, got {:?}", face, hit);
+            assert_eq!(
+                hit.face_tile[0],
+                Some((face_idx(*face), 4)),
+                "face {:?} centre hit should be tile 4, got {:?}",
+                face,
+                hit
+            );
             assert_eq!(hit.face_tile[1], None, "centre hit should be single-face");
         }
     }
 
     #[test]
     fn corner_hit_returns_three_faces() {
-        // Hit near the corner where Top + Left + Front meet.
-        let hit = get_hit_data([0.95, -0.95, 1.0]);
+        // Y-up world: corner where Top (+Y) + Right (+X) + Front (+Z)
+        // meet sits near (0.95, 1.0, 0.95).
+        let hit = get_hit_data([0.95, 1.0, 0.95]);
         let face_a = hit.face_tile[0].expect("at least one face");
         let face_b = hit.face_tile[1].expect("corner = three faces");
         let face_c = hit.face_tile[2].expect("corner = three faces");
-        // Faces involved should be Top + Left + Front in some order.
         let set: std::collections::HashSet<u8> = [face_a.0, face_b.0, face_c.0]
             .iter()
             .copied()
             .collect();
         assert!(set.contains(&face_idx(Face::Top)));
-        assert!(set.contains(&face_idx(Face::Left)));
+        assert!(set.contains(&face_idx(Face::Right)));
         assert!(set.contains(&face_idx(Face::Front)));
     }
 
     #[test]
     fn edge_hit_returns_two_faces() {
-        // Top + Front edge centre: x ≈ 0, y = -1, z = 1.
-        let hit = get_hit_data([0.0, -0.95, 1.0]);
+        // Top + Front edge centre: x ≈ 0, y = 1, z ≈ 1.
+        let hit = get_hit_data([0.0, 1.0, 0.95]);
         let a = hit.face_tile[0].unwrap();
         let b = hit.face_tile[1].expect("edge hit = two faces");
         assert!(hit.face_tile[2].is_none());
@@ -411,9 +442,9 @@ mod tests {
     }
 
     #[test]
-    fn ray_hits_top_face_when_pointed_down_at_origin() {
+    fn ray_hits_front_face_when_pointed_back_at_origin() {
         let r = raycast_unit_cube([0.0, 0.0, 5.0], [0.0, 0.0, -1.0]).unwrap();
-        // Should hit z = 1 first.
+        // Should hit z = 1 first (the Front face in Y-up world).
         assert!((r[2] - 1.0).abs() < 1e-4, "z = {}", r[2]);
     }
 }

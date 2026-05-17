@@ -227,8 +227,8 @@ impl Widget for TumbleCubeWidget {
     fn widget_base(&self) -> Option<&WidgetBase> { Some(&self.base) }
 
     fn layout(&mut self, available: Size) -> Size {
-        // The cube wants a fixed 100×100 square; use the smaller of the
-        // requested size or our max.
+        // Fixed 100×100 square — matches MatterCAD's `TumbleCubeControl`
+        // size (`100 * GuiWidget.DeviceScale`).
         let w = available.width.min(100.0).max(10.0);
         let h = available.height.min(100.0).max(10.0);
         let side = w.min(h);
@@ -324,7 +324,9 @@ impl TumbleCubeWidget {
                 let dy = (pos.y - start_local.y) as f32;
                 let scale = 0.01;
                 let mut c = self.inputs.camera.lock().unwrap();
-                c.azimuth = start_az + dx * scale;
+                // Match the viewport's right-drag direction (drag right
+                // = world follows finger = azimuth decreases).
+                c.azimuth = start_az - dx * scale;
                 c.elevation = start_el - dy * scale;
                 let limit = std::f32::consts::PI * 0.49;
                 c.elevation = c.elevation.clamp(-limit, limit);

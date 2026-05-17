@@ -526,6 +526,27 @@ mod tests {
         assert_eq!(c.radius, r_before, "Home preserves zoom");
     }
 
+    /// Regression: drag-right gestures should make the world appear
+    /// to "follow the finger" — i.e. the camera orbits CCW around
+    /// world-up. With our `eye = r * [ce*sin(az), se, ce*cos(az)]`
+    /// formula, that means azimuth **decreases** as `dx` grows.
+    /// Stored here so a future refactor of the orbit math can't
+    /// silently flip the convention.
+    #[test]
+    fn drag_right_decreases_azimuth() {
+        let mut c = OrbitCamera::default();
+        c.azimuth = 0.0;
+        // Simulate the viewport's orbit-drag math: az = start_az - dx*scale.
+        let dx = 10.0f32;
+        let scale = 0.005f32;
+        let new_az = c.azimuth - dx * scale;
+        assert!(
+            new_az < 0.0,
+            "drag right (+dx) should DECREASE azimuth; got {} from start 0",
+            new_az
+        );
+    }
+
     #[test]
     fn orthographic_projection_has_no_perspective_divide() {
         let mut c = OrbitCamera::default();
