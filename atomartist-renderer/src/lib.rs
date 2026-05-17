@@ -18,7 +18,7 @@ pub mod scene_renderer;
 pub mod tumble_cube;
 pub mod viewport_widget;
 
-pub use camera::{OrbitCamera, OrbitMode, OrientAnimation, Projection};
+pub use camera::{CameraPoseAnimation, OrbitCamera, OrbitMode, OrientAnimation, Projection};
 pub use picking::{project_to_view_plane, raycast_mesh};
 pub use scene_renderer::{RenderStyle, WgpuSceneRenderer};
 pub use tumble_cube::{TumbleCubeInputs, TumbleCubeWidget};

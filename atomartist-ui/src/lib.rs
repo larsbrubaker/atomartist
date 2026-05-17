@@ -10,6 +10,7 @@ pub mod app_state_model;
 pub mod circular_dropdown;
 pub mod circular_icon_button;
 pub mod icons;
+pub mod mattercad_icons;
 pub mod node_helpers;
 pub mod status_bar;
 pub mod top_level;

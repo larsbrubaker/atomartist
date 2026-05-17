@@ -19,7 +19,7 @@ use atomartist_lib::serialization::{
     export_stl, graph_from_json_str, graph_to_json_string,
 };
 use atomartist_lib::Graph;
-use atomartist_renderer::{OrbitCamera, RenderStyle, ViewportTool};
+use atomartist_renderer::{CameraPoseAnimation, OrbitCamera, RenderStyle, ViewportTool};
 use manifold_rust::types::MeshGL;
 
 /// Top-level state passed by reference into every UI widget that mutates
@@ -76,6 +76,9 @@ pub struct AppState {
     /// has no node-snap behaviour yet); selection is recorded so
     /// future grid-snap features can read it. Default `1.0`.
     pub snap_amount: Arc<Mutex<f64>>,
+    /// In-flight camera pose animation started by viewport chrome
+    /// buttons (Home / Fit). Ticked by `Viewport3dWidget::paint`.
+    pub camera_animation: Arc<Mutex<Option<CameraPoseAnimation>>>,
 }
 
 impl AppState {
@@ -97,6 +100,7 @@ impl AppState {
             render_style: Arc::new(Mutex::new(RenderStyle::default())),
             show_bed: Arc::new(Mutex::new(true)),
             snap_amount: Arc::new(Mutex::new(1.0)),
+            camera_animation: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -229,6 +233,7 @@ impl Clone for AppState {
             render_style: self.render_style.clone(),
             show_bed: self.show_bed.clone(),
             snap_amount: self.snap_amount.clone(),
+            camera_animation: self.camera_animation.clone(),
         }
     }
 }

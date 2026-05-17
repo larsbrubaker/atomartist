@@ -332,6 +332,15 @@ fn main() {
                         && frames_painted + 1 == warmup_frames;
                     paint_frame(&gpu, &mut wgpu_ctx, &mut app, win_w, win_h, capture_now);
                     frames_painted = frames_painted.saturating_add(1);
+                    // Some widgets (notably the tumble-cube click-to-orient
+                    // animation) request another frame *during* paint.  Winit
+                    // won't draw again unless the host explicitly asks for it,
+                    // so pump agg-gui's draw flag here; otherwise animations
+                    // advance one frame and then appear to resume only when the
+                    // user moves the mouse.
+                    if agg_gui::animation::wants_draw() {
+                        window.request_redraw();
+                    }
                     if let Some(path) = screenshot_path.clone() {
                         if frames_painted == warmup_frames {
                             // Capture happened above; pixels are now in the

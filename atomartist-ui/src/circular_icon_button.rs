@@ -3,10 +3,10 @@
 //! controls.
 //!
 //! Visually mirrors MatterCAD's circular `ThemedRadioIconButton` /
-//! `ThemedIconButton` widgets: small filled circle, theme-aware
-//! accent fill when the button is "active", subtle hover/press state
-//! transitions, and a 1-px outline so the button reads as a discrete
-//! shape against the viewport scene.
+//! `ThemedIconButton` widgets: transparent idle background, subtle
+//! transparent hover/press tint, and the checked-radio treatment from
+//! `ThemedRadioIconButton.OnDraw`: three translucent accent arcs
+//! around the button rather than a solid blue fill.
 //!
 //! Implements [`agg_gui::Widget`] directly — no agg-gui `Button`
 //! delegation because rectangular Button paint doesn't yield the
@@ -25,6 +25,11 @@ use agg_gui::{
 };
 
 use crate::icons::{paint_icon, IconKind};
+use crate::mattercad_icons::{scaled_tinted_rgba_arc_to_size, MatterCadIcon};
+
+const MATTERCAD_ICON_SCALE: f64 = 1.2;
+const MATTERCAD_ICON_BASE_PX: f64 = 16.0;
+const MATTERCAD_CHEVRON_BASE_PX: f64 = 12.0;
 
 /// A circular button rendering an icon from [`IconKind`].  See the
 /// module-level docstring for visual / interaction semantics.
@@ -32,17 +37,21 @@ pub struct CircularIconButton {
     bounds: Rect,
     base: WidgetBase,
     icon: IconKind,
+    /// When set, this MatterCAD PNG icon is blitted in place of the
+    /// hand-drawn vector `icon`. The blit is recoloured to the theme
+    /// text colour the same way MatterCAD's
+    /// `WhiteToAlpha_GreyToColor` filter does.
+    image_icon: Option<MatterCadIcon>,
     /// Optional secondary icon (overlaid lower-right) — used by
     /// dropdown buttons that want a small "▼" chevron over the main
     /// glyph.
     overlay_icon: Option<IconKind>,
+    /// MatterCAD image used for the overlay slot, mutually-exclusive
+    /// with `overlay_icon`.
+    overlay_image: Option<MatterCadIcon>,
     on_click: Option<Box<dyn FnMut()>>,
     active_fn: Option<Rc<dyn Fn() -> bool>>,
     enabled_fn: Option<Rc<dyn Fn() -> bool>>,
-    /// Tooltip text. Stored but not rendered yet — keeps the surface
-    /// stable so callers can pass tooltips today and they'll render
-    /// once the popup helper lands.
-    pub tooltip: Option<String>,
     hovered: bool,
     pressed: bool,
     /// Backing storage for `Widget::children_mut` — leaf widget, so
@@ -61,11 +70,12 @@ impl CircularIconButton {
                 .with_min_size(Size::new(20.0, 20.0))
                 .with_max_size(Size::new(36.0, 36.0)),
             icon,
+            image_icon: None,
             overlay_icon: None,
+            overlay_image: None,
             on_click: None,
             active_fn: None,
             enabled_fn: None,
-            tooltip: None,
             hovered: false,
             pressed: false,
             children_storage: Vec::new(),
@@ -78,8 +88,8 @@ impl CircularIconButton {
     }
 
     /// Bind the "active" state to a live predicate. Active buttons
-    /// paint with the accent fill (matches MatterCAD's blue selected
-    /// look).
+    /// paint MatterCAD's checked-radio treatment: subtle fill plus
+    /// three translucent accent arc segments around the circle.
     pub fn with_active_fn(mut self, f: impl Fn() -> bool + 'static) -> Self {
         self.active_fn = Some(Rc::new(f));
         self
@@ -90,13 +100,24 @@ impl CircularIconButton {
         self
     }
 
-    pub fn with_tooltip(mut self, text: impl Into<String>) -> Self {
-        self.tooltip = Some(text.into());
+    pub fn with_overlay(mut self, icon: IconKind) -> Self {
+        self.overlay_icon = Some(icon);
         self
     }
 
-    pub fn with_overlay(mut self, icon: IconKind) -> Self {
-        self.overlay_icon = Some(icon);
+    /// Use one of MatterCAD's bundled PNG icons in the main slot.
+    /// The icon is tinted to `theme.text_color` so it composes
+    /// against the button background the same way MatterCAD's
+    /// `WhiteToAlpha_GreyToColor` filter produces themed icons.
+    pub fn with_image_icon(mut self, image: MatterCadIcon) -> Self {
+        self.image_icon = Some(image);
+        self
+    }
+
+    /// Use a MatterCAD PNG as the overlay (small lower-right
+    /// dropdown chevron).
+    pub fn with_overlay_image(mut self, image: MatterCadIcon) -> Self {
+        self.overlay_image = Some(image);
         self
     }
 
@@ -131,33 +152,31 @@ impl CircularIconButton {
     fn background_color(&self, active: bool, enabled: bool) -> Color {
         let v = current_visuals();
         if !enabled {
-            return v.widget_bg.with_alpha(0.4);
+            return Color::rgba(0.0, 0.0, 0.0, 0.0);
         }
         match (active, self.hovered, self.pressed) {
-            // Active + pressed: deep accent.
-            (true, _, true) => v.accent_pressed,
-            // Active + hovered: lighter accent.
-            (true, true, _) => v.accent_hovered,
-            // Active idle: accent.
-            (true, false, false) => v.accent,
-            // Idle pressed: subtle pressed.
-            (false, _, true) => v.widget_bg_hovered,
-            // Idle hovered: subtle hovered.
-            (false, true, false) => v.widget_bg_hovered,
-            // Idle: subtle bg.
-            (false, false, false) => v.widget_bg,
+            // Checked radio buttons in MatterCAD set BackgroundColor
+            // to `MinimalShade`, then overlay accent arcs in OnDraw.
+            // In the viewport HUD, keep this transparent enough that
+            // only the arc treatment reads as selected.
+            (true, _, true) => v.widget_bg_hovered.with_alpha(0.35),
+            (true, true, _) => v.widget_bg_hovered.with_alpha(0.25),
+            (true, false, false) => Color::rgba(0.0, 0.0, 0.0, 0.0),
+            // ThemedButton: HoverColor = SlightShade,
+            // MouseDownColor = MinimalShade.  Approximate that with
+            // transparent overlays; idle is fully transparent.
+            (false, _, true) => v.widget_bg_hovered.with_alpha(0.35),
+            (false, true, false) => v.widget_bg_hovered.with_alpha(0.22),
+            (false, false, false) => Color::rgba(0.0, 0.0, 0.0, 0.0),
         }
     }
 
-    fn icon_color(&self, active: bool) -> Color {
+    fn icon_color(&self, _active: bool) -> Color {
         let v = current_visuals();
-        if active {
-            // White-ish foreground on the accent fill, matching
-            // MatterCAD's selected-button look.
-            Color::white()
-        } else {
-            v.text_color
-        }
+        // MatterCAD recolors the source icon to theme.TextColor, then
+        // draws selection as accent arcs around it. The icon itself
+        // does not flip to white when checked.
+        v.text_color
     }
 
     fn fill_circle(&self, ctx: &mut dyn DrawCtx, cx: f64, cy: f64, r: f64, color: Color) {
@@ -193,6 +212,38 @@ impl CircularIconButton {
             }
         }
         ctx.stroke();
+    }
+
+    /// Port of `ThemedRadioIconButton.OnDraw`: if the button is a full
+    /// circle and checked, draw three 90-degree accent arcs around the
+    /// perimeter. C# uses `stroke = 4 * DeviceScale` and
+    /// `theme.PrimaryAccentColor.WithAlpha(100)`.
+    fn paint_checked_arcs(&self, ctx: &mut dyn DrawCtx, cx: f64, cy: f64, r: f64) {
+        let v = current_visuals();
+        let accent = Color::rgba(v.accent.r, v.accent.g, v.accent.b, 100.0 / 255.0);
+        let stroke = 4.0;
+        let arc_r = (r - stroke * 0.5).max(1.0);
+        let quarter = TAU / 4.0;
+        for start_ratio in [1.0 / 3.0 + 0.75, 2.0 / 3.0 + 0.75, 1.0 + 0.75] {
+            let start = TAU * start_ratio - quarter * 0.5;
+            let end = TAU * start_ratio + quarter * 0.5;
+            ctx.set_stroke_color(accent);
+            ctx.set_line_width(stroke);
+            ctx.begin_path();
+            let steps = 12;
+            for i in 0..=steps {
+                let t = i as f64 / steps as f64;
+                let a = start + (end - start) * t;
+                let x = cx + arc_r * a.cos();
+                let y = cy + arc_r * a.sin();
+                if i == 0 {
+                    ctx.move_to(x, y);
+                } else {
+                    ctx.line_to(x, y);
+                }
+            }
+            ctx.stroke();
+        }
     }
 }
 
@@ -240,19 +291,54 @@ impl Widget for CircularIconButton {
         let enabled = self.enabled();
         let active = self.active();
         let bg = self.background_color(active, enabled);
-        self.fill_circle(ctx, cx, cy, r, bg);
+        if bg.a > 0.0 {
+            self.fill_circle(ctx, cx, cy, r, bg);
+        }
 
-        // 1-px outline using widget_stroke for definition. MatterCAD
-        // uses a thin border around active circles too.
-        let v = current_visuals();
-        self.stroke_circle(ctx, cx, cy, r, v.widget_stroke);
+        if active {
+            self.paint_checked_arcs(ctx, cx, cy, r);
+        }
 
-        // Main icon, slightly inset.
+        // MatterCAD's HUD icon buttons do not draw an idle white
+        // circular background. Only draw a faint outline when hovered
+        // or pressed so the hover remains visible but transparent.
+        if self.hovered || self.pressed {
+            let v = current_visuals();
+            self.stroke_circle(ctx, cx, cy, r, v.widget_stroke.with_alpha(0.35));
+        }
+
+        // Main icon, slightly inset. PNG-based icons are blitted at
+        // the canonical MatterCAD size (16-px source, scaled to fit
+        // ~70% of the button diameter); fall back to the hand-drawn
+        // vector glyph when no PNG has been set.
         let icon_color = self.icon_color(active);
-        paint_icon(self.icon, ctx, cx, cy, r, icon_color);
+        if let Some(img) = self.image_icon {
+            paint_image_icon(
+                ctx,
+                img,
+                icon_color,
+                cx,
+                cy,
+                MATTERCAD_ICON_BASE_PX * MATTERCAD_ICON_SCALE,
+            );
+        } else {
+            paint_icon(self.icon, ctx, cx, cy, r, icon_color);
+        }
 
-        // Optional overlay chevron (lower-right). Drawn on top.
-        if let Some(overlay) = self.overlay_icon {
+        // Optional overlay (lower-right). Either a vector chevron
+        // or a small MatterCAD PNG.
+        if let Some(overlay) = self.overlay_image {
+            let ox = cx + r * 0.45;
+            let oy = cy - r * 0.45;
+            paint_image_icon(
+                ctx,
+                overlay,
+                icon_color,
+                ox,
+                oy,
+                MATTERCAD_CHEVRON_BASE_PX * MATTERCAD_ICON_SCALE,
+            );
+        } else if let Some(overlay) = self.overlay_icon {
             let or = r * 0.4;
             let ox = cx + r * 0.45;
             let oy = cy - r * 0.45;
@@ -295,6 +381,38 @@ impl Widget for CircularIconButton {
             _ => EventResult::Ignored,
         }
     }
+}
+
+/// Blit a recoloured MatterCAD PNG icon centred on `(cx, cy)`.  The
+/// PNG is decoded once per process, recoloured to `color`, and then
+/// drawn at `target_size × target_size` logical pixels via the
+/// software-friendly `draw_image_rgba` blit.
+fn paint_image_icon(
+    ctx: &mut dyn DrawCtx,
+    icon: MatterCadIcon,
+    color: Color,
+    cx: f64,
+    cy: f64,
+    target_size: f64,
+) {
+    let rgb = [
+        (color.r * 255.0).clamp(0.0, 255.0) as u8,
+        (color.g * 255.0).clamp(0.0, 255.0) as u8,
+        (color.b * 255.0).clamp(0.0, 255.0) as u8,
+    ];
+    let px = target_size.round().max(1.0) as u32;
+    let (rgba, w, h) = scaled_tinted_rgba_arc_to_size(icon, rgb, px, px);
+    // The caller supplies the centre; the icon buffer is already
+    // scaled using the spline-family CPU scaler and is drawn 1:1.
+    ctx.draw_image_rgba_arc(
+        &rgba,
+        w,
+        h,
+        cx - w as f64 * 0.5,
+        cy - h as f64 * 0.5,
+        w as f64,
+        h as f64,
+    );
 }
 
 #[cfg(test)]

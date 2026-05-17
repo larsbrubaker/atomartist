@@ -23,6 +23,16 @@ use crate::camera::mul4;
 /// 4× MSAA matches the main scene renderer; lets the cube edges read
 /// crisply at the small 100 px widget size.
 const SAMPLE_COUNT: u32 = 4;
+const FACE_MIP_COUNT: u32 = 9; // 256 -> 1
+
+/// Radius of the miniature cube camera.  A radius of 3 made the cube
+/// nearly fill the whole 100×100 widget; MatterCAD leaves visible
+/// padding inside the tumble-cube control.  4.1 brings the face size
+/// into the same visual range while preserving the existing FOV.
+pub const TUMBLE_CUBE_CAMERA_RADIUS: f32 = 4.1;
+/// Match MatterCAD's `world.RotationMatrix = LookAt(...) * Scale(.8)`
+/// for the miniature orientation cube.
+pub const TUMBLE_CUBE_MODEL_SCALE: f32 = 0.8;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -245,7 +255,7 @@ impl TumbleCubeRenderer {
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
 
@@ -260,7 +270,7 @@ impl TumbleCubeRenderer {
                     height: TEX_SIZE,
                     depth_or_array_layers: 1,
                 },
-                mip_level_count: 1,
+                mip_level_count: FACE_MIP_COUNT,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Rgba8UnormSrgb,
@@ -309,43 +319,49 @@ impl TumbleCubeRenderer {
             if !face_tex.dirty && ptr == s.faces[i].last_upload_ptr {
                 continue;
             }
-            queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &s.faces[i].texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &face_tex.active,
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(TEX_SIZE * 4),
-                    rows_per_image: Some(TEX_SIZE),
-                },
-                wgpu::Extent3d {
-                    width: TEX_SIZE,
-                    height: TEX_SIZE,
-                    depth_or_array_layers: 1,
-                },
-            );
+            let mips = build_mip_chain(&face_tex.active, TEX_SIZE, TEX_SIZE);
+            for (mip_level, (w, h, rgba)) in mips.iter().enumerate() {
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &s.faces[i].texture,
+                        mip_level: mip_level as u32,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    rgba,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(w * 4),
+                        rows_per_image: Some(*h),
+                    },
+                    wgpu::Extent3d {
+                        width: *w,
+                        height: *h,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
             face_tex.dirty = false;
             s.faces[i].last_upload_ptr = ptr;
         }
     }
 
     fn build_mvp(&self, aspect: f32) -> [f32; 16] {
-        // Cube-local orbit camera: sit at radius 3 looking at the origin
+        // Cube-local orbit camera: sit back far enough that the cube
+        // leaves visible padding inside its 100×100 widget, like the
+        // MatterCAD control.
         // with the user's azimuth/elevation.  Using a slightly tighter
         // FOV than the main viewport keeps the cube visually compact.
         let ce = self.elevation.cos();
         let se = self.elevation.sin();
         let sa = self.azimuth.sin();
         let ca = self.azimuth.cos();
-        let radius = 3.0f32;
+        let radius = TUMBLE_CUBE_CAMERA_RADIUS;
         let eye = [radius * ce * sa, radius * se, radius * ce * ca];
         let view = look_at(eye, [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
         let proj = perspective(std::f32::consts::PI * 0.22, aspect, 0.1, 100.0);
-        mul4(&proj, &view)
+        let vp = mul4(&proj, &view);
+        mul4(&vp, &scale4(TUMBLE_CUBE_MODEL_SCALE))
     }
 }
 
@@ -462,6 +478,47 @@ impl WgpuCustomRender for TumbleCubeRenderer {
     }
 }
 
+fn build_mip_chain(base: &[u8], w: u32, h: u32) -> Vec<(u32, u32, Vec<u8>)> {
+    let mut out = Vec::new();
+    out.push((w, h, base.to_vec()));
+    let mut cur_w = w;
+    let mut cur_h = h;
+    while cur_w > 1 || cur_h > 1 {
+        let prev = &out.last().unwrap().2;
+        let next_w = (cur_w / 2).max(1);
+        let next_h = (cur_h / 2).max(1);
+        let next = downsample_rgba_box(prev, cur_w, cur_h, next_w, next_h);
+        out.push((next_w, next_h, next));
+        cur_w = next_w;
+        cur_h = next_h;
+    }
+    out
+}
+
+fn downsample_rgba_box(src: &[u8], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> Vec<u8> {
+    let mut dst = vec![0u8; (dst_w * dst_h * 4) as usize];
+    for y in 0..dst_h {
+        for x in 0..dst_w {
+            let sx0 = (x * 2).min(src_w - 1);
+            let sy0 = (y * 2).min(src_h - 1);
+            let sx1 = (sx0 + 1).min(src_w - 1);
+            let sy1 = (sy0 + 1).min(src_h - 1);
+            let mut acc = [0u32; 4];
+            for (sx, sy) in [(sx0, sy0), (sx1, sy0), (sx0, sy1), (sx1, sy1)] {
+                let i = ((sy * src_w + sx) * 4) as usize;
+                for c in 0..4 {
+                    acc[c] += src[i + c] as u32;
+                }
+            }
+            let di = ((y * dst_w + x) * 4) as usize;
+            for c in 0..4 {
+                dst[di + c] = ((acc[c] + 2) / 4) as u8;
+            }
+        }
+    }
+    dst
+}
+
 fn look_at(eye: [f32; 3], center: [f32; 3], up: [f32; 3]) -> [f32; 16] {
     let f = normalize3([center[0] - eye[0], center[1] - eye[1], center[2] - eye[2]]);
     let s = normalize3(cross3(f, up));
@@ -482,6 +539,15 @@ fn perspective(fov_y: f32, aspect: f32, near: f32, far: f32) -> [f32; 16] {
         0.0,        f,   0.0,                     0.0,
         0.0,        0.0, (far + near) * nf,      -1.0,
         0.0,        0.0, 2.0 * far * near * nf,   0.0,
+    ]
+}
+
+fn scale4(s: f32) -> [f32; 16] {
+    [
+        s,   0.0, 0.0, 0.0,
+        0.0, s,   0.0, 0.0,
+        0.0, 0.0, s,   0.0,
+        0.0, 0.0, 0.0, 1.0,
     ]
 }
 

@@ -35,7 +35,7 @@ use agg_gui::{
 use atomartist_lib::graph::node::NodeId;
 use manifold_rust::types::MeshGL;
 
-use crate::camera::{mul4, transform_point4, OrbitCamera};
+use crate::camera::{mul4, transform_point4, CameraPoseAnimation, OrbitCamera};
 use crate::picking::{project_to_view_plane, raycast_mesh};
 use crate::scene_renderer::{RenderStyle, WgpuSceneRenderer};
 
@@ -87,6 +87,9 @@ pub struct ViewportInputs {
     /// `WgpuSceneRenderer::draw_grid` each paint so flipping the
     /// button hides / shows the floor grid on the next frame.
     pub show_bed: Arc<Mutex<bool>>,
+    /// Optional camera pose tween started by external HUD controls
+    /// (Home / Fit).  The viewport owns ticking it during paint.
+    pub camera_animation: Arc<Mutex<Option<CameraPoseAnimation>>>,
 }
 
 impl ViewportInputs {
@@ -102,6 +105,7 @@ impl ViewportInputs {
             tool: Arc::new(Mutex::new(ViewportTool::default())),
             render_style: Arc::new(Mutex::new(RenderStyle::default())),
             show_bed: Arc::new(Mutex::new(true)),
+            camera_animation: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -322,6 +326,18 @@ impl Viewport3dWidget {
             ctx.stroke();
         }
     }
+
+    fn tick_camera_animation(&self, dt_seconds: f32) {
+        let mut slot = self.inputs.camera_animation.lock().unwrap();
+        let Some(anim) = slot.as_mut() else { return };
+        let mut cam = self.inputs.camera.lock().unwrap();
+        let done = anim.step(&mut cam, dt_seconds);
+        if done {
+            *slot = None;
+        } else {
+            agg_gui::animation::request_draw();
+        }
+    }
 }
 
 /// Pick an outline thickness scaled to the model's bounding-box extent so
@@ -424,6 +440,8 @@ impl Widget for Viewport3dWidget {
         let w = self.bounds.width;
         let h = self.bounds.height;
         if w <= 0.0 || h <= 0.0 { return; }
+
+        self.tick_camera_animation(0.016);
 
         // Theme-aware background: slightly lighter / darker than the
         // canvas backdrop so the viewport reads as a distinct pane.
@@ -873,7 +891,6 @@ impl Viewport3dWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
 
     fn empty_inputs() -> ViewportInputs {
         ViewportInputs::empty()

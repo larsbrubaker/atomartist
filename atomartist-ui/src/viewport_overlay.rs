@@ -25,18 +25,23 @@ use std::f64::consts::TAU;
 use std::sync::Arc;
 
 use agg_gui::{
-    text::Font, Color, DrawCtx, Event, EventResult, HAnchor, LineCap, MouseButton, Point, Rect,
-    Size, VAnchor, Widget, WidgetBase,
+    text::Font, Color, DrawCtx, Event, EventResult, HAnchor, Point, Rect, Size, Tooltip, VAnchor,
+    Widget, WidgetBase,
 };
+use agg_rust::arc::Arc as AggArc;
+use agg_rust::basics::{is_close, is_line_to, is_move_to, is_stop, VertexSource};
+use agg_rust::conv_stroke::ConvStroke;
+use agg_rust::math_stroke::LineCap as AggLineCap;
 use atomartist_renderer::{
-    OrbitMode, Projection, RenderStyle, TumbleCubeInputs, TumbleCubeWidget, Viewport3dWidget,
-    ViewportInputs, ViewportTool,
+    CameraPoseAnimation, OrbitMode, Projection, RenderStyle, TumbleCubeInputs, TumbleCubeWidget,
+    Viewport3dWidget, ViewportInputs, ViewportTool,
 };
 
 use crate::app_state::AppState;
 use crate::circular_dropdown::{CircularDropdown, DropdownItem};
 use crate::circular_icon_button::CircularIconButton;
 use crate::icons::IconKind;
+use crate::mattercad_icons::MatterCadIcon;
 
 /// Pixel side of the tumble cube widget itself (radius from centre is
 /// `CUBE_SIZE / 2`).  Matches MatterCAD's `100 * DeviceScale` in
@@ -59,14 +64,6 @@ const HUD_STROKE_WIDTH: f64 = 17.0;
 /// Radial gap between the cube edge and the bay's stroke centerline.
 /// Matches MatterCAD's `tumbleCubeRadius + 12 * scale + width / 2`.
 const HUD_BAY_GAP: f64 = 12.0;
-/// Vertical drop of the small horizontal separator below the cube —
-/// `renderRoundedLine(18, 101)` in MatterCAD.  Measured from the
-/// cube's centre.
-const HUD_SEPARATOR_BELOW_CENTER: f64 = 101.0;
-/// Half-length of the horizontal separator line — matches the
-/// `lineWidth` argument of MatterCAD's `renderRoundedLine(18, 101)`
-/// call.
-const HUD_SEPARATOR_HALF_LEN: f64 = 18.0;
 /// Y-distance from the overlay's top edge to the FIRST bottom-row
 /// button's centre.  Matches MatterCAD's `var startHeight = 180`.
 const BOTTOM_ROW_TOP_OFFSET: f64 = 180.0;
@@ -85,9 +82,11 @@ pub fn build_viewport_overlay(state: AppState, font: Arc<Font>) -> Box<dyn Widge
         tool: state.viewport_tool.clone(),
         render_style: state.render_style.clone(),
         show_bed: state.show_bed.clone(),
+        camera_animation: state.camera_animation.clone(),
     };
     let cube_inputs = TumbleCubeInputs {
         camera: state.camera.clone(),
+        animation_completed: None,
     };
 
     let viewport = Box::new(Viewport3dWidget::new(viewport_inputs));
@@ -105,21 +104,40 @@ pub fn build_viewport_overlay(state: AppState, font: Arc<Font>) -> Box<dyn Widge
     //  -Tau * .15 → Scale (Zoom)
     //  -Tau * .30 → Perspective (right of cube)
     //  -Tau * .40 → Turntable (further right)
-    add_tool_button(&mut overlay, &state, TAU * 0.15, IconKind::Select, ViewportTool::Select);
-    add_tool_button(&mut overlay, &state, TAU * 0.05, IconKind::Rotate, ViewportTool::Rotate);
-    add_tool_button(&mut overlay, &state, -TAU * 0.05, IconKind::Pan, ViewportTool::Pan);
-    add_tool_button(&mut overlay, &state, -TAU * 0.15, IconKind::Zoom, ViewportTool::Zoom);
-    add_home_button(&mut overlay, &state, TAU * 0.30);
-    add_zoom_to_sel_button(&mut overlay, &state, TAU * 0.40);
-    add_turntable_button(&mut overlay, &state, -TAU * 0.40);
-    add_perspective_button(&mut overlay, &state, -TAU * 0.30);
+    // Tool radio cluster — each button maps to one of MatterCAD's
+    // `ThemedRadioIconButton` entries in `View3DWidget.CreateTumbleCubeAndControls`.
+    add_tool_button(
+        &mut overlay, &state, &font, TAU * 0.15,
+        MatterCadIcon::PartSelect, ViewportTool::Select,
+        "Select parts",
+    );
+    add_tool_button(
+        &mut overlay, &state, &font, TAU * 0.05,
+        MatterCadIcon::Rotate, ViewportTool::Rotate,
+        "Rotate view",
+    );
+    add_tool_button(
+        &mut overlay, &state, &font, -TAU * 0.05,
+        MatterCadIcon::Translate, ViewportTool::Pan,
+        "Move view",
+    );
+    add_tool_button(
+        &mut overlay, &state, &font, -TAU * 0.15,
+        MatterCadIcon::Scale, ViewportTool::Zoom,
+        "Zoom view",
+    );
+    add_home_button(&mut overlay, &state, &font, TAU * 0.30);
+    add_zoom_to_sel_button(&mut overlay, &state, &font, TAU * 0.40);
+    add_turntable_button(&mut overlay, &state, &font, -TAU * 0.40);
+    add_perspective_button(&mut overlay, &state, &font, -TAU * 0.30);
 
     add_bottom_row(&mut overlay, &state, &font);
 
     Box::new(overlay)
 }
 
-/// Placement rule for an overlay child past the viewport + cube.
+/// Placement rule for an overlay child past the viewport + cube +
+/// HUD-bay layer.
 #[derive(Clone, Copy, Debug)]
 enum Placement {
     /// Centre on the ring at the given polar angle (radians, 0 = up).
@@ -128,6 +146,14 @@ enum Placement {
     /// render-style picker beneath the cube.
     BelowCube { dx: f64, dy_below: f64, size: Size },
 }
+
+/// Z-order positions in the overlay's child list.  All children
+/// after `HUD_BAY` are buttons / dropdowns laid out via
+/// `Placement`.
+const CHILD_VIEWPORT: usize = 0;
+const CHILD_HUD_BAY: usize = 1;
+const CHILD_CUBE: usize = 2;
+const FIRST_BUTTON_CHILD: usize = 3;
 
 /// Custom container — does the polar button layout MatterCAD does in
 /// `View3DWidget.MakeRoundAndAdd`.  The first child is the viewport
@@ -142,9 +168,10 @@ pub struct ViewportOverlay {
 
 impl ViewportOverlay {
     pub fn new(viewport: Box<dyn Widget>, cube: Box<dyn Widget>) -> Self {
+        let bay: Box<dyn Widget> = Box::new(HudBayLayer::new());
         Self {
             bounds: Rect::default(),
-            children: vec![viewport, cube],
+            children: vec![viewport, bay, cube],
             base: WidgetBase::new()
                 .with_h_anchor(HAnchor::STRETCH)
                 .with_v_anchor(VAnchor::STRETCH),
@@ -196,19 +223,26 @@ impl Widget for ViewportOverlay {
         let cube_cx = cube_x + cube_w * 0.5;
         let cube_cy = cube_y + cube_h * 0.5;
 
-        // children[0]: viewport — stretches to fill.
-        if let Some(vp) = self.children.get_mut(0) {
+        // children[CHILD_VIEWPORT]: viewport — stretches to fill.
+        if let Some(vp) = self.children.get_mut(CHILD_VIEWPORT) {
             vp.layout(available);
             vp.set_bounds(Rect::new(0.0, 0.0, available.width, available.height));
         }
-        // children[1]: tumble cube — fixed-size square anchored top-right.
-        if let Some(cube) = self.children.get_mut(1) {
+        // children[CHILD_HUD_BAY]: HUD bay framing — stretches to
+        // fill so it can paint the banana arcs OVER the viewport's
+        // own background fill but BELOW the buttons.
+        if let Some(bay) = self.children.get_mut(CHILD_HUD_BAY) {
+            bay.layout(available);
+            bay.set_bounds(Rect::new(0.0, 0.0, available.width, available.height));
+        }
+        // children[CHILD_CUBE]: tumble cube.
+        if let Some(cube) = self.children.get_mut(CHILD_CUBE) {
             cube.layout(Size::new(cube_w, cube_h));
             cube.set_bounds(Rect::new(cube_x, cube_y, cube_w, cube_h));
         }
 
         for (i, placement) in self.placements.iter().enumerate() {
-            let Some(child) = self.children.get_mut(2 + i) else { continue };
+            let Some(child) = self.children.get_mut(FIRST_BUTTON_CHILD + i) else { continue };
             match *placement {
                 Placement::Ring { angle, size } => {
                     // 0 = up, CCW positive — translate to widget-local
@@ -242,78 +276,13 @@ impl Widget for ViewportOverlay {
         available
     }
 
-    fn paint(&mut self, ctx: &mut dyn DrawCtx) {
-        // HUD background — pixel-identical port of MatterCAD's
-        // `renderRoundedGroup` / `renderRoundedLine` from
-        // `View3DWidget.cs:498-552`.  Each "bay" is a fat stroke
-        // (width = HUD_STROKE_WIDTH * 2 because MatterCAD multiplies
-        // its declared width by 2 inside `RenderPath`) along an arc
-        // with round line caps.  A second, thinner stroke on top
-        // gives the bay a 1-px outline.
-        let w = self.bounds.width;
-        let h = self.bounds.height;
-        let cube_cx = w - CUBE_MARGIN_RIGHT - CUBE_SIZE * 0.5;
-        let cube_cy = h - CUBE_MARGIN_TOP - CUBE_SIZE * 0.5;
-        let cube_r = CUBE_SIZE * 0.5;
-        let bay_radius = cube_r + HUD_BAY_GAP + HUD_STROKE_WIDTH * 0.5;
-        let stroke_w = HUD_STROKE_WIDTH * 2.0;
-
-        let visuals = ctx.visuals();
-        let dark = 0.299 * visuals.bg_color.r
-            + 0.587 * visuals.bg_color.g
-            + 0.114 * visuals.bg_color.b
-            < 0.5;
-        // MatterCAD's colours: `hudBackgroundColor = theme.BedBackgroundColor.WithAlpha(120)`
-        // (~47% alpha) and `hudStrokeColor = theme.TextColor.WithAlpha(120)`.
-        let hud_bg = if dark {
-            Color::rgba(0.20, 0.21, 0.24, 0.47)
-        } else {
-            Color::rgba(0.94, 0.95, 0.96, 0.47)
-        };
-        let hud_outline = if dark {
-            Color::rgba(0.85, 0.86, 0.90, 0.47)
-        } else {
-            Color::rgba(0.20, 0.21, 0.24, 0.47)
-        };
-
-        // Three ring bays — angles match MatterCAD's
-        // `renderRoundedGroup(.3, .25)`, `(.1, .6)`, `(.1, .9)`.
-        // MatterCAD's angle convention is standard math: angle 0 =
-        // +X (3 o'clock), CCW positive; agg-gui uses the same.
-        paint_arc_bay(
-            ctx,
-            cube_cx, cube_cy, bay_radius,
-            TAU * 0.25, TAU * 0.30,
-            stroke_w, hud_bg, hud_outline,
-        );
-        paint_arc_bay(
-            ctx,
-            cube_cx, cube_cy, bay_radius,
-            TAU * 0.60, TAU * 0.10,
-            stroke_w, hud_bg, hud_outline,
-        );
-        paint_arc_bay(
-            ctx,
-            cube_cx, cube_cy, bay_radius,
-            TAU * 0.90, TAU * 0.10,
-            stroke_w, hud_bg, hud_outline,
-        );
-
-        // Small horizontal separator below the cube — MatterCAD's
-        // `renderRoundedLine(18, 101)`.  `heightBelowCenter = 101`
-        // is measured downward from the cube centre in Y-down screen
-        // coords; we negate it for Y-up.
-        let sep_y = cube_cy - HUD_SEPARATOR_BELOW_CENTER;
-        paint_line_bay(
-            ctx,
-            cube_cx - HUD_SEPARATOR_HALF_LEN,
-            sep_y,
-            cube_cx + HUD_SEPARATOR_HALF_LEN,
-            sep_y,
-            stroke_w,
-            hud_bg,
-            hud_outline,
-        );
+    fn paint(&mut self, _ctx: &mut dyn DrawCtx) {
+        // The HUD framing arcs used to live here, but the viewport
+        // widget (child 0) paints its own background fill in `paint`
+        // which would overwrite anything drawn by the overlay
+        // itself. Bays are now painted by `HudBayLayer` (child 1)
+        // which runs AFTER the viewport, AFTER its bg fill, but
+        // BEFORE the buttons (children 3..).
     }
 
     fn on_event(&mut self, event: &Event) -> EventResult {
@@ -377,186 +346,243 @@ fn translate_for_child(event: &Event, child_bounds: Rect) -> Option<Event> {
     }
 }
 
-/// Strokes a curved arc with a fat round-capped line, then overlays a
-/// thin 1-px outline.  This is the pixel-exact port of MatterCAD's
-/// `RenderPath` + `renderRoundedGroup` (`View3DWidget.cs:506-526`):
+/// Transparent leaf widget that paints the HUD bay framing on top of
+/// the viewport's background fill. Slotted into the overlay's
+/// children at index `CHILD_HUD_BAY` so paint order is:
+///   1. Viewport (paints its own bg + 3-D content).
+///   2. HudBayLayer (paints banana arcs + separator).
+///   3. Cube widget (paints into its sub-region).
+///   4. Ring buttons.
+///   5. Bottom-row buttons / dropdowns.
+struct HudBayLayer {
+    bounds: Rect,
+    base: WidgetBase,
+    children_storage: Vec<Box<dyn Widget>>,
+}
+
+impl HudBayLayer {
+    fn new() -> Self {
+        Self {
+            bounds: Rect::default(),
+            base: WidgetBase::new()
+                .with_h_anchor(HAnchor::STRETCH)
+                .with_v_anchor(VAnchor::STRETCH),
+            children_storage: Vec::new(),
+        }
+    }
+}
+
+impl Widget for HudBayLayer {
+    fn type_name(&self) -> &'static str { "HudBayLayer" }
+    fn bounds(&self) -> Rect { self.bounds }
+    fn set_bounds(&mut self, b: Rect) { self.bounds = b; }
+    fn children(&self) -> &[Box<dyn Widget>] { &[] }
+    fn children_mut(&mut self) -> &mut Vec<Box<dyn Widget>> { &mut self.children_storage }
+    fn h_anchor(&self) -> HAnchor { self.base.h_anchor }
+    fn v_anchor(&self) -> VAnchor { self.base.v_anchor }
+    fn widget_base(&self) -> Option<&WidgetBase> { Some(&self.base) }
+
+    fn layout(&mut self, available: Size) -> Size {
+        self.bounds = Rect::new(0.0, 0.0, available.width, available.height);
+        available
+    }
+
+    fn paint(&mut self, ctx: &mut dyn DrawCtx) {
+        // HUD background — pixel-identical port of MatterCAD's
+        // `renderRoundedGroup` / `renderRoundedLine` from
+        // `View3DWidget.cs:498-552`. Each "bay" is a fat round-capped
+        // stroke at radius `cube_r + 12 + width/2`.
+        let w = self.bounds.width;
+        let h = self.bounds.height;
+        let cube_cx = w - CUBE_MARGIN_RIGHT - CUBE_SIZE * 0.5;
+        let cube_cy = h - CUBE_MARGIN_TOP - CUBE_SIZE * 0.5;
+        let cube_r = CUBE_SIZE * 0.5;
+        let bay_radius = cube_r + HUD_BAY_GAP + HUD_STROKE_WIDTH * 0.5;
+        let stroke_w = HUD_STROKE_WIDTH * 2.0;
+
+        let visuals = ctx.visuals();
+        let dark = 0.299 * visuals.bg_color.r
+            + 0.587 * visuals.bg_color.g
+            + 0.114 * visuals.bg_color.b
+            < 0.5;
+        // MatterCAD: `hudBackgroundColor = theme.BedBackgroundColor.WithAlpha(120)`
+        // (~47% alpha), `hudStrokeColor = theme.TextColor.WithAlpha(120)`.
+        let hud_bg = if dark {
+            Color::rgba(0.20, 0.21, 0.24, 0.47)
+        } else {
+            Color::rgba(0.85, 0.87, 0.89, 0.85)
+        };
+        let hud_outline = if dark {
+            Color::rgba(0.85, 0.86, 0.90, 0.47)
+        } else {
+            Color::rgba(0.20, 0.21, 0.24, 0.47)
+        };
+
+        // MatterCAD regions:
+        //   renderRoundedGroup(.3, .25)     top tool group
+        //   renderRoundedGroup(.1, .6)      home / fit group
+        //   renderRoundedGroup(.1, .9)      turntable / perspective group
+        //
+        // AtomArtist extension:
+        //   three single circular regions behind the vertical Bed /
+        //   Render / Snap controls, using the same AGG circle/stroke
+        //   approach as the group regions.
+        //
+        // All are rendered through the same AGG Arc -> ConvStroke ->
+        // ConvStroke pipeline as the C# code.  The group endpoints
+        // below are expressed in the same ring coordinate convention
+        // as button placement to avoid long-way arc wrapping.
+        paint_ring_span_bay_exact(
+            ctx, cube_cx, cube_cy, bay_radius,
+            TAU * 0.15, -TAU * 0.15,
+            stroke_w, hud_bg, hud_outline,
+        );
+        paint_ring_span_bay_exact(
+            ctx, cube_cx, cube_cy, bay_radius,
+            TAU * 0.40, TAU * 0.30,
+            stroke_w, hud_bg, hud_outline,
+        );
+        paint_ring_span_bay_exact(
+            ctx, cube_cx, cube_cy, bay_radius,
+            -TAU * 0.30, -TAU * 0.40,
+            stroke_w, hud_bg, hud_outline,
+        );
+
+        let cube_y = h - CUBE_MARGIN_TOP - CUBE_SIZE;
+        let base_below = BOTTOM_ROW_TOP_OFFSET - CUBE_MARGIN_TOP - CUBE_SIZE;
+        for dy_below in [
+            base_below,
+            base_below + BOTTOM_ROW_SPACING,
+            base_below + BOTTOM_ROW_SPACING * 2.0,
+        ] {
+            paint_circle_bay_exact(
+                ctx,
+                cube_cx,
+                cube_y - dy_below,
+                stroke_w * 0.5,
+                hud_bg,
+                hud_outline,
+            );
+        }
+    }
+
+    fn on_event(&mut self, _: &Event) -> EventResult { EventResult::Ignored }
+}
+
+/// Render one HUD group with the same AGG math MatterCAD uses:
 ///
 /// ```csharp
-/// var background = new Stroke(vertexSource, width * 2);
+/// var arc = new Arc(tumbleCubeCenter, radius, start, end);
+/// var background = new Stroke(arc, width * 2);
 /// background.LineCap = LineCap.Round;
 /// Render(background, hudBackgroundColor);
 /// Render(new Stroke(background, scale), hudStrokeColor);
 /// ```
 ///
-/// `center_angle` and `half_span` are in MatterCAD's convention
-/// (standard math: 0 = +X, CCW positive, radians).  The arc sweeps
-/// from `center - half_span` to `center + half_span`.
-fn paint_arc_bay(
+/// The start/end arguments are in the same **ring coordinates** as
+/// `ViewportOverlay::layout` uses for button placement:
+///
+/// ```text
+/// angle 0        = straight up from cube centre
+/// positive angle = toward the left/top side
+/// negative angle = toward the right/top side
+/// ```
+///
+/// The top group is therefore Select(+Tau*.15) to Zoom(-Tau*.15).
+/// Internally those ring angles are converted to AGG's standard
+/// convention (0 = +X, CCW positive) before feeding `agg_rust::arc::Arc`.
+fn paint_ring_span_bay_exact(
     ctx: &mut dyn DrawCtx,
     cx: f64,
     cy: f64,
     radius: f64,
-    center_angle: f64,
-    half_span: f64,
+    ring_start: f64,
+    ring_end: f64,
     stroke_width: f64,
     fill: Color,
     outline: Color,
 ) {
-    let a_start = center_angle - half_span;
-    let a_end = center_angle + half_span;
-    let steps = 32;
+    let to_agg_angle = |ring_angle: f64| std::f64::consts::FRAC_PI_2 + ring_angle;
+    // We want the short top arc from right→left through the top.
+    // In AGG coordinates: Zoom(-.15) maps to ~0.10τ, Select(+.15)
+    // maps to ~0.40τ.  CCW from zoom to select is exactly the top
+    // group; reversing these endpoints draws the long way around.
+    let a_start = to_agg_angle(ring_end);
+    let a_end = to_agg_angle(ring_start);
+    let arc = AggArc::new(cx, cy, radius, radius, a_start, a_end, true);
 
-    // First pass: fat fill stroke with round caps.
-    ctx.set_stroke_color(fill);
-    ctx.set_line_width(stroke_width);
-    ctx.set_line_cap(LineCap::Round);
-    ctx.begin_path();
-    for i in 0..=steps {
-        let t = i as f64 / steps as f64;
-        let a = a_start + (a_end - a_start) * t;
-        let x = cx + radius * a.cos();
-        let y = cy + radius * a.sin();
-        if i == 0 {
-            ctx.move_to(x, y);
-        } else {
-            ctx.line_to(x, y);
-        }
-    }
-    ctx.stroke();
+    let mut background = ConvStroke::new(arc);
+    background.set_width(stroke_width);
+    background.set_line_cap(AggLineCap::Round);
+    fill_vertex_source(ctx, &mut background, fill);
 
-    // Second pass: thin outline.  We don't have a direct
-    // stroke-of-a-stroke primitive, so we approximate MatterCAD's
-    // `new Stroke(background, scale)` (a 1-px outline around the
-    // fat stroke) by tracing the two parallel edges of the fat
-    // stroke as 1-px lines.  Round caps at the ends are
-    // approximated by the cap arcs.
-    let half = stroke_width * 0.5;
-    ctx.set_stroke_color(outline);
-    ctx.set_line_width(1.0);
-    // Outer parallel curve.
-    ctx.begin_path();
-    for i in 0..=steps {
-        let t = i as f64 / steps as f64;
-        let a = a_start + (a_end - a_start) * t;
-        let x = cx + (radius + half) * a.cos();
-        let y = cy + (radius + half) * a.sin();
-        if i == 0 {
-            ctx.move_to(x, y);
-        } else {
-            ctx.line_to(x, y);
-        }
-    }
-    ctx.stroke();
-    // Inner parallel curve.
-    ctx.begin_path();
-    for i in 0..=steps {
-        let t = i as f64 / steps as f64;
-        let a = a_start + (a_end - a_start) * t;
-        let x = cx + (radius - half) * a.cos();
-        let y = cy + (radius - half) * a.sin();
-        if i == 0 {
-            ctx.move_to(x, y);
-        } else {
-            ctx.line_to(x, y);
-        }
-    }
-    ctx.stroke();
-    // End-cap outline arcs — semicircles around each tip.
-    let cap_steps = 12;
-    for tip_angle in [a_start, a_end] {
-        let tip_x = cx + radius * tip_angle.cos();
-        let tip_y = cy + radius * tip_angle.sin();
-        let tangent_x = -tip_angle.sin();
-        let tangent_y = tip_angle.cos();
-        let perp_x = tip_angle.cos();
-        let perp_y = tip_angle.sin();
-        // Sweep direction: arcs at `a_start` open outward (away from
-        // the bay's interior), arcs at `a_end` likewise.  Use a half
-        // turn centred on the tip.
-        let outward_sign = if tip_angle == a_start { -1.0 } else { 1.0 };
-        ctx.begin_path();
-        for i in 0..=cap_steps {
-            let t = i as f64 / cap_steps as f64;
-            let theta = std::f64::consts::PI * t - std::f64::consts::FRAC_PI_2;
-            let lateral = half * theta.cos();
-            let along = half * theta.sin() * outward_sign;
-            let x = tip_x + perp_x * lateral + tangent_x * along;
-            let y = tip_y + perp_y * lateral + tangent_y * along;
-            if i == 0 {
-                ctx.move_to(x, y);
-            } else {
-                ctx.line_to(x, y);
-            }
-        }
-        ctx.stroke();
-    }
+    // C# does `new Stroke(background, scale)` and renders that as
+    // the outline. Recreate the background stroke from a fresh arc so
+    // the nested stroke consumes the same source geometry from the
+    // start.
+    let arc = AggArc::new(cx, cy, radius, radius, a_start, a_end, true);
+    let mut background = ConvStroke::new(arc);
+    background.set_width(stroke_width);
+    background.set_line_cap(AggLineCap::Round);
+    let mut border = ConvStroke::new(background);
+    border.set_width(1.0);
+    fill_vertex_source(ctx, &mut border, outline);
 }
 
-/// Stroke a straight-line bay with the same fat-round-capped
-/// treatment as [`paint_arc_bay`].  Used for MatterCAD's
-/// `renderRoundedLine` separator below the cube.
-fn paint_line_bay(
+/// Render a single circular HUD region with the same AGG machinery as
+/// the arc groups. The circle itself is an AGG full-circle arc filled
+/// as the translucent region; the border is `ConvStroke(circle, 1)`,
+/// matching the C# `new Stroke(background, scale)` idea for a simple
+/// closed curve.
+fn paint_circle_bay_exact(
     ctx: &mut dyn DrawCtx,
-    x0: f64,
-    y0: f64,
-    x1: f64,
-    y1: f64,
-    stroke_width: f64,
+    cx: f64,
+    cy: f64,
+    radius: f64,
     fill: Color,
     outline: Color,
 ) {
-    // Fat fill stroke with round caps.
-    ctx.set_stroke_color(fill);
-    ctx.set_line_width(stroke_width);
-    ctx.set_line_cap(LineCap::Round);
-    ctx.begin_path();
-    ctx.move_to(x0, y0);
-    ctx.line_to(x1, y1);
-    ctx.stroke();
+    let mut circle = AggArc::new(cx, cy, radius, radius, 0.0, TAU, true);
+    fill_vertex_source(ctx, &mut circle, fill);
 
-    // Thin outline traced along the two parallel edges of the fat
-    // stroke + semicircle end caps.
-    let half = stroke_width * 0.5;
-    let dx = x1 - x0;
-    let dy = y1 - y0;
-    let len = (dx * dx + dy * dy).sqrt().max(1e-6);
-    let nx = -dy / len; // unit normal
-    let ny = dx / len;
-    ctx.set_stroke_color(outline);
-    ctx.set_line_width(1.0);
-    // Top edge.
-    ctx.begin_path();
-    ctx.move_to(x0 + nx * half, y0 + ny * half);
-    ctx.line_to(x1 + nx * half, y1 + ny * half);
-    ctx.stroke();
-    // Bottom edge.
-    ctx.begin_path();
-    ctx.move_to(x0 - nx * half, y0 - ny * half);
-    ctx.line_to(x1 - nx * half, y1 - ny * half);
-    ctx.stroke();
-    // End caps as semicircles.
-    let cap_steps = 12;
-    let tx = dx / len;
-    let ty = dy / len;
-    for (cx, cy, sign) in [(x0, y0, -1.0_f64), (x1, y1, 1.0_f64)] {
-        ctx.begin_path();
-        for i in 0..=cap_steps {
-            let t = i as f64 / cap_steps as f64;
-            let theta = std::f64::consts::PI * t - std::f64::consts::FRAC_PI_2;
-            let lateral = half * theta.cos();
-            let along = half * theta.sin() * sign;
-            let x = cx + nx * lateral + tx * along;
-            let y = cy + ny * lateral + ty * along;
-            if i == 0 {
-                ctx.move_to(x, y);
-            } else {
-                ctx.line_to(x, y);
-            }
-        }
-        ctx.stroke();
-    }
+    let circle = AggArc::new(cx, cy, radius, radius, 0.0, TAU, true);
+    let mut border = ConvStroke::new(circle);
+    border.set_width(1.0);
+    fill_vertex_source(ctx, &mut border, outline);
 }
 
+/// Feed an AGG [`VertexSource`] into `DrawCtx` as a filled polygon.
+/// This lets us use agg-rust's actual `Arc` and `ConvStroke`
+/// generators while still drawing through agg-gui's backend-agnostic
+/// `DrawCtx` interface.
+fn fill_vertex_source(ctx: &mut dyn DrawCtx, source: &mut dyn VertexSource, color: Color) {
+    source.rewind(0);
+    ctx.set_fill_color(color);
+    ctx.begin_path();
+    let mut first: Option<(f64, f64)> = None;
+    loop {
+        let mut x = 0.0;
+        let mut y = 0.0;
+        let cmd = source.vertex(&mut x, &mut y);
+        if is_stop(cmd) {
+            if let Some((fx, fy)) = first {
+                ctx.line_to(fx, fy);
+            }
+            break;
+        }
+        if is_move_to(cmd) {
+            ctx.move_to(x, y);
+            first = Some((x, y));
+        } else if is_line_to(cmd) {
+            ctx.line_to(x, y);
+        } else if is_close(cmd) {
+            if let Some((fx, fy)) = first {
+                ctx.line_to(fx, fy);
+            }
+        }
+    }
+    ctx.fill();
+}
 
 // ---------------------------------------------------------------------------
 // Button helpers — every ring button is a `CircularIconButton` so the
@@ -567,35 +593,44 @@ fn paint_line_bay(
 fn add_tool_button(
     overlay: &mut ViewportOverlay,
     state: &AppState,
+    font: &Arc<Font>,
     angle: f64,
-    icon: IconKind,
+    image: MatterCadIcon,
     tool: ViewportTool,
+    tooltip: &'static str,
 ) {
     let tool_w = state.viewport_tool.clone();
     let tool_r = state.viewport_tool.clone();
-    let btn = CircularIconButton::new(icon)
+    let btn = CircularIconButton::new(IconKind::Select)
+        .with_image_icon(image)
         .with_active_fn(move || *tool_r.lock().unwrap() == tool)
         .on_click(move || {
             *tool_w.lock().unwrap() = tool;
         });
-    overlay.add_ring_button(Box::new(btn), angle);
+    overlay.add_ring_button(wrap_tooltip(Box::new(btn), tooltip, font), angle);
 }
 
-fn add_home_button(overlay: &mut ViewportOverlay, state: &AppState, angle: f64) {
+fn add_home_button(overlay: &mut ViewportOverlay, state: &AppState, font: &Arc<Font>, angle: f64) {
     let camera = state.camera.clone();
+    let animation = state.camera_animation.clone();
     let btn = CircularIconButton::new(IconKind::Home)
-        .with_tooltip("Reset view")
+        .with_image_icon(MatterCadIcon::Home)
         .on_click(move || {
-            camera.lock().unwrap().reset_view();
+            let start = camera.lock().unwrap().clone();
+            let mut target = start.clone();
+            target.reset_view();
+            *animation.lock().unwrap() = Some(CameraPoseAnimation::new(&start, target, 0.25));
+            agg_gui::animation::request_draw();
         });
-    overlay.add_ring_button(Box::new(btn), angle);
+    overlay.add_ring_button(wrap_tooltip(Box::new(btn), "Reset view", font), angle);
 }
 
-fn add_zoom_to_sel_button(overlay: &mut ViewportOverlay, state: &AppState, angle: f64) {
+fn add_zoom_to_sel_button(overlay: &mut ViewportOverlay, state: &AppState, font: &Arc<Font>, angle: f64) {
     let mesh_slot = state.last_mesh_output.clone();
     let camera = state.camera.clone();
+    let animation = state.camera_animation.clone();
     let btn = CircularIconButton::new(IconKind::Fit)
-        .with_tooltip("Zoom to selection")
+        .with_image_icon(MatterCadIcon::Select)
         .on_click(move || {
             let Some(mesh) = mesh_slot.lock().unwrap().clone() else { return };
             if mesh.num_prop < 3 || mesh.vert_properties.is_empty() {
@@ -613,18 +648,22 @@ fn add_zoom_to_sel_button(overlay: &mut ViewportOverlay, state: &AppState, angle
                 }
             }
             if mn[0].is_finite() && mx[0].is_finite() {
-                camera.lock().unwrap().fit_to_bounds(mn, mx);
+                let start = camera.lock().unwrap().clone();
+                let mut target = start.clone();
+                target.fit_to_bounds(mn, mx);
+                *animation.lock().unwrap() = Some(CameraPoseAnimation::new(&start, target, 0.25));
+                agg_gui::animation::request_draw();
             }
         });
-    overlay.add_ring_button(Box::new(btn), angle);
+    overlay.add_ring_button(wrap_tooltip(Box::new(btn), "Zoom to selection", font), angle);
 }
 
-fn add_turntable_button(overlay: &mut ViewportOverlay, state: &AppState, angle: f64) {
+fn add_turntable_button(overlay: &mut ViewportOverlay, state: &AppState, font: &Arc<Font>, angle: f64) {
     let camera_w = state.camera.clone();
     let setting_w = state.turntable.clone();
     let setting_r = state.turntable.clone();
     let btn = CircularIconButton::new(IconKind::Turn)
-        .with_tooltip("Turntable mode")
+        .with_image_icon(MatterCadIcon::Spin)
         .with_active_fn(move || *setting_r.lock().unwrap())
         .on_click(move || {
             let mut s = setting_w.lock().unwrap();
@@ -635,15 +674,15 @@ fn add_turntable_button(overlay: &mut ViewportOverlay, state: &AppState, angle: 
                 OrbitMode::Trackball
             };
         });
-    overlay.add_ring_button(Box::new(btn), angle);
+    overlay.add_ring_button(wrap_tooltip(Box::new(btn), "Turntable mode", font), angle);
 }
 
-fn add_perspective_button(overlay: &mut ViewportOverlay, state: &AppState, angle: f64) {
+fn add_perspective_button(overlay: &mut ViewportOverlay, state: &AppState, font: &Arc<Font>, angle: f64) {
     let camera_w = state.camera.clone();
     let setting_w = state.perspective.clone();
     let setting_r = state.perspective.clone();
     let btn = CircularIconButton::new(IconKind::Persp)
-        .with_tooltip("Perspective mode")
+        .with_image_icon(MatterCadIcon::Perspective)
         .with_active_fn(move || *setting_r.lock().unwrap())
         .on_click(move || {
             let mut s = setting_w.lock().unwrap();
@@ -654,7 +693,7 @@ fn add_perspective_button(overlay: &mut ViewportOverlay, state: &AppState, angle
                 Projection::Orthographic
             };
         });
-    overlay.add_ring_button(Box::new(btn), angle);
+    overlay.add_ring_button(wrap_tooltip(Box::new(btn), "Perspective mode", font), angle);
 }
 
 /// Three circles beneath the cube — Bed toggle, Render-mode dropdown,
@@ -678,14 +717,14 @@ fn add_bottom_row(overlay: &mut ViewportOverlay, state: &AppState, font: &Arc<Fo
         let bed_w = state.show_bed.clone();
         let bed_r = state.show_bed.clone();
         let btn = CircularIconButton::new(IconKind::Bed)
-            .with_tooltip("Show / hide bed grid")
+            .with_image_icon(MatterCadIcon::Bed)
             .with_active_fn(move || *bed_r.lock().unwrap())
             .on_click(move || {
                 let mut b = bed_w.lock().unwrap();
                 *b = !*b;
             });
         overlay.add_below_cube(
-            Box::new(btn),
+            wrap_tooltip(Box::new(btn), "Show / hide bed grid", font),
             0.0,
             base_below,
             Size::new(BUTTON_SIZE, BUTTON_SIZE),
@@ -699,14 +738,15 @@ fn add_bottom_row(overlay: &mut ViewportOverlay, state: &AppState, font: &Arc<Fo
             DropdownItem { label: "Outline".into(), value: RenderStyle::OutlineOnly },
             DropdownItem { label: "Wireframe".into(), value: RenderStyle::Wireframe },
         ];
-        let drop = CircularDropdown::new(
+        let drop = CircularDropdown::new_with_image(
             IconKind::Shade,
+            Some(MatterCadIcon::Perspective),
             items,
             state.render_style.clone(),
             font.clone(),
         );
         overlay.add_below_cube(
-            Box::new(drop),
+            wrap_tooltip(Box::new(drop), "Render mode", font),
             0.0,
             base_below + BOTTOM_ROW_SPACING,
             Size::new(BUTTON_SIZE, BUTTON_SIZE),
@@ -722,14 +762,15 @@ fn add_bottom_row(overlay: &mut ViewportOverlay, state: &AppState, font: &Arc<Fo
             DropdownItem { label: "50".into(), value: 50.0 },
             DropdownItem { label: "100".into(), value: 100.0 },
         ];
-        let drop = CircularDropdown::new(
+        let drop = CircularDropdown::new_with_image(
             IconKind::Snap,
+            Some(MatterCadIcon::Cog),
             items,
             state.snap_amount.clone(),
             font.clone(),
         );
         overlay.add_below_cube(
-            Box::new(drop),
+            wrap_tooltip(Box::new(drop), "Snap amount", font),
             0.0,
             base_below + BOTTOM_ROW_SPACING * 2.0,
             Size::new(BUTTON_SIZE, BUTTON_SIZE),
@@ -737,11 +778,15 @@ fn add_bottom_row(overlay: &mut ViewportOverlay, state: &AppState, font: &Arc<Fo
     }
 }
 
+fn wrap_tooltip(child: Box<dyn Widget>, text: &'static str, font: &Arc<Font>) -> Box<dyn Widget> {
+    Box::new(Tooltip::new(child, text, font.clone()).at_pointer())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app_state::AppState;
-    use agg_gui::Modifiers;
+    use agg_gui::{Modifiers, MouseButton};
 
     /// Bundled NotoSans bytes — needed by `CircularDropdown::new`.
     const FONT_BYTES: &[u8] = include_bytes!(
@@ -786,11 +831,16 @@ mod tests {
     fn overlay_constructs_with_minimum_children() {
         let state = fresh_state();
         let viewport_inputs = ViewportInputs::empty();
-        let cube_inputs = TumbleCubeInputs { camera: state.camera.clone() };
+        let cube_inputs = TumbleCubeInputs {
+            camera: state.camera.clone(),
+            animation_completed: None,
+        };
         let viewport = Box::new(Viewport3dWidget::new(viewport_inputs));
         let cube = Box::new(TumbleCubeWidget::new(cube_inputs));
         let overlay = ViewportOverlay::new(viewport, cube);
-        assert_eq!(overlay.children.len(), 2);
+        // viewport + HUD bay layer + cube — three fixed children
+        // before any ring or bottom widgets are attached.
+        assert_eq!(overlay.children.len(), 3);
         assert_eq!(overlay.placements.len(), 0);
     }
 
@@ -799,16 +849,13 @@ mod tests {
         let state = fresh_state();
         let mut overlay = build_viewport_overlay(state, make_font());
         overlay.layout(Size::new(800.0, 600.0));
-        // Downcast to ViewportOverlay so we can inspect children.
-        // `build_viewport_overlay` returns a Box<dyn Widget>; we
-        // routed it through our type, so the type_name should match.
         assert_eq!(overlay.type_name(), "ViewportOverlay");
-        // 2 (viewport + cube) + 8 ring + 3 bottom = 13 total children.
-        assert_eq!(overlay.children().len(), 13);
+        // 3 fixed (viewport + bay + cube) + 8 ring + 3 bottom = 14.
+        assert_eq!(overlay.children().len(), 14);
     }
 
     #[test]
-    fn home_button_resets_camera_orientation() {
+    fn home_button_starts_camera_animation_to_home_orientation() {
         let state = fresh_state();
         // Move the camera off-default first.
         {
@@ -847,12 +894,10 @@ mod tests {
             modifiers: Modifiers::default(),
         });
 
-        let c = state.camera.lock().unwrap();
-        let d = atomartist_renderer::OrbitCamera::default();
-        // Allow for floating-point fuzz; reset_view sets both to
-        // the default's exact values.
-        assert!((c.azimuth - d.azimuth).abs() < 1e-3, "az = {}", c.azimuth);
-        assert!((c.elevation - d.elevation).abs() < 1e-3, "el = {}", c.elevation);
+        assert!(
+            state.camera_animation.lock().unwrap().is_some(),
+            "home button should tween via camera_animation rather than jumping"
+        );
     }
 
     #[test]
@@ -895,7 +940,10 @@ mod tests {
     fn click_at_helper_is_callable() {
         let state = fresh_state();
         let viewport_inputs = ViewportInputs::empty();
-        let cube_inputs = TumbleCubeInputs { camera: state.camera.clone() };
+        let cube_inputs = TumbleCubeInputs {
+            camera: state.camera.clone(),
+            animation_completed: None,
+        };
         let viewport = Box::new(Viewport3dWidget::new(viewport_inputs));
         let cube = Box::new(TumbleCubeWidget::new(cube_inputs));
         let mut overlay = ViewportOverlay::new(viewport, cube);

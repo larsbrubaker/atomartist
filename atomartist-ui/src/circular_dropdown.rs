@@ -23,6 +23,7 @@ use agg_gui::{
 
 use crate::circular_icon_button::CircularIconButton;
 use crate::icons::IconKind;
+use crate::mattercad_icons::MatterCadIcon;
 
 /// One row in the popup menu — text label plus the value to write
 /// into the bound `Arc<Mutex<T>>` when the row is selected.
@@ -54,14 +55,28 @@ impl<T: Clone + Send + PartialEq + 'static> CircularDropdown<T> {
         value: Arc<Mutex<T>>,
         font: Arc<Font>,
     ) -> Self {
+        Self::new_with_image(icon, None, items, value, font)
+    }
+
+    /// Build a dropdown whose closed-state icon is one of MatterCAD's
+    /// bundled PNGs (rather than the hand-drawn `IconKind`).
+    pub fn new_with_image(
+        icon: IconKind,
+        image_icon: Option<MatterCadIcon>,
+        items: Vec<DropdownItem<T>>,
+        value: Arc<Mutex<T>>,
+        font: Arc<Font>,
+    ) -> Self {
         let open = Rc::new(RefCell::new(false));
         let open_for_click = open.clone();
-        let button = CircularIconButton::new(icon)
-            .with_overlay(IconKind::DropdownChevron)
+        let mut button = CircularIconButton::new(icon)
             .on_click(move || {
                 let mut o = open_for_click.borrow_mut();
                 *o = !*o;
             });
+        if let Some(img) = image_icon {
+            button = button.with_image_icon(img);
+        }
         Self {
             bounds: Rect::default(),
             base: WidgetBase::new()

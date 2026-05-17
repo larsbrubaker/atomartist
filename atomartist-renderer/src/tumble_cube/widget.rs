@@ -18,6 +18,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use agg_gui::{
+    animation::request_draw,
     Color, DrawCtx, Event, EventResult, HAnchor, MouseButton, Point, Rect, Size,
     VAnchor, Widget, WidgetBase,
 };
@@ -29,7 +30,7 @@ use super::face_textures::{
 };
 use super::hit_test::{get_hit_data, raycast_unit_cube, HitData};
 use super::orient::{target_for_hit, TargetPose};
-use super::renderer::TumbleCubeRenderer;
+use super::renderer::{TumbleCubeRenderer, TUMBLE_CUBE_CAMERA_RADIUS, TUMBLE_CUBE_MODEL_SCALE};
 use crate::camera::{OrbitCamera, OrientAnimation};
 
 /// External hooks the cube widget needs.  Identical-in-spirit to
@@ -40,6 +41,10 @@ pub struct TumbleCubeInputs {
     /// cube reads `(az, el)` each paint and writes the animation step
     /// result on each subsequent paint.
     pub camera: Arc<Mutex<OrbitCamera>>,
+    /// Optional completion hook fired exactly once after a click-to-orient
+    /// animation reaches its final camera pose. Mirrors MatterCAD's
+    /// `AnimateRotation(..., Action after = null)` completion callback.
+    pub animation_completed: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -125,6 +130,20 @@ impl TumbleCubeWidget {
             target.elevation,
             0.25,
         ));
+        request_draw();
+    }
+
+    /// Test / harness helper: whether a click-to-orient animation is
+    /// currently in flight.
+    pub fn animation_active(&self) -> bool {
+        self.animation.is_some()
+    }
+
+    /// Test / harness helper: advance an in-flight animation by an
+    /// explicit delta. Production uses [`Self::paint`] to tick at a
+    /// nominal 60 Hz and request the next frame.
+    pub fn step_animation_for_test(&mut self, dt_seconds: f32) -> bool {
+        self.tick_animation(dt_seconds)
     }
 
     /// Step any in-flight animation toward completion. Returns `true` if
@@ -135,6 +154,16 @@ impl TumbleCubeWidget {
         let finished = anim.step(&mut cam, dt_seconds);
         if finished {
             self.animation = None;
+            drop(cam);
+            if let Some(cb) = &self.inputs.animation_completed {
+                cb();
+            }
+        } else {
+            // Keep the host event loop drawing until the animation has
+            // completed. Without this, the camera can move for one paint
+            // and then stall until another unrelated event requests a
+            // frame.
+            request_draw();
         }
         true
     }
@@ -168,12 +197,17 @@ impl TumbleCubeWidget {
         let mut tmp = OrbitCamera::default();
         tmp.azimuth = cam_state.0;
         tmp.elevation = cam_state.1;
-        tmp.radius = 3.0;
+        tmp.radius = TUMBLE_CUBE_CAMERA_RADIUS;
         tmp.center = [0.0, 0.0, 0.0];
         // Flip Y because screen_to_ray expects top-down coords.
         let cursor_top_down = (pos.x, h - pos.y);
         let (origin, dir) = tmp.screen_to_ray(cursor_top_down, (w, h));
-        if let Some(hit_pos) = raycast_unit_cube(origin, dir) {
+        // The renderer draws the cube with a uniform model scale of
+        // TUMBLE_CUBE_MODEL_SCALE.  Transform the ray into the cube's
+        // unscaled model space before intersecting the canonical
+        // [-1, 1]^3 box. The returned hit point is then already in the
+        // model-space convention `get_hit_data` expects.
+        if let Some(hit_pos) = raycast_rendered_cube(origin, dir) {
             get_hit_data(hit_pos)
         } else {
             HitData::empty()
@@ -213,6 +247,21 @@ impl TumbleCubeWidget {
     }
 }
 
+/// Intersect a world-space ray with the cube as it is actually drawn:
+/// geometry in `[-1, 1]^3` after a uniform model scale of
+/// `TUMBLE_CUBE_MODEL_SCALE`.  Returns the model-space hit position
+/// because `get_hit_data` expects canonical unit-cube coordinates.
+fn raycast_rendered_cube(origin: [f32; 3], dir: [f32; 3]) -> Option<[f32; 3]> {
+    let inv_scale = 1.0 / TUMBLE_CUBE_MODEL_SCALE.max(1e-6);
+    let model_origin = mul3(origin, inv_scale);
+    let model_dir = mul3(dir, inv_scale);
+    raycast_unit_cube(model_origin, model_dir)
+}
+
+fn mul3(v: [f32; 3], s: f32) -> [f32; 3] {
+    [v[0] * s, v[1] * s, v[2] * s]
+}
+
 impl Widget for TumbleCubeWidget {
     fn bounds(&self) -> Rect { self.bounds }
     fn set_bounds(&mut self, b: Rect) { self.bounds = b; }
@@ -247,7 +296,10 @@ impl Widget for TumbleCubeWidget {
         // use a constant 16 ms per paint when no timestamp is available
         // — close enough for a 250 ms snap.
         let dt = 0.016f32;
-        let _ = self.tick_animation(dt);
+        let changed = self.tick_animation(dt);
+        if changed && self.animation.is_some() {
+            request_draw();
+        }
 
         // Sync the cube renderer's CPU face buffer to the latest hover
         // state and mirror the main camera's orientation.
@@ -369,6 +421,7 @@ impl TumbleCubeWidget {
                         self.animation = Some(OrientAnimation::to_orientation(
                             &cam, azimuth, elevation, 0.25,
                         ));
+                        request_draw();
                     }
                 }
                 EventResult::Consumed
@@ -399,5 +452,70 @@ impl CloneForRenderer for Vec<FaceTexture> {
                 dirty: f.dirty,
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn orient_to_face_runs_to_completion_and_fires_hook_once() {
+        let camera = Arc::new(Mutex::new(OrbitCamera::default()));
+        {
+            let mut c = camera.lock().unwrap();
+            c.azimuth = 1.25;
+            c.elevation = 0.65;
+        }
+
+        let completed = Arc::new(AtomicUsize::new(0));
+        let completed_cb = completed.clone();
+        let mut widget = TumbleCubeWidget::new(TumbleCubeInputs {
+            camera: camera.clone(),
+            animation_completed: Some(Arc::new(move || {
+                completed_cb.fetch_add(1, Ordering::SeqCst);
+            })),
+        });
+
+        widget.orient_to_face(Face::Front);
+        assert!(widget.animation_active(), "orient_to_face should start an animation");
+
+        // Step past the 0.25s duration in several smaller increments
+        // to exercise interpolation rather than only the final clamp.
+        for _ in 0..20 {
+            widget.step_animation_for_test(0.016);
+            if !widget.animation_active() {
+                break;
+            }
+        }
+
+        assert!(!widget.animation_active(), "animation should run to completion");
+        assert_eq!(completed.load(Ordering::SeqCst), 1, "completion hook should fire once");
+
+        let c = camera.lock().unwrap();
+        assert!(
+            c.azimuth.abs() < 1e-3,
+            "Front orientation should end at azimuth 0, got {}",
+            c.azimuth
+        );
+        assert!(
+            c.elevation.abs() < 1e-3,
+            "Front orientation should end at elevation 0, got {}",
+            c.elevation
+        );
+    }
+
+    #[test]
+    fn raycast_uses_rendered_scaled_cube_bounds() {
+        // X=0.9 would hit the old unscaled [-1, 1] cube, but should
+        // miss the rendered cube because it is scaled to [-0.8, 0.8].
+        let miss = raycast_rendered_cube([0.9, 0.0, 5.0], [0.0, 0.0, -1.0]);
+        assert!(miss.is_none(), "ray outside the scaled cube should miss");
+
+        let hit = raycast_rendered_cube([0.7, 0.0, 5.0], [0.0, 0.0, -1.0])
+            .expect("ray inside the scaled cube should hit");
+        // Returned hit is model-space, so the front face is still z=1.
+        assert!((hit[2] - 1.0).abs() < 1e-4, "hit z = {}", hit[2]);
     }
 }

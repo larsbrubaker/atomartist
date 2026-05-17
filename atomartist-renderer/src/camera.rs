@@ -512,6 +512,30 @@ mod tests {
     }
 
     #[test]
+    fn camera_pose_animation_reaches_target_center_and_radius() {
+        let mut start = OrbitCamera::default();
+        start.center = [1.0, 2.0, 3.0];
+        start.radius = 20.0;
+        start.azimuth = 1.0;
+        start.elevation = 0.5;
+
+        let mut target = start.clone();
+        target.center = [-2.0, 0.5, 4.0];
+        target.radius = 42.0;
+        target.azimuth = -0.25;
+        target.elevation = -0.1;
+
+        let mut cam = start.clone();
+        let mut anim = CameraPoseAnimation::new(&start, target.clone(), 0.25);
+        let done = anim.step(&mut cam, 0.25);
+        assert!(done);
+        assert_eq!(cam.center, target.center);
+        assert!((cam.radius - target.radius).abs() < 1e-5);
+        assert!((cam.azimuth - target.azimuth).abs() < 1e-5);
+        assert!((cam.elevation - target.elevation).abs() < 1e-5);
+    }
+
+    #[test]
     fn reset_view_restores_default_orientation() {
         let mut c = OrbitCamera::default();
         c.azimuth = 1.234;
@@ -585,6 +609,57 @@ pub struct OrientAnimation {
     /// 0.0 → not started; 1.0 → finished.
     progress: f32,
     duration: f32,
+}
+
+/// Smooth interpolation between two complete orbit-camera poses.
+/// Used by viewport chrome actions such as Home and Zoom-to-selection
+/// so those transitions tween from the current transform instead of
+/// jumping.
+#[derive(Clone, Debug)]
+pub struct CameraPoseAnimation {
+    start: OrbitCamera,
+    target: OrbitCamera,
+    progress: f32,
+    duration: f32,
+}
+
+impl CameraPoseAnimation {
+    pub fn new(start: &OrbitCamera, mut target: OrbitCamera, duration: f32) -> Self {
+        let mut delta = target.azimuth - start.azimuth;
+        while delta > PI { delta -= 2.0 * PI; }
+        while delta < -PI { delta += 2.0 * PI; }
+        target.azimuth = start.azimuth + delta;
+        Self {
+            start: start.clone(),
+            target,
+            progress: 0.0,
+            duration: duration.max(1e-3),
+        }
+    }
+
+    pub fn step(&mut self, camera: &mut OrbitCamera, dt: f32) -> bool {
+        self.progress = (self.progress + dt / self.duration).min(1.0);
+        let t = self.progress;
+        let s = t * t * (3.0 - 2.0 * t);
+        camera.center = lerp3(self.start.center, self.target.center, s);
+        camera.radius = lerp(self.start.radius, self.target.radius, s);
+        camera.azimuth = lerp(self.start.azimuth, self.target.azimuth, s);
+        camera.elevation = lerp(self.start.elevation, self.target.elevation, s);
+        camera.fov_y = lerp(self.start.fov_y, self.target.fov_y, s);
+        camera.near = lerp(self.start.near, self.target.near, s);
+        camera.far = lerp(self.start.far, self.target.far, s);
+        camera.projection = self.target.projection;
+        camera.orbit_mode = self.target.orbit_mode;
+        self.progress >= 1.0
+    }
+}
+
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a * (1.0 - t) + b * t
+}
+
+fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+    [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)]
 }
 
 impl OrientAnimation {
