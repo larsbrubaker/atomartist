@@ -15,12 +15,14 @@
 pub mod camera;
 pub mod picking;
 pub mod scene_renderer;
+pub mod tumble_cube;
 pub mod viewport_widget;
 
-pub use camera::OrbitCamera;
+pub use camera::{OrbitCamera, OrbitMode, OrientAnimation, Projection};
 pub use picking::{project_to_view_plane, raycast_mesh};
-pub use scene_renderer::WgpuSceneRenderer;
-pub use viewport_widget::{Viewport3dWidget, ViewportInputs};
+pub use scene_renderer::{RenderStyle, WgpuSceneRenderer};
+pub use tumble_cube::{TumbleCubeInputs, TumbleCubeWidget};
+pub use viewport_widget::{Viewport3dWidget, ViewportInputs, ViewportTool};
 
 /// Phase 0 placeholder kept so `demo-native` / `demo-wasm` stubs continue
 /// to compile while real wiring lands. Removed in Phase 6.

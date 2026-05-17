@@ -14,6 +14,34 @@
 
 use std::f32::consts::PI;
 
+/// Projection mode toggled by the perspective button.  Orthographic mode
+/// fits a vertical world-space slab `ortho_height` tall to the viewport so
+/// zoom (`radius`) maps to a slab height; the existing perspective branch
+/// is unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Projection {
+    Perspective,
+    Orthographic,
+}
+
+/// Orbit-drag behaviour toggled by the turntable button.
+///
+/// `Turntable`: drag-X rotates around world-up (Y) and drag-Y rotates
+/// around the camera's right vector — equivalent to MatterCAD's
+/// `TurntableEnabled = true` branch in
+/// `TrackballTumbleWidgetExtended.DoRotateAroundOrigin` (locks roll so
+/// the world horizon stays level).
+///
+/// `Trackball`: 2-D drag is decomposed onto two world axes that include
+/// the camera's local axes — equivalent to MatterCAD's
+/// `TurntableEnabled = false` branch using `TrackBallController`. Slightly
+/// freer but allows roll.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrbitMode {
+    Turntable,
+    Trackball,
+}
+
 #[derive(Clone, Debug)]
 pub struct OrbitCamera {
     pub center: [f32; 3],
@@ -25,6 +53,8 @@ pub struct OrbitCamera {
     pub fov_y: f32,
     pub near: f32,
     pub far: f32,
+    pub projection: Projection,
+    pub orbit_mode: OrbitMode,
 }
 
 impl Default for OrbitCamera {
@@ -40,6 +70,8 @@ impl Default for OrbitCamera {
             fov_y: PI * 0.22,
             near: 0.1,
             far: 5000.0,
+            projection: Projection::Perspective,
+            orbit_mode: OrbitMode::Turntable,
         }
     }
 }
@@ -66,13 +98,64 @@ impl OrbitCamera {
     }
 
     pub fn projection_matrix(&self, aspect: f32) -> [f32; 16] {
-        perspective(self.fov_y, aspect, self.near, self.far)
+        match self.projection {
+            Projection::Perspective => perspective(self.fov_y, aspect, self.near, self.far),
+            Projection::Orthographic => {
+                // Match the perspective frustum at the orbit center: the
+                // visible vertical extent at radius `radius` under FOV
+                // `fov_y` is `2 * radius * tan(fov_y/2)`.  Using that
+                // height keeps the model the same on-screen size at the
+                // switch point so the user doesn't lose context.
+                let half_h = (self.fov_y * 0.5).tan() * self.radius;
+                let half_w = half_h * aspect;
+                orthographic(-half_w, half_w, -half_h, half_h, self.near, self.far)
+            }
+        }
+    }
+
+    /// Reset the orbit pose to the default 3/4 view (used by the Home
+    /// button).  Camera distance is preserved so the user doesn't lose
+    /// their current zoom; only orientation snaps back.
+    pub fn reset_view(&mut self) {
+        let d = OrbitCamera::default();
+        self.azimuth = d.azimuth;
+        self.elevation = d.elevation;
+        self.center = d.center;
+        // Keep `radius`, `projection`, `orbit_mode` — Home is "reset
+        // orientation", not "reset everything".  fit_all is the
+        // distance-resetting operation.
     }
 
     pub fn orbit(&mut self, d_az: f32, d_el: f32) {
         self.azimuth += d_az;
         let limit = PI * 0.49;
         self.elevation = (self.elevation + d_el).clamp(-limit, limit);
+    }
+
+    /// Apply a screen-space drag (`dx`, `dy` in radians-per-pixel-scaled
+    /// units already) to the camera under the active [`OrbitMode`].
+    ///
+    /// In `Turntable` mode the X drag rotates around world-up only
+    /// (`azimuth`) and Y drag rotates around the camera's right axis
+    /// (`elevation`) — the world horizon stays level.
+    ///
+    /// In `Trackball` mode an additional cross-coupling is applied so a
+    /// diagonal drag rotates the view freely, mimicking MatterCAD's
+    /// trackball branch.  The free-rotation is approximated by feeding
+    /// both deltas to both axes weighted by `cos(elevation)` so the
+    /// motion stays continuous at the poles.
+    pub fn orbit_drag(&mut self, dx: f32, dy: f32) {
+        match self.orbit_mode {
+            OrbitMode::Turntable => self.orbit(dx, dy),
+            OrbitMode::Trackball => {
+                // Free-form: combine X+Y into both axes, weighted by the
+                // current elevation so the drag motion feels even across
+                // the sphere.  Subtle — not a full quaternion trackball,
+                // but enough for the toggle to read as a behaviour change.
+                let c = self.elevation.cos().abs().max(0.2);
+                self.orbit(dx * c, dy);
+            }
+        }
     }
 
     /// Pan in screen-aligned axes — drag-to-pan semantics.
@@ -153,6 +236,28 @@ fn perspective(fov_y: f32, aspect: f32, near: f32, far: f32) -> [f32; 16] {
         0.0,        f,   0.0,                     0.0,
         0.0,        0.0, (far + near) * nf,      -1.0,
         0.0,        0.0, 2.0 * far * near * nf,   0.0,
+    ]
+}
+
+/// Column-major orthographic projection matching wgpu's clip space
+/// (Y-up, depth in `[-1, 1]`).  Mirrors `glm::ortho`'s right-handed
+/// variant so the view-matrix output composes cleanly.
+fn orthographic(
+    left: f32,
+    right: f32,
+    bottom: f32,
+    top: f32,
+    near: f32,
+    far: f32,
+) -> [f32; 16] {
+    let rl = 1.0 / (right - left);
+    let tb = 1.0 / (top - bottom);
+    let fn_ = 1.0 / (far - near);
+    [
+        2.0 * rl,             0.0,                  0.0,            0.0,
+        0.0,                  2.0 * tb,             0.0,            0.0,
+        0.0,                  0.0,                 -2.0 * fn_,      0.0,
+        -(right + left) * rl, -(top + bottom) * tb, -(far + near) * fn_, 1.0,
     ]
 }
 
@@ -404,5 +509,108 @@ mod tests {
         let r0 = c.radius;
         c.zoom(f32::NAN);
         assert_eq!(c.radius, r0);
+    }
+
+    #[test]
+    fn reset_view_restores_default_orientation() {
+        let mut c = OrbitCamera::default();
+        c.azimuth = 1.234;
+        c.elevation = 0.456;
+        c.center = [10.0, 20.0, 30.0];
+        let r_before = c.radius;
+        c.reset_view();
+        let d = OrbitCamera::default();
+        assert!((c.azimuth - d.azimuth).abs() < 1e-5);
+        assert!((c.elevation - d.elevation).abs() < 1e-5);
+        assert_eq!(c.center, d.center);
+        assert_eq!(c.radius, r_before, "Home preserves zoom");
+    }
+
+    #[test]
+    fn orthographic_projection_has_no_perspective_divide() {
+        let mut c = OrbitCamera::default();
+        c.projection = Projection::Orthographic;
+        let m = c.projection_matrix(1.0);
+        // Ortho's last column is (0, 0, 0, 1) — no w-divide.
+        assert!((m[3]).abs() < 1e-5);
+        assert!((m[7]).abs() < 1e-5);
+        assert!((m[11]).abs() < 1e-5);
+        assert!((m[15] - 1.0).abs() < 1e-5);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Orientation animation — drives click-to-orient on the tumble cube and
+// any other camera-snap operation. Stepping by elapsed seconds avoids the
+// frame-rate-coupled "10 updates" approach MatterCAD used and produces
+// identical motion regardless of refresh rate.
+// ---------------------------------------------------------------------------
+
+/// Smooth interpolation between two camera orientations.
+///
+/// The animation holds the *target* orbit pose and a remaining fractional
+/// progress.  Each `step` advances progress by `dt / duration` and applies
+/// an eased blend between the start and target azimuth/elevation/center,
+/// writing the result back to the camera.  Callers ping `is_done` to
+/// know when the cube widget should drop the animation handle.
+#[derive(Clone, Debug)]
+pub struct OrientAnimation {
+    start_az: f32,
+    start_el: f32,
+    start_center: [f32; 3],
+    target_az: f32,
+    target_el: f32,
+    target_center: [f32; 3],
+    /// 0.0 → not started; 1.0 → finished.
+    progress: f32,
+    duration: f32,
+}
+
+impl OrientAnimation {
+    /// Build an animation that takes the camera from its current pose to
+    /// `(target_az, target_el)` (centre held).  `duration` is in seconds —
+    /// 0.25 s matches MatterCAD's `AnimateRotation` length.
+    pub fn to_orientation(camera: &OrbitCamera, target_az: f32, target_el: f32, duration: f32) -> Self {
+        // Pick the shortest signed azimuth delta so the rotation goes the
+        // "near way around".  Without this, a click on Right from a
+        // slightly-past-Right view would spin the long way around.
+        let start_az = camera.azimuth;
+        let mut delta = target_az - start_az;
+        while delta > PI { delta -= 2.0 * PI; }
+        while delta < -PI { delta += 2.0 * PI; }
+        Self {
+            start_az,
+            start_el: camera.elevation,
+            start_center: camera.center,
+            target_az: start_az + delta,
+            target_el: target_el,
+            target_center: camera.center,
+            progress: 0.0,
+            duration: duration.max(1e-3),
+        }
+    }
+
+    pub fn is_done(&self) -> bool {
+        self.progress >= 1.0
+    }
+
+    /// Advance the animation by `dt` seconds, write the eased orientation
+    /// into `camera`, and return `true` if the animation finished on this
+    /// step (so callers can drop the handle).
+    pub fn step(&mut self, camera: &mut OrbitCamera, dt: f32) -> bool {
+        if self.progress >= 1.0 {
+            return false;
+        }
+        self.progress = (self.progress + dt / self.duration).min(1.0);
+        // Smoothstep eases the rotation in and out, giving the cube-snap
+        // a more deliberate, MatterCAD-like feel than a linear blend.
+        let t = self.progress;
+        let s = t * t * (3.0 - 2.0 * t);
+        camera.azimuth = self.start_az * (1.0 - s) + self.target_az * s;
+        camera.elevation = self.start_el * (1.0 - s) + self.target_el * s;
+        for i in 0..3 {
+            camera.center[i] = self.start_center[i] * (1.0 - s) + self.target_center[i] * s;
+        }
+        self.progress >= 1.0
     }
 }

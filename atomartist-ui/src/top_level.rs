@@ -10,7 +10,6 @@ use agg_gui::{
     font_settings::current_system_font, Button, FlexColumn, FlexRow, HAnchor, Insets, Label,
     Spacer, Splitter, VAnchor, Widget,
 };
-use atomartist_renderer::{Viewport3dWidget, ViewportInputs};
 
 use crate::app_state::AppState;
 use agg_gui_node_editor::NodeEditor;
@@ -19,6 +18,7 @@ use crate::status_bar::StatusBar;
 use crate::top_menu_bar::{build_menu_bar_sized, FileDialogProvider};
 #[cfg(test)]
 use crate::top_menu_bar::NoFileDialogs;
+use crate::viewport_overlay::build_viewport_overlay;
 
 /// Build the application root widget tree.
 ///
@@ -32,16 +32,13 @@ pub fn build_app(state: AppState, dialogs: Arc<dyn FileDialogProvider>) -> Box<d
     let canvas: Box<dyn Widget> = Box::new(
         NodeEditor::new(shared_model_for(state.clone())).with_id("node-canvas"),
     );
-    let viewport: Box<dyn Widget> = Box::new(Viewport3dWidget::new(ViewportInputs {
-        last_mesh_output: state.last_mesh_output.clone(),
-        display_node: state.display_node.clone(),
-        selection: state.selection.clone(),
-    }));
-
     // Menu bar needs a font; the demo shells install one into
     // font_settings before building the tree, so this fall-through is safe.
     let font: Arc<agg_gui::text::Font> =
         current_system_font().expect("system font must be installed before build_app");
+
+    let viewport: Box<dyn Widget> = build_viewport_overlay(state.clone(), font.clone());
+
     let menu_bar: Box<dyn Widget> = build_menu_bar_sized(state.clone(), font.clone(), dialogs.clone());
 
     // Top chrome row: menu bar on the left, spacer pushes title + License

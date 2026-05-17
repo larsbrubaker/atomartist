@@ -19,6 +19,7 @@ use atomartist_lib::serialization::{
     export_stl, graph_from_json_str, graph_to_json_string,
 };
 use atomartist_lib::Graph;
+use atomartist_renderer::{OrbitCamera, RenderStyle, ViewportTool};
 use manifold_rust::types::MeshGL;
 
 /// Top-level state passed by reference into every UI widget that mutates
@@ -49,6 +50,24 @@ pub struct AppState {
     /// Latest known node-canvas zoom — written by `NodeCanvas` on each
     /// wheel event and read by `StatusBar` for the bottom-bar percentage.
     pub canvas_zoom: Arc<Mutex<f64>>,
+    /// Shared 3-D viewport orbit camera.  The viewport widget and the
+    /// tumble cube widget both read / write this through the
+    /// `Arc<Mutex<>>` so click-to-orient on the cube takes effect on
+    /// the very next viewport paint.
+    pub camera: Arc<Mutex<OrbitCamera>>,
+    /// Active default-left-mouse tool, picked by the radio cluster of
+    /// buttons around the tumble cube.
+    pub viewport_tool: Arc<Mutex<ViewportTool>>,
+    /// Turntable vs. trackball orbit mode toggle. Mirrors MatterCAD's
+    /// `UserSettingsKey.TurntableMode`. Default `true` (turntable).
+    pub turntable: Arc<Mutex<bool>>,
+    /// Perspective vs. orthographic projection toggle. Mirrors
+    /// MatterCAD's `UserSettingsKey.PerspectiveMode`. Default `true`
+    /// (perspective).
+    pub perspective: Arc<Mutex<bool>>,
+    /// Render style picker beneath the tumble cube (Shaded / Wireframe /
+    /// OutlineOnly).
+    pub render_style: Arc<Mutex<RenderStyle>>,
 }
 
 impl AppState {
@@ -63,6 +82,11 @@ impl AppState {
             selection: Arc::new(Mutex::new(None)),
             current_file: Arc::new(Mutex::new(None)),
             canvas_zoom: Arc::new(Mutex::new(1.0)),
+            camera: Arc::new(Mutex::new(OrbitCamera::default())),
+            viewport_tool: Arc::new(Mutex::new(ViewportTool::default())),
+            turntable: Arc::new(Mutex::new(true)),
+            perspective: Arc::new(Mutex::new(true)),
+            render_style: Arc::new(Mutex::new(RenderStyle::default())),
         }
     }
 
@@ -188,6 +212,11 @@ impl Clone for AppState {
             selection: self.selection.clone(),
             current_file: self.current_file.clone(),
             canvas_zoom: self.canvas_zoom.clone(),
+            camera: self.camera.clone(),
+            viewport_tool: self.viewport_tool.clone(),
+            turntable: self.turntable.clone(),
+            perspective: self.perspective.clone(),
+            render_style: self.render_style.clone(),
         }
     }
 }

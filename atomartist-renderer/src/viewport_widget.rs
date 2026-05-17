@@ -37,7 +37,29 @@ use manifold_rust::types::MeshGL;
 
 use crate::camera::{mul4, transform_point4, OrbitCamera};
 use crate::picking::{project_to_view_plane, raycast_mesh};
-use crate::scene_renderer::WgpuSceneRenderer;
+use crate::scene_renderer::{RenderStyle, WgpuSceneRenderer};
+
+/// Default left-mouse-drag behaviour, picked by the radio cluster of
+/// buttons around the tumble cube.  Mirrors MatterCAD's
+/// `ViewControls3DButtons` enum minus the printer-specific entries.
+///
+/// `Select` is the historical AtomArtist behaviour: plain left-drag
+/// becomes a click-or-drag selection.  The other variants change what
+/// plain left-drag does — useful on trackpads without a right or middle
+/// mouse button, exactly the case MatterCAD targets these buttons at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewportTool {
+    Select,
+    Rotate,
+    Pan,
+    Zoom,
+}
+
+impl Default for ViewportTool {
+    fn default() -> Self {
+        Self::Select
+    }
+}
 
 /// External hooks the widget needs from the app: where to read the latest
 /// mesh from, the live `display_node` so a left-click selection mirrors
@@ -53,6 +75,30 @@ pub struct ViewportInputs {
     /// canvas writes here when the user clicks a node. Both paint sides
     /// read it to render highlights / outlines.
     pub selection: Arc<Mutex<Option<NodeId>>>,
+    /// Shared orbit camera — held in an `Arc<Mutex<>>` so the tumble
+    /// cube widget can read the current orientation each paint and
+    /// write back animated orientations on click-to-orient.
+    pub camera: Arc<Mutex<OrbitCamera>>,
+    /// Active mouse-button-1 tool (Select / Rotate / Pan / Zoom).
+    pub tool: Arc<Mutex<ViewportTool>>,
+    /// Render style picker beneath the tumble cube.
+    pub render_style: Arc<Mutex<RenderStyle>>,
+}
+
+impl ViewportInputs {
+    /// Build a default-populated input bundle with empty `Arc<Mutex<>>`s
+    /// for every slot — used by tests and the unit-of-work paint code
+    /// to avoid replicating every default in every call site.
+    pub fn empty() -> Self {
+        Self {
+            last_mesh_output: Arc::new(Mutex::new(None)),
+            display_node: Arc::new(Mutex::new(None)),
+            selection: Arc::new(Mutex::new(None)),
+            camera: Arc::new(Mutex::new(OrbitCamera::default())),
+            tool: Arc::new(Mutex::new(ViewportTool::default())),
+            render_style: Arc::new(Mutex::new(RenderStyle::default())),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -73,11 +119,13 @@ pub struct Viewport3dWidget {
     children: Vec<Box<dyn Widget>>,
     base: WidgetBase,
     inputs: ViewportInputs,
-    pub camera: OrbitCamera,
     drag: CameraDrag,
     /// Track the most recent mesh seen; if a new one comes in, auto-fit
     /// the camera once.
     last_mesh_ptr: usize,
+    /// AABB of the last auto-fit mesh — cached so `zoom_to_selection_bounds`
+    /// can re-fit on demand without retraversing the mesh.
+    last_aabb: Option<([f32; 3], [f32; 3])>,
     bg_color: Color,
     /// wgpu-backed scene renderer (lazy-initialized GPU state). When the
     /// active `DrawCtx` is a `WgpuGfxCtx`, the widget pushes a custom
@@ -96,21 +144,53 @@ impl Viewport3dWidget {
                 .with_h_anchor(HAnchor::STRETCH)
                 .with_v_anchor(VAnchor::STRETCH),
             inputs,
-            camera: OrbitCamera::default(),
             drag: CameraDrag::None,
             last_mesh_ptr: 0,
+            last_aabb: None,
             bg_color: Color::rgb(0.10, 0.11, 0.13),
             scene: Rc::new(RefCell::new(WgpuSceneRenderer::new())),
         }
+    }
+
+    /// Snapshot the shared orbit camera.  Cheap: an `OrbitCamera::clone`
+    /// is just a few f32 copies.
+    fn cam(&self) -> OrbitCamera {
+        self.inputs.camera.lock().unwrap().clone()
+    }
+
+    /// Mutate the shared camera under a short-lived lock.  All internal
+    /// callsites use this so the tumble cube widget's writes are picked
+    /// up the next time the viewport reads its camera, and vice-versa.
+    fn cam_mut<F: FnOnce(&mut OrbitCamera)>(&self, f: F) {
+        f(&mut *self.inputs.camera.lock().unwrap())
     }
 
     fn current_mesh(&self) -> Option<Arc<MeshGL>> {
         self.inputs.last_mesh_output.lock().ok().and_then(|g| g.clone())
     }
 
+    /// Re-fit the camera to the last seen mesh's AABB. Used by the Home
+    /// / Fit-All button.  No-op if no mesh has been displayed yet.
+    pub fn fit_all(&mut self) {
+        if let Some((mn, mx)) = self.last_aabb {
+            self.cam_mut(|c| c.fit_to_bounds(mn, mx));
+            self.scene.borrow_mut().grid_y = mn[1];
+        } else {
+            // Reset to the default orientation when nothing has been
+            // displayed yet — at least gives the user feedback.
+            self.cam_mut(|c| c.reset_view());
+        }
+    }
+
+    /// Fit the camera to an explicit AABB. Used by the Zoom-to-Selection
+    /// button. With per-node mesh tracking still pending, callers can
+    /// pass the displayed mesh's bounds.
+    pub fn zoom_to_bounds(&mut self, min: [f32; 3], max: [f32; 3]) {
+        self.cam_mut(|c| c.fit_to_bounds(min, max));
+        self.scene.borrow_mut().grid_y = min[1];
+    }
+
     fn maybe_auto_fit(&mut self, mesh: &MeshGL) {
-        let ptr = Arc::as_ptr(&Arc::new(())) as usize; // dummy; replaced below
-        // We want pointer-identity tracking on the Arc; fetch a fresh ptr.
         let real_ptr = mesh.vert_properties.as_ptr() as usize;
         if real_ptr == self.last_mesh_ptr {
             return;
@@ -132,11 +212,11 @@ impl Viewport3dWidget {
             }
         }
         if mn[0].is_finite() && mx[0].is_finite() {
-            self.camera.fit_to_bounds(mn, mx);
+            self.cam_mut(|c| c.fit_to_bounds(mn, mx));
             // Sit the floor grid at the model's lowest point.
             self.scene.borrow_mut().grid_y = mn[1];
+            self.last_aabb = Some((mn, mx));
         }
-        let _ = ptr;
     }
 
     /// If the active backend is wgpu, push a custom render command via
@@ -173,10 +253,11 @@ impl Viewport3dWidget {
         }
         let stride = mesh.num_prop as usize;
         let aspect = (w / h.max(1.0)) as f32;
-        let view = self.camera.view_matrix();
-        let proj = self.camera.projection_matrix(aspect);
+        let cam = self.cam();
+        let view = cam.view_matrix();
+        let proj = cam.projection_matrix(aspect);
         let mvp = mul4(&proj, &view);
-        let (right, up, fwd) = self.camera.basis();
+        let (right, up, fwd) = cam.basis();
         // Light direction in world space (normalized).
         let light = normalize3([0.4, 0.7, 0.6]);
         let _ = (right, up); // basis used by future ops
@@ -202,7 +283,7 @@ impl Viewport3dWidget {
                 (p0[1] + p1[1] + p2[1]) / 3.0,
                 (p0[2] + p1[2] + p2[2]) / 3.0,
             ];
-            let to_cam = sub3(self.camera.eye(), centroid);
+            let to_cam = sub3(cam.eye(), centroid);
             if dot3(face_n, to_cam) <= 0.0 {
                 continue;
             }
@@ -415,7 +496,7 @@ impl Widget for Viewport3dWidget {
         {
             let mut s = self.scene.borrow_mut();
             s.mesh = mesh_opt.clone();
-            s.camera = self.camera.clone();
+            s.camera = self.cam();
             s.outline_enabled = selection_active;
             s.outline_width = outline_width;
             // Theme-driven outline colour: warm orange against either
@@ -426,6 +507,10 @@ impl Widget for Viewport3dWidget {
             } else {
                 [0.95, 0.50, 0.10, 1.0]
             };
+            // Sync render style from app state so the picker beneath the
+            // tumble cube takes effect on the next frame without any
+            // extra plumbing.
+            s.render_style = *self.inputs.render_style.lock().unwrap();
         }
 
         // Try the wgpu path. The widget's `bounds` are widget-local — the
@@ -498,13 +583,14 @@ impl Viewport3dWidget {
         // agg-gui events are in widget-local Y-up coords. screen_to_ray
         // expects top-down (origin top-left), so flip Y.
         let cursor_top_down = (pos.x, h - pos.y);
-        let (origin, dir) = self.camera.screen_to_ray(cursor_top_down, (w, h));
+        let cam = self.cam();
+        let (origin, dir) = cam.screen_to_ray(cursor_top_down, (w, h));
         let pivot = match self.current_mesh().as_ref() {
             Some(mesh) => raycast_mesh(mesh, origin, dir)
-                .unwrap_or_else(|| project_to_view_plane(&self.camera, origin, dir)),
-            None => project_to_view_plane(&self.camera, origin, dir),
+                .unwrap_or_else(|| project_to_view_plane(&cam, origin, dir)),
+            None => project_to_view_plane(&cam, origin, dir),
         };
-        let eye = self.camera.eye();
+        let eye = cam.eye();
         let dx = pivot[0] - eye[0];
         let dy = pivot[1] - eye[1];
         let dz = pivot[2] - eye[2];
@@ -517,55 +603,91 @@ impl Viewport3dWidget {
             MouseButton::Right => {
                 // Right-drag → orbit, pivoting at the cursor hit point.
                 let (pivot, radius) = self.orbit_pivot_from_cursor(pos);
-                self.camera.center = pivot;
-                self.camera.radius = radius;
-                self.drag = CameraDrag::Orbit {
-                    start_local: pos,
-                    start_az: self.camera.azimuth,
-                    start_el: self.camera.elevation,
-                };
+                let (start_az, start_el);
+                {
+                    let mut c = self.inputs.camera.lock().unwrap();
+                    c.center = pivot;
+                    c.radius = radius;
+                    start_az = c.azimuth;
+                    start_el = c.elevation;
+                }
+                self.drag = CameraDrag::Orbit { start_local: pos, start_az, start_el };
                 EventResult::Consumed
             }
             MouseButton::Middle => {
                 self.drag = CameraDrag::Pan {
                     start_local: pos,
-                    start_center: self.camera.center,
+                    start_center: self.cam().center,
                 };
                 EventResult::Consumed
             }
             MouseButton::Left => {
                 // Modifier-aware fallbacks for users without dedicated
                 // middle/right buttons (trackpads). Match MatterCAD's docs.
+                let cam_snapshot = self.cam();
                 if mods.ctrl && mods.alt {
                     self.drag = CameraDrag::Zooming {
                         start_local: pos,
-                        start_radius: self.camera.radius,
+                        start_radius: cam_snapshot.radius,
                     };
                     EventResult::Consumed
                 } else if mods.ctrl && mods.shift {
                     self.drag = CameraDrag::Pan {
                         start_local: pos,
-                        start_center: self.camera.center,
+                        start_center: cam_snapshot.center,
                     };
                     EventResult::Consumed
                 } else if mods.ctrl {
                     let (pivot, radius) = self.orbit_pivot_from_cursor(pos);
-                    self.camera.center = pivot;
-                    self.camera.radius = radius;
-                    self.drag = CameraDrag::Orbit {
-                        start_local: pos,
-                        start_az: self.camera.azimuth,
-                        start_el: self.camera.elevation,
-                    };
+                    let (start_az, start_el);
+                    {
+                        let mut c = self.inputs.camera.lock().unwrap();
+                        c.center = pivot;
+                        c.radius = radius;
+                        start_az = c.azimuth;
+                        start_el = c.elevation;
+                    }
+                    self.drag = CameraDrag::Orbit { start_local: pos, start_az, start_el };
                     EventResult::Consumed
                 } else {
-                    // Plain left-click → pending selection. The mouse-up
-                    // handler is responsible for resolving click-or-drag
-                    // into a selection write (Phase A4).
-                    self.drag = CameraDrag::Selecting {
-                        start_local: pos,
-                        moved: false,
-                    };
+                    // No modifier → fall back to the active tool from the
+                    // viewport toolbar (Select / Rotate / Pan / Zoom).
+                    // `Select` keeps AtomArtist's original click-to-pick
+                    // behaviour; the others trade selection for camera
+                    // manipulation on plain left-drag.
+                    let tool = *self.inputs.tool.lock().unwrap();
+                    match tool {
+                        ViewportTool::Select => {
+                            self.drag = CameraDrag::Selecting {
+                                start_local: pos,
+                                moved: false,
+                            };
+                        }
+                        ViewportTool::Rotate => {
+                            let (pivot, radius) = self.orbit_pivot_from_cursor(pos);
+                            let (start_az, start_el);
+                            {
+                                let mut c = self.inputs.camera.lock().unwrap();
+                                c.center = pivot;
+                                c.radius = radius;
+                                start_az = c.azimuth;
+                                start_el = c.elevation;
+                            }
+                            self.drag = CameraDrag::Orbit { start_local: pos, start_az, start_el };
+                        }
+                        ViewportTool::Pan => {
+                            self.drag = CameraDrag::Pan {
+                                start_local: pos,
+                                start_center: cam_snapshot.center,
+                            };
+                        }
+                        ViewportTool::Zoom => {
+                            self.drag = CameraDrag::Zooming {
+                                start_local: pos,
+                                start_radius: cam_snapshot.radius,
+                            };
+                        }
+                    }
                     EventResult::Consumed
                 }
             }
@@ -580,22 +702,24 @@ impl Viewport3dWidget {
                 let dx = (pos.x - start_local.x) as f32;
                 let dy = (pos.y - start_local.y) as f32;
                 let scale = 0.005;
-                self.camera.azimuth = *start_az + dx * scale;
-                self.camera.elevation = *start_el - dy * scale;
+                let mut c = self.inputs.camera.lock().unwrap();
+                c.azimuth = *start_az + dx * scale;
+                c.elevation = *start_el - dy * scale;
                 let limit = std::f32::consts::PI * 0.49;
-                self.camera.elevation = self.camera.elevation.clamp(-limit, limit);
+                c.elevation = c.elevation.clamp(-limit, limit);
                 EventResult::Consumed
             }
             CameraDrag::Pan { start_local, start_center } => {
                 let dx = (pos.x - start_local.x) as f32;
                 let dy = (pos.y - start_local.y) as f32;
+                let mut c = self.inputs.camera.lock().unwrap();
                 // Pan scales with distance so the world point under the
                 // cursor stays roughly under the cursor. Drag-down (negative
                 // dy in agg-gui Y-up coords) lowers the look-at point — see
                 // `OrbitCamera::pan` and the regression test for the bug.
-                let pan_scale = self.camera.radius * 0.0025;
-                let (right, up, _fwd) = self.camera.basis();
-                self.camera.center = [
+                let pan_scale = c.radius * 0.0025;
+                let (right, up, _fwd) = c.basis();
+                c.center = [
                     start_center[0] - right[0] * dx * pan_scale - up[0] * dy * pan_scale,
                     start_center[1] - right[1] * dx * pan_scale - up[1] * dy * pan_scale,
                     start_center[2] - right[2] * dx * pan_scale - up[2] * dy * pan_scale,
@@ -611,7 +735,7 @@ impl Viewport3dWidget {
                 let factor = (dy * 0.005).exp();
                 let r = (*start_radius * factor).clamp(0.05, 10_000.0);
                 if r.is_finite() {
-                    self.camera.radius = r;
+                    self.inputs.camera.lock().unwrap().radius = r;
                 }
                 EventResult::Consumed
             }
@@ -641,7 +765,7 @@ impl Viewport3dWidget {
                     let w = self.bounds.width.max(1.0);
                     let h = self.bounds.height.max(1.0);
                     let cursor_top_down = (pos.x, h - pos.y);
-                    let (origin, dir) = self.camera.screen_to_ray(cursor_top_down, (w, h));
+                    let (origin, dir) = self.cam().screen_to_ray(cursor_top_down, (w, h));
                     if raycast_mesh(&mesh, origin, dir).is_some() {
                         *self.inputs.selection.lock().unwrap() = Some(id);
                     } else {
@@ -662,7 +786,7 @@ impl Viewport3dWidget {
             return EventResult::Ignored;
         }
         let factor = if delta_y > 0.0 { 0.9 } else { 1.0 / 0.9 };
-        self.camera.zoom(factor as f32);
+        self.cam_mut(|c| c.zoom(factor as f32));
         EventResult::Consumed
     }
 
@@ -699,11 +823,11 @@ impl Viewport3dWidget {
                 // Ctrl + +/- → zoom in/out.
                 if mods.ctrl {
                     if *c == '+' || *c == '=' {
-                        self.camera.zoom(1.0 / KEYBOARD_ZOOM_FACTOR);
+                        self.cam_mut(|c| c.zoom(1.0 / KEYBOARD_ZOOM_FACTOR));
                         return EventResult::Consumed;
                     }
                     if *c == '-' || *c == '_' {
-                        self.camera.zoom(KEYBOARD_ZOOM_FACTOR);
+                        self.cam_mut(|c| c.zoom(KEYBOARD_ZOOM_FACTOR));
                         return EventResult::Consumed;
                     }
                 }
@@ -717,11 +841,14 @@ impl Viewport3dWidget {
                     _ => unreachable!(),
                 };
                 if mods.shift {
-                    let scale = self.camera.radius * 0.0025;
-                    self.camera.pan(dx * ARROW_PAN_PX * scale, dy * ARROW_PAN_PX * scale);
+                    let mut c = self.inputs.camera.lock().unwrap();
+                    let scale = c.radius * 0.0025;
+                    c.pan(dx * ARROW_PAN_PX * scale, dy * ARROW_PAN_PX * scale);
                 } else {
                     let scale = 0.005;
-                    self.camera.orbit(dx * ARROW_ORBIT_PX * scale, -dy * ARROW_ORBIT_PX * scale);
+                    self.cam_mut(|c| {
+                        c.orbit(dx * ARROW_ORBIT_PX * scale, -dy * ARROW_ORBIT_PX * scale)
+                    });
                 }
                 return EventResult::Consumed;
             }
@@ -737,11 +864,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     fn empty_inputs() -> ViewportInputs {
-        ViewportInputs {
-            last_mesh_output: Arc::new(Mutex::new(None)),
-            display_node: Arc::new(Mutex::new(None)),
-            selection: Arc::new(Mutex::new(None)),
-        }
+        ViewportInputs::empty()
     }
 
     #[test]

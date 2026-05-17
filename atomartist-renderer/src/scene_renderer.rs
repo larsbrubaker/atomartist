@@ -36,6 +36,30 @@ use wgpu::util::DeviceExt;
 
 use crate::camera::{mul4, OrbitCamera};
 
+/// Render-style picker beneath the tumble cube.  Drives the surface
+/// pipeline used by [`WgpuSceneRenderer`] so the user can compare a
+/// shaded model with a wireframe-only or outline-only view, matching
+/// MatterCAD's `ViewStyleButton` choices without the printer-specific
+/// modes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RenderStyle {
+    /// Default Blinn-Phong shaded surface.
+    Shaded,
+    /// Hide the filled surface; only the inverted-hull silhouette draws.
+    /// Useful for inspecting outline silhouettes / boundary fairing.
+    OutlineOnly,
+    /// Software wireframe — falls back to the existing CPU edge path.
+    /// Disables the wgpu fill pass so the 2-D viewport draws the
+    /// per-triangle edges from `Viewport3dWidget::draw_mesh`.
+    Wireframe,
+}
+
+impl Default for RenderStyle {
+    fn default() -> Self {
+        Self::Shaded
+    }
+}
+
 /// Sample count for the offscreen 3-D framebuffer.  4× is the WebGPU
 /// guaranteed-supported MSAA value (matches what `MsaaFramebuffer::new`
 /// clamps anything > 1 to).  Higher values would require feature opt-in
@@ -268,6 +292,10 @@ pub struct WgpuSceneRenderer {
     /// World-space outline thickness — set by the host based on the mesh's
     /// bounding-box extent so it scales sensibly across model sizes.
     pub outline_width: f32,
+    /// Surface render style — picked by the render-style picker beneath
+    /// the tumble cube.  Drives the shaded vs outline-only vs wireframe
+    /// branch in the main pass.
+    pub render_style: RenderStyle,
 }
 
 impl WgpuSceneRenderer {
@@ -286,6 +314,7 @@ impl WgpuSceneRenderer {
             outline_enabled: false,
             outline_color: [1.0, 0.55, 0.10, 1.0],
             outline_width: 0.05,
+            render_style: RenderStyle::Shaded,
         }
     }
 
@@ -730,20 +759,30 @@ impl WgpuCustomRender for WgpuSceneRenderer {
             // Mesh — only when both a vertex buffer and index buffer are
             // present.  Skipping leaves the grid + transparent pixels
             // composited as the empty viewport hint.
+            //
+            // `RenderStyle::Shaded` draws the surface; `OutlineOnly` and
+            // `Wireframe` skip the surface fill so only the outline /
+            // 2-D wireframe path contributes.  Outlines are forced on
+            // for `OutlineOnly` regardless of selection so the user
+            // always has something to look at when they pick that mode.
+            let draw_surface = self.render_style == RenderStyle::Shaded;
+            let outline_force_on = self.render_style == RenderStyle::OutlineOnly;
             if let (Some(vbuf), Some(ibuf)) = (&s.vbuf, &s.ibuf) {
                 if s.index_count > 0 {
-                    pass.set_pipeline(&s.pipeline);
-                    pass.set_bind_group(0, &bg, &[]);
-                    pass.set_vertex_buffer(0, vbuf.slice(..));
-                    pass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..s.index_count, 0, 0..1);
+                    if draw_surface {
+                        pass.set_pipeline(&s.pipeline);
+                        pass.set_bind_group(0, &bg, &[]);
+                        pass.set_vertex_buffer(0, vbuf.slice(..));
+                        pass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.draw_indexed(0..s.index_count, 0, 0..1);
+                    }
 
                     // Outline silhouette — runs *after* the mesh so the
                     // inflated back-faces can be depth-tested against the
                     // already-written front-face depth and only show
                     // beyond the original silhouette. Skipped when no
                     // selection is active.
-                    if self.outline_enabled && self.outline_width > 0.0 {
+                    if (self.outline_enabled || outline_force_on) && self.outline_width > 0.0 {
                         let outline_uniforms = OutlineUniforms {
                             mvp,
                             color: self.outline_color,
