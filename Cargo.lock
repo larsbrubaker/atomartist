@@ -819,6 +819,7 @@ dependencies = [
  "pollster",
  "raw-window-handle",
  "rfd",
+ "web-time",
  "wgpu",
  "winit",
 ]

@@ -779,7 +779,11 @@ fn add_bottom_row(overlay: &mut ViewportOverlay, state: &AppState, font: &Arc<Fo
 }
 
 fn wrap_tooltip(child: Box<dyn Widget>, text: &'static str, font: &Arc<Font>) -> Box<dyn Widget> {
-    Box::new(Tooltip::new(child, text, font.clone()).at_pointer())
+    // Use agg-gui's default widget-anchored placement. Tooltips
+    // should appear below the hovered HUD item, matching MatterCAD;
+    // `.at_pointer()` would override that and keep the panel attached
+    // to the cursor.
+    Box::new(Tooltip::new(child, text, font.clone()))
 }
 
 #[cfg(test)]

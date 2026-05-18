@@ -241,6 +241,7 @@ fn main() {
 
     let mut win_w = gpu.config.width;
     let mut win_h = gpu.config.height;
+    let mut next_scheduled_redraw: Option<std::time::Instant> = None;
 
     let mut cursor_x = 0.0f64;
     let mut cursor_y = 0.0f64;
@@ -254,7 +255,11 @@ fn main() {
 
     event_loop
         .run(move |event, elwt| {
-            elwt.set_control_flow(ControlFlow::Wait);
+            if let Some(t) = next_scheduled_redraw {
+                elwt.set_control_flow(ControlFlow::WaitUntil(t));
+            } else {
+                elwt.set_control_flow(ControlFlow::Wait);
+            }
             match event {
                 Event::WindowEvent {
                     event: WindowEvent::CloseRequested, ..
@@ -328,6 +333,7 @@ fn main() {
                 Event::WindowEvent {
                     event: WindowEvent::RedrawRequested, ..
                 } => {
+                    next_scheduled_redraw = None;
                     let capture_now = screenshot_path.is_some()
                         && frames_painted + 1 == warmup_frames;
                     paint_frame(&gpu, &mut wgpu_ctx, &mut app, win_w, win_h, capture_now);
@@ -340,6 +346,21 @@ fn main() {
                     // user moves the mouse.
                     if agg_gui::animation::wants_draw() {
                         window.request_redraw();
+                    } else if app.wants_draw() {
+                        window.request_redraw();
+                    } else {
+                        let animation_deadline = agg_gui::animation::take_next_draw_deadline();
+                        let widget_deadline = app.next_draw_deadline();
+                        let next_deadline = match (animation_deadline, widget_deadline) {
+                            (Some(a), Some(b)) => Some(a.min(b)),
+                            (Some(a), None) => Some(a),
+                            (None, Some(b)) => Some(b),
+                            (None, None) => None,
+                        };
+                        if let Some(deadline) = next_deadline {
+                            let delay = deadline.saturating_duration_since(web_time::Instant::now());
+                            next_scheduled_redraw = Some(std::time::Instant::now() + delay);
+                        }
                     }
                     if let Some(path) = screenshot_path.clone() {
                         if frames_painted == warmup_frames {
@@ -357,6 +378,17 @@ fn main() {
                             }
                             elwt.exit();
                         } else {
+                            window.request_redraw();
+                        }
+                    }
+                }
+                Event::AboutToWait => {
+                    if agg_gui::animation::wants_draw() || app.wants_draw() {
+                        next_scheduled_redraw = None;
+                        window.request_redraw();
+                    } else if let Some(deadline) = next_scheduled_redraw {
+                        if std::time::Instant::now() >= deadline {
+                            next_scheduled_redraw = None;
                             window.request_redraw();
                         }
                     }
