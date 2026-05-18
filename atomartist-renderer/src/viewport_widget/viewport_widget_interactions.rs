@@ -7,32 +7,29 @@ use super::*;
 use crate::picking::raycast_mesh;
 
 impl Viewport3dWidget {
-    /// Resolve the orbit pivot for a cursor at widget-local `pos`
-    /// and return `(pivot_world_pos, orbit_radius)`. Updates the
-    /// widget's stored `mouse_down_world_pos` and `hit_plane` as a
-    /// side effect so subsequent pan / wheel events share the same
-    /// interaction plane.
-    fn orbit_pivot_from_cursor(&mut self, pos: Point) -> ([f32; 3], f32) {
-        let res = self.refresh_pivot(pos);
-        let cam = self.cam();
-        let eye = cam.eye();
-        let dx = res.world_pos[0] - eye[0];
-        let dy = res.world_pos[1] - eye[1];
-        let dz = res.world_pos[2] - eye[2];
-        let radius = (dx * dx + dy * dy + dz * dz).sqrt().max(0.05);
-        (res.world_pos, radius)
-    }
+    // `orbit_pivot_from_cursor` used to set
+    // `camera.center = pivot` and a fresh `radius` on every rotate
+    // mouse-down. That snapped the eye to a new world position —
+    // visible to the user as a scene "jump" the instant the
+    // rotation drag started, with the rotation cursor circle then
+    // sitting nowhere near the cursor. The MatterCAD model leaves
+    // the camera centre alone on mouse-down and rotates the whole
+    // view (eye + centre) around `mouse_down_world_pos` during the
+    // drag via `OrbitCamera::orbit_drag_around`. The function is
+    // therefore gone — `refresh_pivot` alone seeds the pivot for
+    // both the rotate cursor and the per-move rotation math.
 
     pub(super) fn on_mouse_down(&mut self, pos: Point, button: MouseButton, mods: Modifiers) -> EventResult {
         match button {
             MouseButton::Right => {
-                // Right-drag → orbit, pivoting at the cursor hit point.
-                let (pivot, radius) = self.orbit_pivot_from_cursor(pos);
-                {
-                    let mut c = self.inputs.camera.lock().unwrap();
-                    c.center = pivot;
-                    c.radius = radius;
-                }
+                // Right-drag → orbit, pivoting at the cursor hit
+                // point. `refresh_pivot` stores the world pivot in
+                // `self.mouse_down_world_pos`; the per-frame
+                // rotation in `on_mouse_move` then swings both eye
+                // and centre around that point via
+                // `OrbitCamera::orbit_drag_around` — so nothing
+                // moves on the mouse-down itself.
+                self.refresh_pivot(pos);
                 self.drag = CameraDrag::Orbit { last_local: pos };
                 EventResult::Consumed
             }
@@ -59,12 +56,7 @@ impl Viewport3dWidget {
                     self.drag = CameraDrag::Pan { last_local: pos };
                     EventResult::Consumed
                 } else if mods.ctrl {
-                    let (pivot, radius) = self.orbit_pivot_from_cursor(pos);
-                    {
-                        let mut c = self.inputs.camera.lock().unwrap();
-                        c.center = pivot;
-                        c.radius = radius;
-                    }
+                    self.refresh_pivot(pos);
                     self.drag = CameraDrag::Orbit { last_local: pos };
                     EventResult::Consumed
                 } else {
@@ -82,12 +74,7 @@ impl Viewport3dWidget {
                             };
                         }
                         ViewportTool::Rotate => {
-                            let (pivot, radius) = self.orbit_pivot_from_cursor(pos);
-                            {
-                                let mut c = self.inputs.camera.lock().unwrap();
-                                c.center = pivot;
-                                c.radius = radius;
-                            }
+                            self.refresh_pivot(pos);
                             self.drag = CameraDrag::Orbit { last_local: pos };
                         }
                         ViewportTool::Pan => {
@@ -112,30 +99,23 @@ impl Viewport3dWidget {
         match &mut self.drag {
             CameraDrag::None => EventResult::Ignored,
             CameraDrag::Orbit { last_local } => {
-                // Incremental: feed the per-frame delta into
-                // `OrbitCamera::orbit_drag` so the active
-                // `orbit_mode` (Turntable vs Trackball) actually
-                // changes how the rotation builds up — MatterCAD's
-                // `DoRotateAroundOrigin` also updates
-                // `rotationStartPosition` each frame for the same
-                // reason.
+                // Incremental rotation around the stored world
+                // pivot (`mouse_down_world_pos`). Mirrors
+                // MatterCAD's `world.RotateAroundPosition(pivot, q)`
+                // — both eye and orbit centre swing around the
+                // pivot, so the world point that was under the
+                // cursor at mouse-down stays glued to the cursor
+                // (no scene jump on the first frame either).
                 let dx = (pos.x - last_local.x) as f32;
                 let dy = (pos.y - last_local.y) as f32;
                 let scale = 0.005;
-                // Drag right (dx > 0) should turn the world right
-                // (object follows the cursor) — under our `eye =
-                // [r*ce*sin(az), r*se, r*ce*cos(az)]` formula that
-                // means azimuth DECREASES with positive dx. Drag
-                // down (positive dy in screen coords) lowers the
-                // elevation. Pass NEGATED deltas to `orbit_drag`
-                // so its `orbit(d_az, d_el)` adds the same signs
-                // the old absolute formula produced.
+                let pivot = self.mouse_down_world_pos;
+                *last_local = pos;
                 self.inputs
                     .camera
                     .lock()
                     .unwrap()
-                    .orbit_drag(-dx * scale, -dy * scale);
-                *last_local = pos;
+                    .orbit_drag_around(pivot, -dx * scale, -dy * scale);
                 EventResult::Consumed
             }
             CameraDrag::Pan { last_local } => {
