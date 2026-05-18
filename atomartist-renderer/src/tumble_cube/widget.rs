@@ -31,7 +31,8 @@ use super::face_textures::{
 use super::hit_test::{get_hit_data, raycast_unit_cube, HitData};
 use super::orient::{target_for_hit, TargetPose};
 use super::renderer::{TumbleCubeRenderer, TUMBLE_CUBE_CAMERA_RADIUS, TUMBLE_CUBE_MODEL_SCALE};
-use crate::camera::{OrbitCamera, OrientAnimation};
+use crate::camera::OrbitCamera;
+use crate::camera_animations::OrientAnimation;
 
 /// External hooks the cube widget needs.  Identical-in-spirit to
 /// [`crate::ViewportInputs`] but trimmed to the surfaces the cube

@@ -45,15 +45,12 @@ impl Viewport3dWidget {
             MouseButton::Right => {
                 // Right-drag → orbit, pivoting at the cursor hit point.
                 let (pivot, radius) = self.orbit_pivot_from_cursor(pos);
-                let (start_az, start_el);
                 {
                     let mut c = self.inputs.camera.lock().unwrap();
                     c.center = pivot;
                     c.radius = radius;
-                    start_az = c.azimuth;
-                    start_el = c.elevation;
                 }
-                self.drag = CameraDrag::Orbit { start_local: pos, start_az, start_el };
+                self.drag = CameraDrag::Orbit { last_local: pos };
                 EventResult::Consumed
             }
             MouseButton::Middle => {
@@ -81,15 +78,12 @@ impl Viewport3dWidget {
                     EventResult::Consumed
                 } else if mods.ctrl {
                     let (pivot, radius) = self.orbit_pivot_from_cursor(pos);
-                    let (start_az, start_el);
                     {
                         let mut c = self.inputs.camera.lock().unwrap();
                         c.center = pivot;
                         c.radius = radius;
-                        start_az = c.azimuth;
-                        start_el = c.elevation;
                     }
-                    self.drag = CameraDrag::Orbit { start_local: pos, start_az, start_el };
+                    self.drag = CameraDrag::Orbit { last_local: pos };
                     EventResult::Consumed
                 } else {
                     // No modifier → fall back to the active tool from the
@@ -107,15 +101,12 @@ impl Viewport3dWidget {
                         }
                         ViewportTool::Rotate => {
                             let (pivot, radius) = self.orbit_pivot_from_cursor(pos);
-                            let (start_az, start_el);
                             {
                                 let mut c = self.inputs.camera.lock().unwrap();
                                 c.center = pivot;
                                 c.radius = radius;
-                                start_az = c.azimuth;
-                                start_el = c.elevation;
                             }
-                            self.drag = CameraDrag::Orbit { start_local: pos, start_az, start_el };
+                            self.drag = CameraDrag::Orbit { last_local: pos };
                         }
                         ViewportTool::Pan => {
                             self.drag = CameraDrag::Pan {
@@ -140,20 +131,31 @@ impl Viewport3dWidget {
     pub(super) fn on_mouse_move(&mut self, pos: Point) -> EventResult {
         match &mut self.drag {
             CameraDrag::None => EventResult::Ignored,
-            CameraDrag::Orbit { start_local, start_az, start_el } => {
-                let dx = (pos.x - start_local.x) as f32;
-                let dy = (pos.y - start_local.y) as f32;
+            CameraDrag::Orbit { last_local } => {
+                // Incremental: feed the per-frame delta into
+                // `OrbitCamera::orbit_drag` so the active
+                // `orbit_mode` (Turntable vs Trackball) actually
+                // changes how the rotation builds up — MatterCAD's
+                // `DoRotateAroundOrigin` also updates
+                // `rotationStartPosition` each frame for the same
+                // reason.
+                let dx = (pos.x - last_local.x) as f32;
+                let dy = (pos.y - last_local.y) as f32;
                 let scale = 0.005;
-                let mut c = self.inputs.camera.lock().unwrap();
                 // Drag right (dx > 0) should turn the world right
-                // (object follows the cursor) — that's the camera
-                // orbiting counter-clockwise around world-up, i.e.
-                // azimuth DECREASING under our `eye = [r*ce*sin(az),
-                // r*se, r*ce*cos(az)]` formula.
-                c.azimuth = *start_az - dx * scale;
-                c.elevation = *start_el - dy * scale;
-                let limit = std::f32::consts::PI * 0.49;
-                c.elevation = c.elevation.clamp(-limit, limit);
+                // (object follows the cursor) — under our `eye =
+                // [r*ce*sin(az), r*se, r*ce*cos(az)]` formula that
+                // means azimuth DECREASES with positive dx. Drag
+                // down (positive dy in screen coords) lowers the
+                // elevation. Pass NEGATED deltas to `orbit_drag`
+                // so its `orbit(d_az, d_el)` adds the same signs
+                // the old absolute formula produced.
+                self.inputs
+                    .camera
+                    .lock()
+                    .unwrap()
+                    .orbit_drag(-dx * scale, -dy * scale);
+                *last_local = pos;
                 EventResult::Consumed
             }
             CameraDrag::Pan { start_local, start_center } => {

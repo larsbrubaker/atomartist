@@ -35,7 +35,8 @@ use agg_gui::{
 use atomartist_lib::graph::node::NodeId;
 use manifold_rust::types::MeshGL;
 
-use crate::camera::{mul4, transform_point4, CameraPoseAnimation, OrbitCamera};
+use crate::camera::{mul4, transform_point4, OrbitCamera};
+use crate::camera_animations::{CameraPoseAnimation, ProjectionAnimation};
 use crate::picking::{project_to_view_plane, raycast_mesh};
 use crate::scene_renderer::{RenderStyle, WgpuSceneRenderer};
 
@@ -90,6 +91,11 @@ pub struct ViewportInputs {
     /// Optional camera pose tween started by external HUD controls
     /// (Home / Fit).  The viewport owns ticking it during paint.
     pub camera_animation: Arc<Mutex<Option<CameraPoseAnimation>>>,
+    /// Optional perspective <-> orthographic tween started by the
+    /// perspective HUD button. Ticked alongside `camera_animation`
+    /// each paint so projection toggles ease over ~0.25 s instead
+    /// of snapping.
+    pub projection_animation: Arc<Mutex<Option<ProjectionAnimation>>>,
 }
 
 impl ViewportInputs {
@@ -106,6 +112,7 @@ impl ViewportInputs {
             render_style: Arc::new(Mutex::new(RenderStyle::default())),
             show_bed: Arc::new(Mutex::new(true)),
             camera_animation: Arc::new(Mutex::new(None)),
+            projection_animation: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -113,7 +120,14 @@ impl ViewportInputs {
 #[derive(Clone, Debug)]
 enum CameraDrag {
     None,
-    Orbit { start_local: Point, start_az: f32, start_el: f32 },
+    /// Right-drag (or modifier-aware left-drag) → orbit. Tracks the
+    /// previous cursor sample so each `MouseMove` can feed an
+    /// incremental delta into `OrbitCamera::orbit_drag`, which then
+    /// branches on `orbit_mode` (Turntable vs Trackball). The
+    /// previous absolute-delta scheme always behaved like turntable
+    /// regardless of mode — see `OrbitCamera::orbit_drag` for the
+    /// per-mode math.
+    Orbit { last_local: Point },
     Pan { start_local: Point, start_center: [f32; 3] },
     /// Left-button down — pending selection.  Becomes a click-or-drag
     /// selection on mouse-up (Phase A4 wires the selection write).
@@ -338,6 +352,23 @@ impl Viewport3dWidget {
             agg_gui::animation::request_draw();
         }
     }
+
+    /// Step the in-flight perspective <-> orthographic tween, if any.
+    /// Runs every paint alongside `tick_camera_animation`, drops the
+    /// handle when the tween reaches `progress = 1`, and keeps the
+    /// frame loop spinning while it's active. Mirrors MatterCAD's
+    /// `Animation.Run(this, 0.25, 10, …)` callback.
+    fn tick_projection_animation(&self, dt_seconds: f32) {
+        let mut slot = self.inputs.projection_animation.lock().unwrap();
+        let Some(anim) = slot.as_mut() else { return };
+        let mut cam = self.inputs.camera.lock().unwrap();
+        let done = anim.step(&mut cam, dt_seconds);
+        if done {
+            *slot = None;
+        } else {
+            agg_gui::animation::request_draw();
+        }
+    }
 }
 
 /// Pick an outline thickness scaled to the model's bounding-box extent so
@@ -442,6 +473,7 @@ impl Widget for Viewport3dWidget {
         if w <= 0.0 || h <= 0.0 { return; }
 
         self.tick_camera_animation(0.016);
+        self.tick_projection_animation(0.016);
 
         // Theme-aware background: slightly lighter / darker than the
         // canvas backdrop so the viewport reads as a distinct pane.

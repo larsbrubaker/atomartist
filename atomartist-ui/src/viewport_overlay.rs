@@ -29,8 +29,8 @@ use agg_gui::{
     Widget, WidgetBase,
 };
 use atomartist_renderer::{
-    CameraPoseAnimation, OrbitMode, Projection, RenderStyle, TumbleCubeInputs, TumbleCubeWidget,
-    Viewport3dWidget, ViewportInputs, ViewportTool,
+    CameraPoseAnimation, OrbitMode, Projection, ProjectionAnimation, RenderStyle, TumbleCubeInputs,
+    TumbleCubeWidget, Viewport3dWidget, ViewportInputs, ViewportTool,
 };
 
 use crate::app_state::AppState;
@@ -83,6 +83,7 @@ pub fn build_viewport_overlay(state: AppState, font: Arc<Font>) -> Box<dyn Widge
         render_style: state.render_style.clone(),
         show_bed: state.show_bed.clone(),
         camera_animation: state.camera_animation.clone(),
+        projection_animation: state.projection_animation.clone(),
     };
     let cube_inputs = TumbleCubeInputs {
         camera: state.camera.clone(),
@@ -424,6 +425,14 @@ fn add_zoom_to_sel_button(overlay: &mut ViewportOverlay, state: &AppState, font:
     overlay.add_ring_button(wrap_tooltip(Box::new(btn), "Zoom to selection", font), angle);
 }
 
+/// Turntable / Trackball orbit-mode toggle. MatterCAD's
+/// `AddTurnTableButton` ALSO calls `viewControls3D.NotifyResetView()`
+/// when turning turntable ON ("WIP, this should fix the current
+/// rotation rather than reset the view" — `View3DWidget.cs:741-744`).
+/// We deliberately do NOT reset the view here: snapping the camera
+/// home on every toggle is a surprise the C# code itself flagged
+/// as wrong. Toggling just changes how the next orbit drag
+/// interprets cursor motion — handled by `OrbitCamera::orbit_drag`.
 fn add_turntable_button(overlay: &mut ViewportOverlay, state: &AppState, font: &Arc<Font>, angle: f64) {
     let camera_w = state.camera.clone();
     let setting_w = state.turntable.clone();
@@ -443,8 +452,17 @@ fn add_turntable_button(overlay: &mut ViewportOverlay, state: &AppState, font: &
     overlay.add_ring_button(wrap_tooltip(Box::new(btn), "Turntable mode", font), angle);
 }
 
+/// Perspective / Orthographic toggle. Instead of snapping the
+/// projection mode on click, this kicks off a `ProjectionAnimation`
+/// that smoothly tweens FOV and eye distance over ~0.25 s — port of
+/// MatterCAD's `TrackballTumbleWidgetExtended.DoSwitchToProjectionMode`.
+/// The active-state predicate reads the *intent* flag
+/// (`state.perspective`) so the button's checked treatment flips
+/// immediately on click, even though the camera's `projection`
+/// field only lands at the end of the tween.
 fn add_perspective_button(overlay: &mut ViewportOverlay, state: &AppState, font: &Arc<Font>, angle: f64) {
     let camera_w = state.camera.clone();
+    let projection_anim = state.projection_animation.clone();
     let setting_w = state.perspective.clone();
     let setting_r = state.perspective.clone();
     let btn = CircularIconButton::new(IconKind::Persp)
@@ -453,11 +471,17 @@ fn add_perspective_button(overlay: &mut ViewportOverlay, state: &AppState, font:
         .on_click(move || {
             let mut s = setting_w.lock().unwrap();
             *s = !*s;
-            camera_w.lock().unwrap().projection = if *s {
+            let target = if *s {
                 Projection::Perspective
             } else {
                 Projection::Orthographic
             };
+            let camera_snapshot = camera_w.lock().unwrap().clone();
+            // Replace any in-flight tween so a rapid double-toggle
+            // ends up at the latest target rather than queueing.
+            *projection_anim.lock().unwrap() =
+                Some(ProjectionAnimation::new(&camera_snapshot, target, 0.25));
+            agg_gui::animation::request_draw();
         });
     overlay.add_ring_button(wrap_tooltip(Box::new(btn), "Perspective mode", font), angle);
 }

@@ -428,6 +428,7 @@ pub fn mul4(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::camera_animations::{CameraPoseAnimation, ProjectionAnimation};
 
     #[test]
     fn orbit_clamps_elevation() {
@@ -582,131 +583,86 @@ mod tests {
         assert!((m[11]).abs() < 1e-5);
         assert!((m[15] - 1.0).abs() < 1e-5);
     }
-}
 
-// ---------------------------------------------------------------------------
-// Orientation animation — drives click-to-orient on the tumble cube and
-// any other camera-snap operation. Stepping by elapsed seconds avoids the
-// frame-rate-coupled "10 updates" approach MatterCAD used and produces
-// identical motion regardless of refresh rate.
-// ---------------------------------------------------------------------------
-
-/// Smooth interpolation between two camera orientations.
-///
-/// The animation holds the *target* orbit pose and a remaining fractional
-/// progress.  Each `step` advances progress by `dt / duration` and applies
-/// an eased blend between the start and target azimuth/elevation/center,
-/// writing the result back to the camera.  Callers ping `is_done` to
-/// know when the cube widget should drop the animation handle.
-#[derive(Clone, Debug)]
-pub struct OrientAnimation {
-    start_az: f32,
-    start_el: f32,
-    start_center: [f32; 3],
-    target_az: f32,
-    target_el: f32,
-    target_center: [f32; 3],
-    /// 0.0 → not started; 1.0 → finished.
-    progress: f32,
-    duration: f32,
-}
-
-/// Smooth interpolation between two complete orbit-camera poses.
-/// Used by viewport chrome actions such as Home and Zoom-to-selection
-/// so those transitions tween from the current transform instead of
-/// jumping.
-#[derive(Clone, Debug)]
-pub struct CameraPoseAnimation {
-    start: OrbitCamera,
-    target: OrbitCamera,
-    progress: f32,
-    duration: f32,
-}
-
-impl CameraPoseAnimation {
-    pub fn new(start: &OrbitCamera, mut target: OrbitCamera, duration: f32) -> Self {
-        let mut delta = target.azimuth - start.azimuth;
-        while delta > PI { delta -= 2.0 * PI; }
-        while delta < -PI { delta += 2.0 * PI; }
-        target.azimuth = start.azimuth + delta;
-        Self {
-            start: start.clone(),
-            target,
-            progress: 0.0,
-            duration: duration.max(1e-3),
-        }
+    /// Tweens FROM perspective TO orthographic land in true ortho
+    /// at `t = 1` and restore `fov_y` / `radius` to their pre-tween
+    /// values so the ortho `half_h` calculation reproduces the same
+    /// visible vertical extent as the last perspective frame.
+    #[test]
+    fn projection_animation_to_ortho_lands_in_ortho() {
+        let mut cam = OrbitCamera::default();
+        cam.projection = Projection::Perspective;
+        let fov_before = cam.fov_y;
+        let radius_before = cam.radius;
+        let mut anim = ProjectionAnimation::new(&cam, Projection::Orthographic, 0.25);
+        // One huge step to drive past the end.
+        let done = anim.step(&mut cam, 1.0);
+        assert!(done);
+        assert_eq!(cam.projection, Projection::Orthographic);
+        assert!((cam.fov_y - fov_before).abs() < 1e-5);
+        assert!((cam.radius - radius_before).abs() < 1e-5);
     }
 
-    pub fn step(&mut self, camera: &mut OrbitCamera, dt: f32) -> bool {
-        self.progress = (self.progress + dt / self.duration).min(1.0);
-        let t = self.progress;
-        let s = t * t * (3.0 - 2.0 * t);
-        camera.center = lerp3(self.start.center, self.target.center, s);
-        camera.radius = lerp(self.start.radius, self.target.radius, s);
-        camera.azimuth = lerp(self.start.azimuth, self.target.azimuth, s);
-        camera.elevation = lerp(self.start.elevation, self.target.elevation, s);
-        camera.fov_y = lerp(self.start.fov_y, self.target.fov_y, s);
-        camera.near = lerp(self.start.near, self.target.near, s);
-        camera.far = lerp(self.start.far, self.target.far, s);
-        camera.projection = self.target.projection;
-        camera.orbit_mode = self.target.orbit_mode;
-        self.progress >= 1.0
+    /// Going FROM ortho TO perspective lands in perspective with
+    /// the canonical FOV restored.
+    #[test]
+    fn projection_animation_to_perspective_lands_in_perspective() {
+        let mut cam = OrbitCamera::default();
+        cam.projection = Projection::Orthographic;
+        let mut anim = ProjectionAnimation::new(&cam, Projection::Perspective, 0.25);
+        let done = anim.step(&mut cam, 1.0);
+        assert!(done);
+        assert_eq!(cam.projection, Projection::Perspective);
+    }
+
+    /// Mid-tween invariant: the visible vertical half-height at the
+    /// orbit centre stays close to the pre-tween value, even though
+    /// fov is shrinking. Confirms the radius-compensation works.
+    #[test]
+    fn projection_animation_preserves_visible_height_mid_tween() {
+        let mut cam = OrbitCamera::default();
+        cam.projection = Projection::Perspective;
+        let ref_half_h = (cam.fov_y * 0.5).tan() * cam.radius;
+        let mut anim = ProjectionAnimation::new(&cam, Projection::Orthographic, 0.25);
+        // Drive to mid-progress.
+        anim.step(&mut cam, 0.125);
+        let mid_half_h = (cam.fov_y * 0.5).tan() * cam.radius;
+        assert!(
+            (mid_half_h - ref_half_h).abs() < 1e-3,
+            "tween should hold half-height; ref={} mid={}",
+            ref_half_h,
+            mid_half_h
+        );
+    }
+
+    /// `orbit_drag` honours `orbit_mode`. In turntable mode an X
+    /// drag updates azimuth one-for-one with the input delta; in
+    /// trackball mode the trackball weighting scales X by
+    /// `cos(elevation)` so the two modes diverge once elevation
+    /// is non-zero.
+    #[test]
+    fn orbit_drag_diverges_between_turntable_and_trackball_at_elevated_view() {
+        let mut tt = OrbitCamera::default();
+        tt.elevation = 0.8; // well off the equator
+        tt.azimuth = 0.0;
+        tt.orbit_mode = OrbitMode::Turntable;
+
+        let mut tb = tt.clone();
+        tb.orbit_mode = OrbitMode::Trackball;
+
+        let dx = 0.5;
+        tt.orbit_drag(dx, 0.0);
+        tb.orbit_drag(dx, 0.0);
+
+        assert!(
+            (tt.azimuth - tb.azimuth).abs() > 1e-3,
+            "turntable and trackball should diverge for a non-equatorial X drag; tt={} tb={}",
+            tt.azimuth,
+            tb.azimuth
+        );
     }
 }
 
-fn lerp(a: f32, b: f32, t: f32) -> f32 {
-    a * (1.0 - t) + b * t
-}
-
-fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
-    [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)]
-}
-
-impl OrientAnimation {
-    /// Build an animation that takes the camera from its current pose to
-    /// `(target_az, target_el)` (centre held).  `duration` is in seconds —
-    /// 0.25 s matches MatterCAD's `AnimateRotation` length.
-    pub fn to_orientation(camera: &OrbitCamera, target_az: f32, target_el: f32, duration: f32) -> Self {
-        // Pick the shortest signed azimuth delta so the rotation goes the
-        // "near way around".  Without this, a click on Right from a
-        // slightly-past-Right view would spin the long way around.
-        let start_az = camera.azimuth;
-        let mut delta = target_az - start_az;
-        while delta > PI { delta -= 2.0 * PI; }
-        while delta < -PI { delta += 2.0 * PI; }
-        Self {
-            start_az,
-            start_el: camera.elevation,
-            start_center: camera.center,
-            target_az: start_az + delta,
-            target_el: target_el,
-            target_center: camera.center,
-            progress: 0.0,
-            duration: duration.max(1e-3),
-        }
-    }
-
-    pub fn is_done(&self) -> bool {
-        self.progress >= 1.0
-    }
-
-    /// Advance the animation by `dt` seconds, write the eased orientation
-    /// into `camera`, and return `true` if the animation finished on this
-    /// step (so callers can drop the handle).
-    pub fn step(&mut self, camera: &mut OrbitCamera, dt: f32) -> bool {
-        if self.progress >= 1.0 {
-            return false;
-        }
-        self.progress = (self.progress + dt / self.duration).min(1.0);
-        // Smoothstep eases the rotation in and out, giving the cube-snap
-        // a more deliberate, MatterCAD-like feel than a linear blend.
-        let t = self.progress;
-        let s = t * t * (3.0 - 2.0 * t);
-        camera.azimuth = self.start_az * (1.0 - s) + self.target_az * s;
-        camera.elevation = self.start_el * (1.0 - s) + self.target_el * s;
-        for i in 0..3 {
-            camera.center[i] = self.start_center[i] * (1.0 - s) + self.target_center[i] * s;
-        }
-        self.progress >= 1.0
-    }
-}
+// OrientAnimation / CameraPoseAnimation / ProjectionAnimation live
+// in the sibling `camera_animations.rs` module so this file stays
+// under the repository line-count guardrail.

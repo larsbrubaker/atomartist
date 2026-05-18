@@ -13,13 +13,15 @@
 //! designed to be stable across that swap.
 
 pub mod camera;
+pub mod camera_animations;
 pub mod picking;
 pub mod scene_renderer;
 mod scene_shaders;
 pub mod tumble_cube;
 pub mod viewport_widget;
 
-pub use camera::{CameraPoseAnimation, OrbitCamera, OrbitMode, OrientAnimation, Projection};
+pub use camera::{OrbitCamera, OrbitMode, Projection};
+pub use camera_animations::{CameraPoseAnimation, OrientAnimation, ProjectionAnimation};
 pub use picking::{project_to_view_plane, raycast_mesh};
 pub use scene_renderer::{RenderStyle, WgpuSceneRenderer};
 pub use tumble_cube::{TumbleCubeInputs, TumbleCubeWidget};

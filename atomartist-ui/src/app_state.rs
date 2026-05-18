@@ -19,7 +19,9 @@ use atomartist_lib::serialization::{
     export_stl, graph_from_json_str, graph_to_json_string,
 };
 use atomartist_lib::Graph;
-use atomartist_renderer::{CameraPoseAnimation, OrbitCamera, RenderStyle, ViewportTool};
+use atomartist_renderer::{
+    CameraPoseAnimation, OrbitCamera, ProjectionAnimation, RenderStyle, ViewportTool,
+};
 use manifold_rust::types::MeshGL;
 
 /// Top-level state passed by reference into every UI widget that mutates
@@ -79,6 +81,12 @@ pub struct AppState {
     /// In-flight camera pose animation started by viewport chrome
     /// buttons (Home / Fit). Ticked by `Viewport3dWidget::paint`.
     pub camera_animation: Arc<Mutex<Option<CameraPoseAnimation>>>,
+    /// In-flight perspective <-> orthographic projection tween
+    /// started by the perspective HUD button. Ticked alongside
+    /// `camera_animation` so the camera's `fov_y` / `radius` /
+    /// `projection` ease over ~0.25 s instead of snapping. Mirrors
+    /// MatterCAD's `TrackballTumbleWidgetExtended.DoSwitchToProjectionMode`.
+    pub projection_animation: Arc<Mutex<Option<ProjectionAnimation>>>,
 }
 
 impl AppState {
@@ -101,6 +109,7 @@ impl AppState {
             show_bed: Arc::new(Mutex::new(true)),
             snap_amount: Arc::new(Mutex::new(1.0)),
             camera_animation: Arc::new(Mutex::new(None)),
+            projection_animation: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -234,6 +243,7 @@ impl Clone for AppState {
             show_bed: self.show_bed.clone(),
             snap_amount: self.snap_amount.clone(),
             camera_animation: self.camera_animation.clone(),
+            projection_animation: self.projection_animation.clone(),
         }
     }
 }
