@@ -354,6 +354,7 @@ dependencies = [
  "atomartist-lib",
  "bytemuck",
  "demo-wgpu",
+ "glam",
  "manifold-rust",
  "wgpu",
 ]
@@ -367,6 +368,7 @@ dependencies = [
  "agg-rust 1.0.2",
  "atomartist-lib",
  "atomartist-renderer",
+ "glam",
  "manifold-rust",
  "png",
 ]

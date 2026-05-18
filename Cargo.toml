@@ -14,6 +14,15 @@ default-members = [
 ]
 resolver = "2"
 
+# Shared third-party deps — declared at the workspace level so every
+# crate that needs them resolves to the same version.
+[workspace.dependencies]
+# `glam` for 3-D linear algebra. Picked for its small footprint, fast
+# wasm builds, and `wgpu`-friendly `Mat4::to_cols_array` interop. We
+# do NOT enable `bytemuck` / `serde` features by default — opt in
+# per-crate if they are ever needed.
+glam = { version = "0.30", default-features = false, features = ["std"] }
+
 # Optimize dependencies in debug builds so the rendering / geometry path
 # runs at near-release speed while user code stays unoptimized
 # (fast incremental compile, usable backtraces).

@@ -7,6 +7,7 @@
 use super::*;
 use crate::app_state::AppState;
 use agg_gui::{Modifiers, MouseButton};
+use glam::Quat;
 
 const FONT_BYTES: &[u8] =
     include_bytes!("../../../agg-gui/agg-gui/assets/fonts/NotoSans-Regular.ttf");
@@ -75,11 +76,11 @@ fn build_viewport_overlay_has_8_ring_and_3_bottom_widgets() {
 #[test]
 fn home_button_starts_camera_animation_to_home_orientation() {
     let state = fresh_state();
-    // Move the camera off-default first.
+    // Move the camera off-default first so Home has somewhere
+    // visible to tween to.
     {
         let mut c = state.camera.lock().unwrap();
-        c.azimuth = 1.234;
-        c.elevation = 0.789;
+        c.orientation = Quat::from_rotation_y(1.234) * Quat::from_rotation_x(-0.789);
     }
     let mut overlay = build_at_size(state.clone(), 800.0, 600.0);
     let h = 600.0_f64;

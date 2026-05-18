@@ -22,7 +22,9 @@ pub mod viewport_widget;
 
 pub use camera::{OrbitCamera, OrbitMode, Projection};
 pub use camera_animations::{CameraPoseAnimation, OrientAnimation, ProjectionAnimation};
-pub use picking::{project_to_view_plane, raycast_mesh};
+pub use picking::{
+    project_to_view_plane, raycast_mesh, resolve_pivot_or_fallback, HitPlane, PivotResolution,
+};
 pub use scene_renderer::{RenderStyle, WgpuSceneRenderer};
 pub use tumble_cube::{TumbleCubeInputs, TumbleCubeWidget};
 pub use viewport_widget::{Viewport3dWidget, ViewportInputs, ViewportTool};

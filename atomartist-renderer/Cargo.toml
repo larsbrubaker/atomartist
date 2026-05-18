@@ -19,6 +19,7 @@ demo-wgpu      = { path = "../../agg-gui/demo-wgpu", default-features = false }
 manifold-rust  = { path = "../../manifold-rust" }
 wgpu           = { version = "29", default-features = false, features = ["wgsl"] }
 bytemuck       = { version = "1", features = ["derive"] }
+glam           = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies.wgpu]
 version = "29"

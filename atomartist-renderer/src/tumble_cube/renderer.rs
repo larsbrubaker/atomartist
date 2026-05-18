@@ -14,11 +14,11 @@
 
 use bytemuck::{Pod, Zeroable};
 use demo_wgpu::{MsaaFramebuffer, WgpuCustomRender, WgpuCustomRenderCtx};
+use glam::{Mat4, Quat, Vec3};
 use wgpu::util::DeviceExt;
 
 use super::cube_geometry::{build_cube, CubeVertex};
 use super::face_textures::{FaceTexture, TEX_SIZE};
-use crate::camera::mul4;
 
 /// 4× MSAA matches the main scene renderer; lets the cube edges read
 /// crisply at the small 100 px widget size.
@@ -120,9 +120,10 @@ pub struct TumbleCubeRenderer {
     /// Latest CPU pixel state — the widget updates this every paint
     /// before the renderer runs.  Six entries, one per face index.
     pub faces_cpu: Vec<FaceTexture>,
-    /// Camera angles reflected from the main viewport's `OrbitCamera`.
-    pub azimuth: f32,
-    pub elevation: f32,
+    /// Camera-to-world orientation mirrored from the main viewport's
+    /// `OrbitCamera`. The cube renders from the same orientation so
+    /// it always shows the user's current view direction.
+    pub orientation: Quat,
 }
 
 impl TumbleCubeRenderer {
@@ -130,15 +131,13 @@ impl TumbleCubeRenderer {
         Self {
             state: None,
             faces_cpu,
-            azimuth: 0.0,
-            elevation: 0.0,
+            orientation: Quat::IDENTITY,
         }
     }
 
     /// Update the mirrored orientation. Called each paint by the widget.
-    pub fn set_orientation(&mut self, az: f32, el: f32) {
-        self.azimuth = az;
-        self.elevation = el;
+    pub fn set_orientation(&mut self, orientation: Quat) {
+        self.orientation = orientation;
     }
 
     fn ensure_state(&mut self, device: &wgpu::Device, surface_format: wgpu::TextureFormat) {
@@ -349,19 +348,22 @@ impl TumbleCubeRenderer {
     fn build_mvp(&self, aspect: f32) -> [f32; 16] {
         // Cube-local orbit camera: sit back far enough that the cube
         // leaves visible padding inside its 100×100 widget, like the
-        // MatterCAD control.
-        // with the user's azimuth/elevation.  Using a slightly tighter
-        // FOV than the main viewport keeps the cube visually compact.
-        let ce = self.elevation.cos();
-        let se = self.elevation.sin();
-        let sa = self.azimuth.sin();
-        let ca = self.azimuth.cos();
-        let radius = TUMBLE_CUBE_CAMERA_RADIUS;
-        let eye = [radius * ce * sa, radius * se, radius * ce * ca];
-        let view = look_at(eye, [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
-        let proj = perspective(std::f32::consts::PI * 0.22, aspect, 0.1, 100.0);
-        let vp = mul4(&proj, &view);
-        mul4(&vp, &scale4(TUMBLE_CUBE_MODEL_SCALE))
+        // MatterCAD control. The orientation is mirrored from the
+        // main viewport, so the cube always shows the user's current
+        // view direction. Using a slightly tighter FOV than the main
+        // viewport keeps the cube visually compact.
+        let eye = self.orientation * Vec3::Z * TUMBLE_CUBE_CAMERA_RADIUS;
+        // view = inverse(camera world transform = T(eye) * R(orient))
+        let camera_world = Mat4::from_rotation_translation(self.orientation, eye);
+        let view = camera_world.inverse();
+        let proj = Mat4::perspective_rh_gl(
+            std::f32::consts::PI * 0.22,
+            aspect.max(1e-6),
+            0.1,
+            100.0,
+        );
+        let model = Mat4::from_scale(Vec3::splat(TUMBLE_CUBE_MODEL_SCALE));
+        (proj * view * model).to_cols_array()
     }
 }
 
@@ -519,51 +521,8 @@ fn downsample_rgba_box(src: &[u8], src_w: u32, src_h: u32, dst_w: u32, dst_h: u3
     dst
 }
 
-fn look_at(eye: [f32; 3], center: [f32; 3], up: [f32; 3]) -> [f32; 16] {
-    let f = normalize3([center[0] - eye[0], center[1] - eye[1], center[2] - eye[2]]);
-    let s = normalize3(cross3(f, up));
-    let u = cross3(s, f);
-    [
-        s[0], u[0], -f[0], 0.0,
-        s[1], u[1], -f[1], 0.0,
-        s[2], u[2], -f[2], 0.0,
-        -dot3(s, eye), -dot3(u, eye), dot3(f, eye), 1.0,
-    ]
-}
-
-fn perspective(fov_y: f32, aspect: f32, near: f32, far: f32) -> [f32; 16] {
-    let f = 1.0 / (fov_y * 0.5).tan();
-    let nf = 1.0 / (near - far);
-    [
-        f / aspect, 0.0, 0.0,                     0.0,
-        0.0,        f,   0.0,                     0.0,
-        0.0,        0.0, (far + near) * nf,      -1.0,
-        0.0,        0.0, 2.0 * far * near * nf,   0.0,
-    ]
-}
-
-fn scale4(s: f32) -> [f32; 16] {
-    [
-        s,   0.0, 0.0, 0.0,
-        0.0, s,   0.0, 0.0,
-        0.0, 0.0, s,   0.0,
-        0.0, 0.0, 0.0, 1.0,
-    ]
-}
-
-fn cross3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-fn normalize3(v: [f32; 3]) -> [f32; 3] {
-    let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-12);
-    [v[0] / l, v[1] / l, v[2] / l]
-}
+// `look_at` / `perspective` / `scale4` / `cross3` / `dot3` /
+// `normalize3` previously lived here as hand-rolled matrix helpers.
+// `build_mvp` now uses `glam::Mat4` directly, so those helpers are
+// gone — the few external callers route through `crate::camera`'s
+// public wrappers (`mul4`, `inverse4`, `transform_point4`).

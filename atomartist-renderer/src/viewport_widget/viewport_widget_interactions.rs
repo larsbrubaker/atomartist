@@ -4,40 +4,23 @@
 //! handling stay below the repository file-size guardrail.
 
 use super::*;
+use crate::picking::raycast_mesh;
 
 impl Viewport3dWidget {
-    /// Compute the world-space pivot for an orbit drag started at the
-    /// given widget-local cursor position.
-    ///
-    /// 1. If the cursor's ray hits the live mesh, the hit point becomes
-    ///    the new orbit center and the eye-to-hit distance becomes the
-    ///    new orbit radius.
-    /// 2. If the cursor misses, project the ray onto the plane through
-    ///    the current `center` perpendicular to forward (matches
-    ///    MatterCAD / NodeDesigner).
-    ///
-    /// `pos` is the agg-gui Y-up local coord; we flip Y to top-down for
-    /// `screen_to_ray` since that's the convention the unprojection
-    /// expects.
-    fn orbit_pivot_from_cursor(&self, pos: Point) -> ([f32; 3], f32) {
-        let w = self.bounds.width.max(1.0);
-        let h = self.bounds.height.max(1.0);
-        // agg-gui events are in widget-local Y-up coords. screen_to_ray
-        // expects top-down (origin top-left), so flip Y.
-        let cursor_top_down = (pos.x, h - pos.y);
+    /// Resolve the orbit pivot for a cursor at widget-local `pos`
+    /// and return `(pivot_world_pos, orbit_radius)`. Updates the
+    /// widget's stored `mouse_down_world_pos` and `hit_plane` as a
+    /// side effect so subsequent pan / wheel events share the same
+    /// interaction plane.
+    fn orbit_pivot_from_cursor(&mut self, pos: Point) -> ([f32; 3], f32) {
+        let res = self.refresh_pivot(pos);
         let cam = self.cam();
-        let (origin, dir) = cam.screen_to_ray(cursor_top_down, (w, h));
-        let pivot = match self.current_mesh().as_ref() {
-            Some(mesh) => raycast_mesh(mesh, origin, dir)
-                .unwrap_or_else(|| project_to_view_plane(&cam, origin, dir)),
-            None => project_to_view_plane(&cam, origin, dir),
-        };
         let eye = cam.eye();
-        let dx = pivot[0] - eye[0];
-        let dy = pivot[1] - eye[1];
-        let dz = pivot[2] - eye[2];
+        let dx = res.world_pos[0] - eye[0];
+        let dy = res.world_pos[1] - eye[1];
+        let dz = res.world_pos[2] - eye[2];
         let radius = (dx * dx + dy * dy + dz * dz).sqrt().max(0.05);
-        (pivot, radius)
+        (res.world_pos, radius)
     }
 
     pub(super) fn on_mouse_down(&mut self, pos: Point, button: MouseButton, mods: Modifiers) -> EventResult {
@@ -54,10 +37,11 @@ impl Viewport3dWidget {
                 EventResult::Consumed
             }
             MouseButton::Middle => {
-                self.drag = CameraDrag::Pan {
-                    start_local: pos,
-                    start_center: self.cam().center,
-                };
+                // Resolve the pivot+plane up-front so the on-move
+                // pan math can ray-intersect against the saved
+                // plane every frame.
+                self.refresh_pivot(pos);
+                self.drag = CameraDrag::Pan { last_local: pos };
                 EventResult::Consumed
             }
             MouseButton::Left => {
@@ -71,10 +55,8 @@ impl Viewport3dWidget {
                     };
                     EventResult::Consumed
                 } else if mods.ctrl && mods.shift {
-                    self.drag = CameraDrag::Pan {
-                        start_local: pos,
-                        start_center: cam_snapshot.center,
-                    };
+                    self.refresh_pivot(pos);
+                    self.drag = CameraDrag::Pan { last_local: pos };
                     EventResult::Consumed
                 } else if mods.ctrl {
                     let (pivot, radius) = self.orbit_pivot_from_cursor(pos);
@@ -109,10 +91,8 @@ impl Viewport3dWidget {
                             self.drag = CameraDrag::Orbit { last_local: pos };
                         }
                         ViewportTool::Pan => {
-                            self.drag = CameraDrag::Pan {
-                                start_local: pos,
-                                start_center: cam_snapshot.center,
-                            };
+                            self.refresh_pivot(pos);
+                            self.drag = CameraDrag::Pan { last_local: pos };
                         }
                         ViewportTool::Zoom => {
                             self.drag = CameraDrag::Zooming {
@@ -158,21 +138,38 @@ impl Viewport3dWidget {
                 *last_local = pos;
                 EventResult::Consumed
             }
-            CameraDrag::Pan { start_local, start_center } => {
-                let dx = (pos.x - start_local.x) as f32;
-                let dy = (pos.y - start_local.y) as f32;
-                let mut c = self.inputs.camera.lock().unwrap();
-                // Pan scales with distance so the world point under the
-                // cursor stays roughly under the cursor. Drag-down (negative
-                // dy in agg-gui Y-up coords) lowers the look-at point — see
-                // `OrbitCamera::pan` and the regression test for the bug.
-                let pan_scale = c.radius * 0.0025;
-                let (right, up, _fwd) = c.basis();
-                c.center = [
-                    start_center[0] - right[0] * dx * pan_scale - up[0] * dy * pan_scale,
-                    start_center[1] - right[1] * dx * pan_scale - up[1] * dy * pan_scale,
-                    start_center[2] - right[2] * dx * pan_scale - up[2] * dy * pan_scale,
-                ];
+            CameraDrag::Pan { last_local } => {
+                // MatterCAD-style plane-anchored pan: intersect the
+                // stored `hit_plane` with both the previous and
+                // current cursor rays, then shift `center` by the
+                // world delta. The world point that was under the
+                // cursor on `last` ends up under the cursor again,
+                // no matter how the projection / camera distance
+                // changes — port of
+                // `TrackballTumbleWidgetExtended.Translate`.
+                let last = *last_local;
+                *last_local = pos;
+                let plane = self.hit_plane;
+                let w = self.bounds.width.max(1.0);
+                let h = self.bounds.height.max(1.0);
+                let last_cursor_td = (last.x, h - last.y);
+                let curr_cursor_td = (pos.x, h - pos.y);
+                let (last_o, last_d, curr_o, curr_d) = {
+                    let cam = self.cam();
+                    let (lo, ld) = cam.screen_to_ray(last_cursor_td, (w, h));
+                    let (co, cd) = cam.screen_to_ray(curr_cursor_td, (w, h));
+                    (lo, ld, co, cd)
+                };
+                let p_last = plane.ray_intersect(last_o, last_d);
+                let p_curr = plane.ray_intersect(curr_o, curr_d);
+                if let (Some(p_last), Some(p_curr)) = (p_last, p_curr) {
+                    let mut c = self.inputs.camera.lock().unwrap();
+                    c.center = [
+                        c.center[0] - (p_curr[0] - p_last[0]),
+                        c.center[1] - (p_curr[1] - p_last[1]),
+                        c.center[2] - (p_curr[2] - p_last[2]),
+                    ];
+                }
                 EventResult::Consumed
             }
             CameraDrag::Zooming { start_local, start_radius } => {
@@ -230,12 +227,32 @@ impl Viewport3dWidget {
         }
     }
 
-    pub(super) fn on_wheel(&mut self, delta_y: f64) -> EventResult {
+    /// Zoom-to-cursor: re-picks the scene at `pos` (mirrors
+    /// MatterCAD's `if (TryResolveSceneOrFallbackHit(...)) {
+    /// hitPlane = ...; ZoomToWorldPosition(...); mouseDownWorldPosition = ...; }`
+    /// path), then scales the orbit radius about that pivot so the
+    /// world point under the cursor stays under the cursor across
+    /// the zoom step.
+    pub(super) fn on_wheel_at_pos(&mut self, pos: Point, delta_y: f64) -> EventResult {
         if delta_y == 0.0 {
             return EventResult::Ignored;
         }
-        let factor = if delta_y > 0.0 { 0.9 } else { 1.0 / 0.9 };
-        self.cam_mut(|c| c.zoom(factor as f32));
+        let factor = if delta_y > 0.0 { 0.9 } else { 1.0 / 0.9 } as f32;
+        // Update pivot + plane from the current wheel position.
+        let res = self.refresh_pivot(pos);
+        let pivot = res.world_pos;
+        {
+            let mut c = self.inputs.camera.lock().unwrap();
+            // Translate the centre so the pivot stays at the same
+            // world-relative-to-centre offset times the new scale.
+            // Equivalently: center = pivot + (center - pivot) * factor.
+            c.center = [
+                pivot[0] + (c.center[0] - pivot[0]) * factor,
+                pivot[1] + (c.center[1] - pivot[1]) * factor,
+                pivot[2] + (c.center[2] - pivot[2]) * factor,
+            ];
+            c.zoom(factor);
+        }
         EventResult::Consumed
     }
 

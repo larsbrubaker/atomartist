@@ -4,8 +4,16 @@
 //! `Animation::request_draw` redraw loop in `Viewport3dWidget` and
 //! are stepped from the viewport's per-frame `tick_*_animation`
 //! helpers.
+//!
+//! Orientation interpolation uses `Quat::slerp`, matching MatterCAD's
+//! `Quaternion.Slerp(rotationStart, rotationEnd, t)` in
+//! `TrackballTumbleWidgetExtended.AnimateRotation`. The old
+//! `(azimuth, elevation)` Euler lerp had subtle wrong-way-around
+//! glitches whenever the target azimuth crossed ±π; with `slerp` the
+//! interpolation always takes the short path on the unit sphere
+//! by construction.
 
-use std::f32::consts::PI;
+use glam::{Quat, Vec3};
 
 use super::camera::{OrbitCamera, Projection};
 
@@ -18,19 +26,17 @@ use super::camera::{OrbitCamera, Projection};
 
 /// Smooth interpolation between two camera orientations.
 ///
-/// The animation holds the *target* orbit pose and a remaining fractional
-/// progress.  Each `step` advances progress by `dt / duration` and applies
-/// an eased blend between the start and target azimuth/elevation/center,
-/// writing the result back to the camera.  Callers ping `is_done` to
-/// know when the cube widget should drop the animation handle.
+/// Holds start and target quaternions and lerps the orbit centre
+/// alongside; each `step` advances progress by `dt / duration` and
+/// applies an eased blend via `Quat::slerp`, writing the result back
+/// to the camera.  Callers ping `is_done` to know when the cube
+/// widget should drop the animation handle.
 #[derive(Clone, Debug)]
 pub struct OrientAnimation {
-    start_az: f32,
-    start_el: f32,
-    start_center: [f32; 3],
-    target_az: f32,
-    target_el: f32,
-    target_center: [f32; 3],
+    start_orientation: Quat,
+    target_orientation: Quat,
+    start_center: Vec3,
+    target_center: Vec3,
     /// 0.0 → not started; 1.0 → finished.
     progress: f32,
     duration: f32,
@@ -49,11 +55,7 @@ pub struct CameraPoseAnimation {
 }
 
 impl CameraPoseAnimation {
-    pub fn new(start: &OrbitCamera, mut target: OrbitCamera, duration: f32) -> Self {
-        let mut delta = target.azimuth - start.azimuth;
-        while delta > PI { delta -= 2.0 * PI; }
-        while delta < -PI { delta += 2.0 * PI; }
-        target.azimuth = start.azimuth + delta;
+    pub fn new(start: &OrbitCamera, target: OrbitCamera, duration: f32) -> Self {
         Self {
             start: start.clone(),
             target,
@@ -64,12 +66,14 @@ impl CameraPoseAnimation {
 
     pub fn step(&mut self, camera: &mut OrbitCamera, dt: f32) -> bool {
         self.progress = (self.progress + dt / self.duration).min(1.0);
-        let t = self.progress;
-        let s = t * t * (3.0 - 2.0 * t);
+        let s = smoothstep01(self.progress);
         camera.center = lerp3(self.start.center, self.target.center, s);
         camera.radius = lerp(self.start.radius, self.target.radius, s);
-        camera.azimuth = lerp(self.start.azimuth, self.target.azimuth, s);
-        camera.elevation = lerp(self.start.elevation, self.target.elevation, s);
+        camera.orientation = self
+            .start
+            .orientation
+            .slerp(self.target.orientation, s)
+            .normalize();
         camera.fov_y = lerp(self.start.fov_y, self.target.fov_y, s);
         camera.near = lerp(self.start.near, self.target.near, s);
         camera.far = lerp(self.start.far, self.target.far, s);
@@ -193,24 +197,16 @@ fn smoothstep01(t: f32) -> f32 {
 }
 
 impl OrientAnimation {
-    /// Build an animation that takes the camera from its current pose to
-    /// `(target_az, target_el)` (centre held).  `duration` is in seconds —
-    /// 0.25 s matches MatterCAD's `AnimateRotation` length.
-    pub fn to_orientation(camera: &OrbitCamera, target_az: f32, target_el: f32, duration: f32) -> Self {
-        // Pick the shortest signed azimuth delta so the rotation goes the
-        // "near way around".  Without this, a click on Right from a
-        // slightly-past-Right view would spin the long way around.
-        let start_az = camera.azimuth;
-        let mut delta = target_az - start_az;
-        while delta > PI { delta -= 2.0 * PI; }
-        while delta < -PI { delta += 2.0 * PI; }
+    /// Build an animation that takes the camera from its current
+    /// pose to `target_orientation` (centre held). `duration` is in
+    /// seconds — 0.25 s matches MatterCAD's `AnimateRotation` length.
+    /// Mirrors `Quaternion.Slerp(rotationStart, rotationEnd, t)`.
+    pub fn to_orientation(camera: &OrbitCamera, target_orientation: Quat, duration: f32) -> Self {
         Self {
-            start_az,
-            start_el: camera.elevation,
-            start_center: camera.center,
-            target_az: start_az + delta,
-            target_el: target_el,
-            target_center: camera.center,
+            start_orientation: camera.orientation,
+            target_orientation: target_orientation.normalize(),
+            start_center: Vec3::from(camera.center),
+            target_center: Vec3::from(camera.center),
             progress: 0.0,
             duration: duration.max(1e-3),
         }
@@ -220,23 +216,21 @@ impl OrientAnimation {
         self.progress >= 1.0
     }
 
-    /// Advance the animation by `dt` seconds, write the eased orientation
-    /// into `camera`, and return `true` if the animation finished on this
-    /// step (so callers can drop the handle).
+    /// Advance the animation by `dt` seconds, write the eased
+    /// orientation into `camera`, and return `true` if the animation
+    /// finished on this step (so callers can drop the handle).
     pub fn step(&mut self, camera: &mut OrbitCamera, dt: f32) -> bool {
         if self.progress >= 1.0 {
             return false;
         }
         self.progress = (self.progress + dt / self.duration).min(1.0);
-        // Smoothstep eases the rotation in and out, giving the cube-snap
-        // a more deliberate, MatterCAD-like feel than a linear blend.
-        let t = self.progress;
-        let s = t * t * (3.0 - 2.0 * t);
-        camera.azimuth = self.start_az * (1.0 - s) + self.target_az * s;
-        camera.elevation = self.start_el * (1.0 - s) + self.target_el * s;
-        for i in 0..3 {
-            camera.center[i] = self.start_center[i] * (1.0 - s) + self.target_center[i] * s;
-        }
+        let s = smoothstep01(self.progress);
+        camera.orientation = self
+            .start_orientation
+            .slerp(self.target_orientation, s)
+            .normalize();
+        let c = self.start_center.lerp(self.target_center, s);
+        camera.center = c.to_array();
         self.progress >= 1.0
     }
 }

@@ -6,33 +6,35 @@
 //! ported MatterCAD `ConnectedFaces` table lines up.
 //!
 //! Coordinate convention: cube lives in `[-1, +1]^3` around the origin
-//! in AtomArtist's **Y-up** world (MatterCAD itself is Z-up; we
-//! reinterpret the face labels into Y-up here so the cube's orientation
-//! matches the main viewport's `OrbitCamera`).
-//!
-//! Label / world mapping:
+//! in AtomArtist's **Z-up** world (matching MatterCAD). The labels on
+//! the cube correspond to the user's mental model of the bed:
 //!
 //! | Label  | Outward normal | Camera that "shows" this face |
 //! |--------|---------------|-------------------------------|
-//! | Top    | (0, +1, 0)    | camera above (+Y)             |
-//! | Bottom | (0, -1, 0)    | camera below (-Y)             |
-//! | Front  | (0, 0, +1)    | camera in front (+Z)          |
-//! | Back   | (0, 0, -1)    | camera behind (-Z)            |
+//! | Top    | (0, 0, +1)    | camera above the bed (+Z)     |
+//! | Bottom | (0, 0, -1)    | camera below the bed (-Z)     |
 //! | Right  | (+1, 0, 0)    | camera to the right (+X)      |
 //! | Left   | (-1, 0, 0)    | camera to the left (-X)       |
+//! | Front  | (0, -1, 0)    | camera at -Y (looking +Y)     |
+//! | Back   | (0, +1, 0)    | camera at +Y (looking -Y)     |
 //!
 //! Per-face vertex order is strictly `[BL, BR, TR, TL]` from the
 //! *external viewer*'s perspective (viewer outside the cube looking
-//! at the face from along its outward normal). UVs `[(0,1), (1,1),
-//! (1,0), (0,0)]` map BL → texture-bottom-left etc., so a top-down
-//! stored label appears right-side-up on the face.
+//! at the face from along its outward normal, with the conventional
+//! screen-up direction for that view). UVs `[(0,1), (1,1), (1,0),
+//! (0,0)]` map BL → texture-bottom-left etc., so a top-down stored
+//! label appears right-side-up on the face.
 //!
-//! Each face's "up" direction for the viewer:
-//! - Top / Bottom: `+/-Z` (since +Y is the face normal, we need a
-//!   horizontal world axis as label-up — `-Z` for Top so "top of label"
-//!   points toward Back; `+Z` for Bottom).
-//! - All four side faces (Front / Back / Left / Right): `+Y` (label
-//!   reads upright when the cube is at default view).
+//! Each face's "label-up" direction in world (the visual top of the
+//! label image when looking at the face):
+//! - Top: viewer above looking down. Screen-up = world +Y (CAD
+//!   convention: world +Y reads as the top of the screen in top
+//!   view), so the label "Top" reads with its top toward +Y.
+//! - Bottom: viewer below looking up. Screen-up = world -Y (the
+//!   reflection of the Top case).
+//! - All four side faces (Right / Left / Front / Back): label-up =
+//!   +Z (world up), so the label reads upright when the cube is in
+//!   any side-view orientation.
 
 /// Logical face indices.  Must match the order of the `connections`
 /// table in [`super::hit_test`] so face-index ↔ ConnectedFaces lookup
@@ -72,16 +74,16 @@ impl Face {
         }
     }
 
-    /// World-space outward normal of the face on the unit cube (Y-up
-    /// world).  Matches the table at the top of the module.
+    /// World-space outward normal of the face on the unit cube
+    /// (Z-up world). Matches the table at the top of the module.
     pub fn normal(self) -> [f32; 3] {
         match self {
-            Face::Top => [0.0, 1.0, 0.0],
-            Face::Bottom => [0.0, -1.0, 0.0],
-            Face::Front => [0.0, 0.0, 1.0],
-            Face::Back => [0.0, 0.0, -1.0],
+            Face::Top => [0.0, 0.0, 1.0],
+            Face::Bottom => [0.0, 0.0, -1.0],
             Face::Right => [1.0, 0.0, 0.0],
             Face::Left => [-1.0, 0.0, 0.0],
+            Face::Front => [0.0, -1.0, 0.0],
+            Face::Back => [0.0, 1.0, 0.0],
         }
     }
 }
@@ -104,67 +106,88 @@ pub fn build_cube() -> (Vec<CubeVertex>, Vec<u32>) {
     let mut verts: Vec<CubeVertex> = Vec::with_capacity(24);
     let mut idx: Vec<u32> = Vec::with_capacity(36);
 
-    // Corners derived in the module-level header.  Each row is the
-    // exact `[BL, BR, TR, TL]` from the face's external viewer.
+    // Per-face corner ordering. For each face we sit at the outward
+    // normal looking toward the origin (the "external viewer"), with
+    // the chosen screen-up direction, and label the four corners
+    // `[BL, BR, TR, TL]`. The bed lies in the XY plane with +Z up.
     let faces_corners: [(Face, [[f32; 3]; 4]); 6] = [
-        // Top (+Y); viewer above looking down; label-up = -Z.
+        // Top (+Z); viewer above looking down (-Z forward), label-up
+        // = world +Y. Right of viewer = world +X.
+        //   BL = (-X, -Y, +Z), BR = (+X, -Y, +Z),
+        //   TR = (+X, +Y, +Z), TL = (-X, +Y, +Z).
         (
             Face::Top,
             [
-                [-1.0, 1.0, 1.0],   // BL: -X, +Z (viewer's bottom-left)
-                [1.0, 1.0, 1.0],    // BR
-                [1.0, 1.0, -1.0],   // TR
-                [-1.0, 1.0, -1.0],  // TL
+                [-1.0, -1.0, 1.0],
+                [1.0, -1.0, 1.0],
+                [1.0, 1.0, 1.0],
+                [-1.0, 1.0, 1.0],
             ],
         ),
-        // Left (-X); viewer at -X looking toward +X; label-up = +Y.
+        // Left (-X); viewer at -X looking +X, screen-up = +Z. By
+        // glam's right-handed `look_at` convention (right = forward
+        // × up_hint), the viewer's right axis here is world -Y.
+        //   BL = (-X, +Y, -Z), BR = (-X, -Y, -Z),
+        //   TR = (-X, -Y, +Z), TL = (-X, +Y, +Z).
         (
             Face::Left,
             [
-                [-1.0, -1.0, -1.0], // BL
-                [-1.0, -1.0, 1.0],  // BR
-                [-1.0, 1.0, 1.0],   // TR
-                [-1.0, 1.0, -1.0],  // TL
+                [-1.0, 1.0, -1.0],
+                [-1.0, -1.0, -1.0],
+                [-1.0, -1.0, 1.0],
+                [-1.0, 1.0, 1.0],
             ],
         ),
-        // Right (+X); viewer at +X looking toward -X; label-up = +Y.
+        // Right (+X); viewer at +X looking -X, screen-up = +Z. Right
+        // axis = world +Y.
+        //   BL = (+X, -Y, -Z), BR = (+X, +Y, -Z),
+        //   TR = (+X, +Y, +Z), TL = (+X, -Y, +Z).
         (
             Face::Right,
             [
-                [1.0, -1.0, 1.0],   // BL
-                [1.0, -1.0, -1.0],  // BR
-                [1.0, 1.0, -1.0],   // TR
-                [1.0, 1.0, 1.0],    // TL
+                [1.0, -1.0, -1.0],
+                [1.0, 1.0, -1.0],
+                [1.0, 1.0, 1.0],
+                [1.0, -1.0, 1.0],
             ],
         ),
-        // Bottom (-Y); viewer below looking up; label-up = +Z.
+        // Bottom (-Z); viewer below looking up. Label-up = world -Y
+        // (mirror of Top). Right of viewer = world +X.
+        //   BL = (-X, +Y, -Z), BR = (+X, +Y, -Z),
+        //   TR = (+X, -Y, -Z), TL = (-X, -Y, -Z).
         (
             Face::Bottom,
             [
-                [-1.0, -1.0, -1.0], // BL
-                [1.0, -1.0, -1.0],  // BR
-                [1.0, -1.0, 1.0],   // TR
-                [-1.0, -1.0, 1.0],  // TL
+                [-1.0, 1.0, -1.0],
+                [1.0, 1.0, -1.0],
+                [1.0, -1.0, -1.0],
+                [-1.0, -1.0, -1.0],
             ],
         ),
-        // Back (-Z); viewer at -Z looking toward +Z; label-up = +Y.
+        // Back (+Y); viewer at +Y looking -Y. Label-up = +Z. World
+        // +X is on the viewer's LEFT (looking down -Y).
+        //   BL = (+X, +Y, -Z), BR = (-X, +Y, -Z),
+        //   TR = (-X, +Y, +Z), TL = (+X, +Y, +Z).
         (
             Face::Back,
             [
-                [1.0, -1.0, -1.0],  // BL
-                [-1.0, -1.0, -1.0], // BR
-                [-1.0, 1.0, -1.0],  // TR
-                [1.0, 1.0, -1.0],   // TL
+                [1.0, 1.0, -1.0],
+                [-1.0, 1.0, -1.0],
+                [-1.0, 1.0, 1.0],
+                [1.0, 1.0, 1.0],
             ],
         ),
-        // Front (+Z); viewer at +Z looking toward -Z; label-up = +Y.
+        // Front (-Y); viewer at -Y looking +Y. Label-up = +Z. World
+        // +X is on the viewer's RIGHT (looking down +Y).
+        //   BL = (-X, -Y, -Z), BR = (+X, -Y, -Z),
+        //   TR = (+X, -Y, +Z), TL = (-X, -Y, +Z).
         (
             Face::Front,
             [
-                [-1.0, -1.0, 1.0],  // BL
-                [1.0, -1.0, 1.0],   // BR
-                [1.0, 1.0, 1.0],    // TR
-                [-1.0, 1.0, 1.0],   // TL
+                [-1.0, -1.0, -1.0],
+                [1.0, -1.0, -1.0],
+                [1.0, -1.0, 1.0],
+                [-1.0, -1.0, 1.0],
             ],
         ),
     ];
@@ -220,8 +243,6 @@ mod tests {
 
     #[test]
     fn first_corner_of_each_face_is_bottom_left_in_viewer_frame() {
-        // BL = smallest projection along both viewer's "right" and
-        // viewer's "up" axes.  Equivalent: BL has UV = (0, 1).
         let (v, _) = build_cube();
         for f in Face::ALL.iter() {
             let face_idx = *f as usize;
@@ -244,9 +265,8 @@ mod tests {
 
     #[test]
     fn face_winding_is_ccw_from_outside() {
-        // Edge BL->BR and BL->TL should be perpendicular in world
-        // space; their cross product should align with the face's
-        // outward normal (positive dot).
+        // Edge BL->BR and BL->TL cross product should point in the
+        // face's outward normal direction.
         let (v, _) = build_cube();
         for f in Face::ALL.iter() {
             let face_idx = *f as usize;

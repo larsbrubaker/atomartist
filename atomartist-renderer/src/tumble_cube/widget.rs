@@ -22,6 +22,7 @@ use agg_gui::{
     Color, DrawCtx, Event, EventResult, HAnchor, MouseButton, Point, Rect, Size,
     VAnchor, Widget, WidgetBase,
 };
+use glam::Quat;
 
 use super::cube_geometry::Face;
 use super::face_textures::{
@@ -55,14 +56,13 @@ enum CubeDrag {
     /// `Rotating` once threshold passed, or treated as a click on
     /// mouse-up otherwise.
     Pending { start_local: Point },
-    /// Drag is rotating the main camera; `start_az` / `start_el` capture
-    /// the orientation at the drag's start so the math is stable across
-    /// the gesture.
-    Rotating {
-        start_local: Point,
-        start_az: f32,
-        start_el: f32,
-    },
+    /// Drag is rotating the main camera. We track the previous cursor
+    /// sample so each `MouseMove` can apply an incremental rotation
+    /// via `OrbitCamera::orbit_drag`, which honours the active
+    /// `OrbitMode`. Mirrors MatterCAD's
+    /// `DoRotateAroundOrigin` which updates
+    /// `rotationStartPosition = mousePosition` per frame.
+    Rotating { last_local: Point },
 }
 
 pub struct TumbleCubeWidget {
@@ -120,15 +120,14 @@ impl TumbleCubeWidget {
 
     /// Convenience for tests: drive an orient animation to completion
     /// against the given camera handle.  Used by the orient test to
-    /// verify the cube can converge a Face::Front click to `(0, 0)`.
+    /// verify the cube can converge a Face::Front click to identity.
     pub fn orient_to_face(&mut self, face: Face) {
         let cam = self.inputs.camera.lock().unwrap().clone();
         let hit = HitData::single(face as u8, 4);
         let Some(target) = target_for_hit(hit) else { return };
         self.animation = Some(OrientAnimation::to_orientation(
             &cam,
-            target.azimuth,
-            target.elevation,
+            target.orientation,
             0.25,
         ));
         request_draw();
@@ -192,12 +191,11 @@ impl TumbleCubeWidget {
     /// the cube's mini-viewport, then resolve to `HitData`.
     fn hit_for_local_pos(&self, pos: Point) -> HitData {
         let (w, h) = (self.bounds.width.max(1.0), self.bounds.height.max(1.0));
-        let cam_state = self.cube_camera_snapshot();
+        let cam_orientation = self.cube_camera_snapshot();
         // Build a tiny `OrbitCamera` configured the same way the cube
         // renderer is, then reuse `screen_to_ray` for the unprojection.
         let mut tmp = OrbitCamera::default();
-        tmp.azimuth = cam_state.0;
-        tmp.elevation = cam_state.1;
+        tmp.orientation = cam_orientation;
         tmp.radius = TUMBLE_CUBE_CAMERA_RADIUS;
         tmp.center = [0.0, 0.0, 0.0];
         // Flip Y because screen_to_ray expects top-down coords.
@@ -215,10 +213,9 @@ impl TumbleCubeWidget {
         }
     }
 
-    /// Snapshot `(azimuth, elevation)` from the shared main camera.
-    fn cube_camera_snapshot(&self) -> (f32, f32) {
-        let c = self.inputs.camera.lock().unwrap();
-        (c.azimuth, c.elevation)
+    /// Snapshot the orientation quaternion from the shared main camera.
+    fn cube_camera_snapshot(&self) -> Quat {
+        self.inputs.camera.lock().unwrap().orientation
     }
 
     /// Push the renderer's custom-render command into the wgpu context,
@@ -305,11 +302,11 @@ impl Widget for TumbleCubeWidget {
         // Sync the cube renderer's CPU face buffer to the latest hover
         // state and mirror the main camera's orientation.
         let faces = self.faces_cpu.borrow();
-        let (az, el) = self.cube_camera_snapshot();
+        let orientation = self.cube_camera_snapshot();
         {
             let mut s = self.scene.borrow_mut();
             s.faces_cpu = faces.clone_for_renderer();
-            s.set_orientation(az, el);
+            s.set_orientation(orientation);
         }
         drop(faces);
 
@@ -342,10 +339,7 @@ impl TumbleCubeWidget {
         if button != MouseButton::Left {
             return EventResult::Ignored;
         }
-        let (start_az, start_el) = self.cube_camera_snapshot();
-        let _ = start_el; // kept for clarity; pending uses local pos only
         self.drag = CubeDrag::Pending { start_local: pos };
-        let _ = start_az;
         // Cancel any in-flight animation so the user takes direct
         // control of the camera.
         self.animation = None;
@@ -355,37 +349,30 @@ impl TumbleCubeWidget {
     fn on_mouse_move(&mut self, pos: Point) -> EventResult {
         // Promote pending to rotating once the user has moved enough,
         // matching MatterCAD's drag threshold.
-        let promote = matches!(
-            self.drag,
-            CubeDrag::Pending { start_local } if (pos.x - start_local.x).abs() > 2.0
-                || (pos.y - start_local.y).abs() > 2.0
-        );
-        if promote {
-            let (az, el) = self.cube_camera_snapshot();
-            if let CubeDrag::Pending { start_local } = self.drag {
-                self.drag = CubeDrag::Rotating {
-                    start_local,
-                    start_az: az,
-                    start_el: el,
-                };
+        if let CubeDrag::Pending { start_local } = self.drag {
+            if (pos.x - start_local.x).abs() > 2.0 || (pos.y - start_local.y).abs() > 2.0 {
+                self.drag = CubeDrag::Rotating { last_local: start_local };
             }
         }
 
-        match self.drag {
-            CubeDrag::Rotating { start_local, start_az, start_el } => {
-                let dx = (pos.x - start_local.x) as f32;
-                let dy = (pos.y - start_local.y) as f32;
+        match &mut self.drag {
+            CubeDrag::Rotating { last_local } => {
+                let dx = (pos.x - last_local.x) as f32;
+                let dy = (pos.y - last_local.y) as f32;
                 let scale = 0.01;
-                let mut c = self.inputs.camera.lock().unwrap();
-                // Match the viewport's right-drag direction (drag right
-                // = world follows finger = azimuth decreases).
-                c.azimuth = start_az - dx * scale;
-                c.elevation = start_el - dy * scale;
-                let limit = std::f32::consts::PI * 0.49;
-                c.elevation = c.elevation.clamp(-limit, limit);
+                // Match the viewport's right-drag direction (drag
+                // right = world follows finger). The HUD's orbit code
+                // applies the same negation; do it here too so the
+                // cube's incremental orbit_drag receives consistent
+                // signs regardless of `orbit_mode`.
+                self.inputs
+                    .camera
+                    .lock()
+                    .unwrap()
+                    .orbit_drag(-dx * scale, -dy * scale);
+                *last_local = pos;
                 // Clear hover overlays during drag — the cursor isn't
                 // hovering a tile, it's manipulating the cube.
-                drop(c);
                 if !matches!(self.last_hit, HitData { face_tile: [None, None, None] }) {
                     self.apply_hit_overlay(HitData::empty());
                     self.last_hit = HitData::empty();
@@ -417,10 +404,10 @@ impl TumbleCubeWidget {
                 let dy = (pos.y - start_local.y).abs();
                 if dx <= 2.0 && dy <= 2.0 {
                     let hit = self.hit_for_local_pos(pos);
-                    if let Some(TargetPose { azimuth, elevation }) = target_for_hit(hit) {
+                    if let Some(TargetPose { orientation }) = target_for_hit(hit) {
                         let cam = self.inputs.camera.lock().unwrap().clone();
                         self.animation = Some(OrientAnimation::to_orientation(
-                            &cam, azimuth, elevation, 0.25,
+                            &cam, orientation, 0.25,
                         ));
                         request_draw();
                     }
@@ -466,8 +453,9 @@ mod tests {
         let camera = Arc::new(Mutex::new(OrbitCamera::default()));
         {
             let mut c = camera.lock().unwrap();
-            c.azimuth = 1.25;
-            c.elevation = 0.65;
+            // Start away from Front so the test verifies the
+            // animation actually moves the orientation.
+            c.orientation = Quat::from_rotation_y(1.25) * Quat::from_rotation_x(-0.65);
         }
 
         let completed = Arc::new(AtomicUsize::new(0));
@@ -494,16 +482,13 @@ mod tests {
         assert!(!widget.animation_active(), "animation should run to completion");
         assert_eq!(completed.load(Ordering::SeqCst), 1, "completion hook should fire once");
 
+        // Z-up Front view: camera at -Y looking +Y. The orientation's
+        // back vector (eye-from-centre) lands on -Y.
         let c = camera.lock().unwrap();
+        let back = c.orientation * glam::Vec3::Z;
         assert!(
-            c.azimuth.abs() < 1e-3,
-            "Front orientation should end at azimuth 0, got {}",
-            c.azimuth
-        );
-        assert!(
-            c.elevation.abs() < 1e-3,
-            "Front orientation should end at elevation 0, got {}",
-            c.elevation
+            (back - glam::Vec3::NEG_Y).length() < 1e-3,
+            "Front view should land at back = -Y, got {back:?}"
         );
     }
 

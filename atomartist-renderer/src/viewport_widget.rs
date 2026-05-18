@@ -35,9 +35,11 @@ use agg_gui::{
 use atomartist_lib::graph::node::NodeId;
 use manifold_rust::types::MeshGL;
 
-use crate::camera::{mul4, transform_point4, OrbitCamera};
+use glam::Mat4;
+
+use crate::camera::{transform_point4, OrbitCamera};
 use crate::camera_animations::{CameraPoseAnimation, ProjectionAnimation};
-use crate::picking::{project_to_view_plane, raycast_mesh};
+use crate::picking::{resolve_pivot_or_fallback, HitPlane, PivotResolution};
 use crate::scene_renderer::{RenderStyle, WgpuSceneRenderer};
 
 /// Default left-mouse-drag behaviour, picked by the radio cluster of
@@ -128,7 +130,12 @@ enum CameraDrag {
     /// regardless of mode — see `OrbitCamera::orbit_drag` for the
     /// per-mode math.
     Orbit { last_local: Point },
-    Pan { start_local: Point, start_center: [f32; 3] },
+    /// MatterCAD-style pan: each `MouseMove` re-intersects the
+    /// stored `hit_plane` with the previous and current cursor rays
+    /// and shifts the camera centre by the world delta, so the
+    /// original world point under the cursor follows the cursor
+    /// across the drag.
+    Pan { last_local: Point },
     /// Left-button down — pending selection.  Becomes a click-or-drag
     /// selection on mouse-up (Phase A4 wires the selection write).
     Selecting { start_local: Point, moved: bool },
@@ -156,6 +163,23 @@ pub struct Viewport3dWidget {
     /// backend, or pre-wgpu agg-gui) the widget falls through to the
     /// wireframe path that uses only the 2-D `DrawCtx`.
     scene: Rc<RefCell<WgpuSceneRenderer>>,
+    /// World point of the most recent mouse-down (or wheel-zoom) —
+    /// MatterCAD's `mouseDownWorldPosition`. Anchors pan/rotate/
+    /// wheel-zoom to a fixed world location across each drag, and
+    /// drives the on-screen rotate cursor.
+    mouse_down_world_pos: [f32; 3],
+    /// Plane stored alongside `mouse_down_world_pos`. For mesh hits
+    /// it is perpendicular to the screen-centre view direction; for
+    /// the empty-scene case it is the bed (Z=0). Pan and wheel-zoom
+    /// re-intersect this plane every frame.
+    hit_plane: HitPlane,
+    /// Whether the last mouse-down landed on a real scene mesh.
+    /// `true` → the circle cursor renders the "pivot on part"
+    /// treatment; `false` → bed / view-plane fallback. The
+    /// distinction is reserved for richer cursor styling later;
+    /// the current circle uses the accent colour either way.
+    #[allow(dead_code)]
+    pivot_on_scene: bool,
 }
 
 impl Viewport3dWidget {
@@ -172,7 +196,53 @@ impl Viewport3dWidget {
             last_aabb: None,
             bg_color: Color::rgb(0.10, 0.11, 0.13),
             scene: Rc::new(RefCell::new(WgpuSceneRenderer::new())),
+            mouse_down_world_pos: [0.0, 0.0, 0.0],
+            // Default plane: XY at Z=0 (the bed). Updated on every
+            // mouse-down / wheel-zoom via `resolve_pivot_or_fallback`.
+            hit_plane: HitPlane {
+                point: [0.0, 0.0, 0.0],
+                normal: [0.0, 0.0, 1.0],
+            },
+            pivot_on_scene: false,
         }
+    }
+
+    /// Compute the world pivot and interaction plane for a cursor
+    /// at widget-local `pos`. Mirrors MatterCAD's
+    /// `CalculateMouseDownPostionAndPlane` — picks against the live
+    /// mesh, falls back to the previous pivot's plane or the bed.
+    pub(crate) fn resolve_pivot(&self, pos: Point) -> PivotResolution {
+        let w = self.bounds.width.max(1.0);
+        let h = self.bounds.height.max(1.0);
+        let cursor_top_down = (pos.x, h - pos.y);
+        let cam = self.cam();
+        let (ray_origin, ray_dir) = cam.screen_to_ray(cursor_top_down, (w, h));
+        // Screen-centre ray: the plane normal MatterCAD uses for
+        // the hit plane. Use the camera-forward vector rather than
+        // unprojecting (0.5, 0.5); they're the same for our
+        // standard view matrices and a vector is cheaper.
+        let (_right, _up, fwd) = cam.basis();
+        let mesh_slot = self.inputs.last_mesh_output.lock().unwrap();
+        let mesh_ref = mesh_slot.as_deref();
+        resolve_pivot_or_fallback(
+            mesh_ref,
+            ray_origin,
+            ray_dir,
+            fwd,
+            self.mouse_down_world_pos,
+        )
+    }
+
+    /// Update the stored pivot + plane from the given cursor
+    /// position. Returns the resolution so callers can also use
+    /// `world_pos` for camera state (e.g. setting `center` for
+    /// rotate).
+    pub(crate) fn refresh_pivot(&mut self, pos: Point) -> PivotResolution {
+        let res = self.resolve_pivot(pos);
+        self.mouse_down_world_pos = res.world_pos;
+        self.hit_plane = res.plane;
+        self.pivot_on_scene = res.hit_scene;
+        res
     }
 
     /// Snapshot the shared orbit camera.  Cheap: an `OrbitCamera::clone`
@@ -197,7 +267,7 @@ impl Viewport3dWidget {
     pub fn fit_all(&mut self) {
         if let Some((mn, mx)) = self.last_aabb {
             self.cam_mut(|c| c.fit_to_bounds(mn, mx));
-            self.scene.borrow_mut().grid_y = mn[1];
+            self.scene.borrow_mut().grid_z = mn[2];
         } else {
             // Reset to the default orientation when nothing has been
             // displayed yet — at least gives the user feedback.
@@ -210,7 +280,7 @@ impl Viewport3dWidget {
     /// pass the displayed mesh's bounds.
     pub fn zoom_to_bounds(&mut self, min: [f32; 3], max: [f32; 3]) {
         self.cam_mut(|c| c.fit_to_bounds(min, max));
-        self.scene.borrow_mut().grid_y = min[1];
+        self.scene.borrow_mut().grid_z = min[2];
     }
 
     fn maybe_auto_fit(&mut self, mesh: &MeshGL) {
@@ -236,8 +306,9 @@ impl Viewport3dWidget {
         }
         if mn[0].is_finite() && mx[0].is_finite() {
             self.cam_mut(|c| c.fit_to_bounds(mn, mx));
-            // Sit the floor grid at the model's lowest point.
-            self.scene.borrow_mut().grid_y = mn[1];
+            // Sit the floor grid at the model's lowest point (lowest
+            // Z in a Z-up world).
+            self.scene.borrow_mut().grid_z = mn[2];
             self.last_aabb = Some((mn, mx));
         }
     }
@@ -277,9 +348,9 @@ impl Viewport3dWidget {
         let stride = mesh.num_prop as usize;
         let aspect = (w / h.max(1.0)) as f32;
         let cam = self.cam();
-        let view = cam.view_matrix();
-        let proj = cam.projection_matrix(aspect);
-        let mvp = mul4(&proj, &view);
+        let view = Mat4::from_cols_array(&cam.view_matrix());
+        let proj = Mat4::from_cols_array(&cam.projection_matrix(aspect));
+        let mvp = (proj * view).to_cols_array();
         let (right, up, fwd) = cam.basis();
         // Light direction in world space (normalized).
         let light = normalize3([0.4, 0.7, 0.6]);
@@ -339,6 +410,52 @@ impl Viewport3dWidget {
             ctx.line_to(s0.0, s0.1);
             ctx.stroke();
         }
+    }
+
+    /// Whether the rotate cursor should appear this frame. True
+    /// when the active tool is Rotate or Pan, OR an Orbit / Pan
+    /// drag is in progress. MatterCAD only draws the circle on
+    /// hover (`CurrentTrackingType == None`), but it's far more
+    /// useful to keep it visible during the drag so the user can
+    /// see what world point they're spinning around — so we extend
+    /// the condition.
+    fn should_show_pivot_cursor(&self) -> bool {
+        let tool = *self.inputs.tool.lock().unwrap();
+        if matches!(tool, ViewportTool::Rotate | ViewportTool::Pan) {
+            return true;
+        }
+        matches!(self.drag, CameraDrag::Orbit { .. } | CameraDrag::Pan { .. })
+    }
+
+    /// Paint the screen-space rotate cursor at the projection of
+    /// `mouse_down_world_pos`. Layered to mimic MatterCAD's
+    /// `drawCircle`: an inner accent ring and a wider translucent
+    /// halo so the cursor reads against any background.
+    fn paint_pivot_cursor(&self, ctx: &mut dyn DrawCtx, w: f64, h: f64) {
+        let cam = self.cam();
+        let view = Mat4::from_cols_array(&cam.view_matrix());
+        let proj = Mat4::from_cols_array(&cam.projection_matrix((w / h.max(1.0)) as f32));
+        let mvp = (proj * view).to_cols_array();
+        let p = self.mouse_down_world_pos;
+        let Some((sx, sy)) = project(&mvp, p, w, h) else {
+            return;
+        };
+        // 8-pixel ring + 4-pixel halo, matching the
+        // `Stroke(circle, 2*DeviceScale)` /
+        // `Stroke(Stroke(circle, 4*DeviceScale), DeviceScale)`
+        // call pair in MatterCAD.
+        let r = 8.0;
+        let v = ctx.visuals();
+        let accent = v.accent;
+        let halo = v.text_color.with_alpha(0.45);
+        // Outer translucent halo so the ring reads on any backdrop.
+        ctx.set_stroke_color(halo);
+        ctx.set_line_width(4.0);
+        stroke_circle(ctx, sx, sy, r);
+        // Inner accent stroke — the "actual" rotate cursor.
+        ctx.set_stroke_color(accent);
+        ctx.set_line_width(2.0);
+        stroke_circle(ctx, sx, sy, r);
     }
 
     fn tick_camera_animation(&self, dt_seconds: f32) {
@@ -427,6 +544,26 @@ fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
 fn normalize3(v: [f32; 3]) -> [f32; 3] {
     let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-12);
     [v[0] / l, v[1] / l, v[2] / l]
+}
+
+/// Stroke a small approximate-circle in widget-local pixels.
+/// 24-segment polyline keeps the cursor smooth at the sizes we
+/// draw it (radius ≈ 8 px).
+fn stroke_circle(ctx: &mut dyn DrawCtx, cx: f64, cy: f64, r: f64) {
+    use std::f64::consts::TAU;
+    let steps = 24;
+    ctx.begin_path();
+    for i in 0..=steps {
+        let a = (i as f64 / steps as f64) * TAU;
+        let x = cx + r * a.cos();
+        let y = cy + r * a.sin();
+        if i == 0 {
+            ctx.move_to(x, y);
+        } else {
+            ctx.line_to(x, y);
+        }
+    }
+    ctx.stroke();
 }
 
 /// Project a world-space point through the MVP matrix and map to
@@ -592,6 +729,14 @@ impl Widget for Viewport3dWidget {
             ctx.fill_text("No geometry — select a node with a 3D output", 16.0, h - 24.0);
         }
 
+        // MatterCAD-style rotation cursor: a small 2-D circle at the
+        // screen projection of `mouse_down_world_pos`. Direct port
+        // of `TrackballTumbleWidgetExtended.OnDraw`'s `drawCircle`
+        // (`graphics2D.Render(new Ellipse(...))`).
+        if self.should_show_pivot_cursor() {
+            self.paint_pivot_cursor(ctx, w, h);
+        }
+
         // Border.
         ctx.set_stroke_color(Color::rgba(1.0, 1.0, 1.0, 0.10));
         ctx.set_line_width(1.0);
@@ -613,7 +758,7 @@ impl Widget for Viewport3dWidget {
             }
             Event::MouseUp { pos, button, .. } => self.on_mouse_up(*pos, *button),
             Event::MouseMove { pos } => self.on_mouse_move(*pos),
-            Event::MouseWheel { delta_y, .. } => self.on_wheel(*delta_y),
+            Event::MouseWheel { pos, delta_y, .. } => self.on_wheel_at_pos(*pos, *delta_y),
             Event::KeyDown { key, modifiers } => self.on_key_down(key, *modifiers),
             _ => EventResult::Ignored,
         }

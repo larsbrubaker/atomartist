@@ -34,7 +34,9 @@ use demo_wgpu::{MsaaFramebuffer, WgpuCustomRender, WgpuCustomRenderCtx};
 use manifold_rust::types::MeshGL;
 use wgpu::util::DeviceExt;
 
-use crate::camera::{mul4, OrbitCamera};
+use glam::Mat4;
+
+use crate::camera::OrbitCamera;
 use crate::scene_shaders::{GRID_SHADER, OUTLINE_SHADER, SHADER};
 
 /// Render-style picker beneath the tumble cube.  Drives the surface
@@ -163,9 +165,10 @@ pub struct WgpuSceneRenderer {
     pub grid_bg_color: [f32; 4],
     /// True to draw the floor grid before the mesh.
     pub draw_grid: bool,
-    /// World Y where the floor grid sits — `Viewport3dWidget` updates this
-    /// to the model's bounds-min Y so the grid always feels like a floor.
-    pub grid_y: f32,
+    /// World Z (height) where the floor grid sits — `Viewport3dWidget`
+    /// updates this to the model's bounds-min Z so the grid always
+    /// feels like a floor in the Z-up world.
+    pub grid_z: f32,
     /// Render the inverted-hull outline pass. The host sets this when a
     /// node is selected — the outline is drawn around `mesh` (the
     /// currently-displayed mesh; per-node mesh tracking lands later).
@@ -194,7 +197,7 @@ impl WgpuSceneRenderer {
             grid_line_color: [0.55, 0.58, 0.66, 0.7],
             grid_bg_color: [1.0, 1.0, 1.0, 0.0],
             draw_grid: true,
-            grid_y: 0.0,
+            grid_z: 0.0,
             outline_enabled: false,
             outline_color: [1.0, 0.55, 0.10, 1.0],
             outline_width: 0.05,
@@ -356,13 +359,16 @@ impl WgpuSceneRenderer {
             cache: None,
         });
         // Two triangles forming a large XZ-plane quad at Y=0.
+        // Quad covering the XY plane at z=0; the grid shader
+        // substitutes the dynamic floor height (`u.cell.z`) at draw
+        // time so this geometry never has to be rebuilt.
         let plane: [GridVertex; 6] = [
-            GridVertex { pos: [-2000.0, 0.0, -2000.0] },
-            GridVertex { pos: [ 2000.0, 0.0, -2000.0] },
-            GridVertex { pos: [ 2000.0, 0.0,  2000.0] },
-            GridVertex { pos: [-2000.0, 0.0, -2000.0] },
-            GridVertex { pos: [ 2000.0, 0.0,  2000.0] },
-            GridVertex { pos: [-2000.0, 0.0,  2000.0] },
+            GridVertex { pos: [-2000.0, -2000.0, 0.0] },
+            GridVertex { pos: [ 2000.0, -2000.0, 0.0] },
+            GridVertex { pos: [ 2000.0,  2000.0, 0.0] },
+            GridVertex { pos: [-2000.0, -2000.0, 0.0] },
+            GridVertex { pos: [ 2000.0,  2000.0, 0.0] },
+            GridVertex { pos: [-2000.0,  2000.0, 0.0] },
         ];
         let grid_vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("atomartist grid vb"),
@@ -549,9 +555,9 @@ impl WgpuCustomRender for WgpuSceneRenderer {
         // Build uniforms — projection uses the widget's aspect ratio (the
         // framebuffer matches that aspect 1:1).
         let aspect = fb_w as f32 / fb_h.max(1) as f32;
-        let view = self.camera.view_matrix();
-        let proj = self.camera.projection_matrix(aspect);
-        let mvp = mul4(&proj, &view);
+        let view = Mat4::from_cols_array(&self.camera.view_matrix());
+        let proj = Mat4::from_cols_array(&self.camera.projection_matrix(aspect));
+        let mvp = (proj * view).to_cols_array();
         let mut normal_mat = [0.0f32; 16];
         normal_mat[0] = 1.0; normal_mat[5] = 1.0; normal_mat[10] = 1.0; normal_mat[15] = 1.0;
         let l = normalize3(self.light_dir);
@@ -615,7 +621,7 @@ impl WgpuCustomRender for WgpuSceneRenderer {
             if self.draw_grid {
                 let grid_uniforms = GridUniforms {
                     mvp,
-                    cell: [1.0, 10.0, self.grid_y, 0.0],
+                    cell: [1.0, 10.0, self.grid_z, 0.0],
                     line_color: self.grid_line_color,
                     bg_color: self.grid_bg_color,
                 };

@@ -20,3 +20,4 @@ atomartist-lib      = { path = "../atomartist-lib" }
 atomartist-renderer = { path = "../atomartist-renderer" }
 manifold-rust       = { path = "../../manifold-rust" }
 png                 = "0.17"
+glam                = { workspace = true }

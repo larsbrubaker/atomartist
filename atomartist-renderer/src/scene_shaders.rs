@@ -43,7 +43,7 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
 pub(super) const GRID_SHADER: &str = r#"
 struct GridU {
     mvp: mat4x4<f32>,
-    cell: vec4<f32>,        // x = minor cell size, y = major cell stride, z = grid_y
+    cell: vec4<f32>,        // x = minor cell size, y = major cell stride, z = grid_z (world-Z height of the plane)
     line_color: vec4<f32>,
     bg_color: vec4<f32>,
 };
@@ -52,15 +52,19 @@ struct GridU {
 
 struct VOut {
     @builtin(position) clip: vec4<f32>,
-    @location(0) world_xz: vec2<f32>,
+    @location(0) world_xy: vec2<f32>,
 };
 
 @vertex
 fn vs(@location(0) pos: vec3<f32>) -> VOut {
     var o: VOut;
-    let p = vec3<f32>(pos.x, u.cell.z, pos.z);
+    // Bed is the XY plane in a Z-up world. The Rust-side
+    // `GridVertex` quad is laid out in the XY plane (z = 0); we
+    // substitute the dynamic floor height u.cell.z here so the bed
+    // tracks the model's lowest point.
+    let p = vec3<f32>(pos.x, pos.y, u.cell.z);
     o.clip = u.mvp * vec4<f32>(p, 1.0);
-    o.world_xz = p.xz;
+    o.world_xy = p.xy;
     return o;
 }
 
@@ -79,8 +83,8 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
     let major = u.cell.y;
 
     // Minor + major grid coverages (in world-space cell units).
-    let minor_c = coord_to_cell(in.world_xz, cell);
-    let major_c = coord_to_cell(in.world_xz, cell * major);
+    let minor_c = coord_to_cell(in.world_xy, cell);
+    let major_c = coord_to_cell(in.world_xy, cell * major);
     let minor_a = line_coverage(minor_c) * 0.35;
     let major_a = line_coverage(major_c);
 
