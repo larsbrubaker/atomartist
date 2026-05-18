@@ -15,6 +15,7 @@
 pub mod camera;
 pub mod picking;
 pub mod scene_renderer;
+mod scene_shaders;
 pub mod tumble_cube;
 pub mod viewport_widget;
 
