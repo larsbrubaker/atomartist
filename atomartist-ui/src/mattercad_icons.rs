@@ -33,6 +33,12 @@ pub enum MatterCadIcon {
     Rotate,
     Translate,
     Scale,
+    /// Solid sphere — render mode = Shaded.
+    ViewShaded,
+    /// Sphere with edge outlines — render mode = Outlines.
+    ViewOutlines,
+    /// Wireframe sphere — render mode = Polygons / Wireframe.
+    ViewPolygons,
 }
 
 const HOME_PNG: &[u8] = include_bytes!("../assets/mattercad_icons/fa-home_16.png");
@@ -51,6 +57,12 @@ const TRANSLATE_PNG: &[u8] =
     include_bytes!("../assets/mattercad_icons/ViewTransformControls/translate.png");
 const SCALE_PNG: &[u8] =
     include_bytes!("../assets/mattercad_icons/ViewTransformControls/scale.png");
+const VIEW_SHADED_PNG: &[u8] =
+    include_bytes!("../assets/mattercad_icons/view_shaded.png");
+const VIEW_OUTLINES_PNG: &[u8] =
+    include_bytes!("../assets/mattercad_icons/view_outlines.png");
+const VIEW_POLYGONS_PNG: &[u8] =
+    include_bytes!("../assets/mattercad_icons/view_polygons.png");
 
 impl MatterCadIcon {
     fn png_bytes(self) -> &'static [u8] {
@@ -67,6 +79,9 @@ impl MatterCadIcon {
             MatterCadIcon::Rotate => ROTATE_PNG,
             MatterCadIcon::Translate => TRANSLATE_PNG,
             MatterCadIcon::Scale => SCALE_PNG,
+            MatterCadIcon::ViewShaded => VIEW_SHADED_PNG,
+            MatterCadIcon::ViewOutlines => VIEW_OUTLINES_PNG,
+            MatterCadIcon::ViewPolygons => VIEW_POLYGONS_PNG,
         }
     }
 }

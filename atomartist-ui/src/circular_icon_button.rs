@@ -42,6 +42,11 @@ pub struct CircularIconButton {
     /// text colour the same way MatterCAD's
     /// `WhiteToAlpha_GreyToColor` filter does.
     image_icon: Option<MatterCadIcon>,
+    /// When set, this short text is rendered centred on the button
+    /// in place of the icon — used by MatterCAD's
+    /// `GridOptionsPanel.textButton` to show the snap distance as a
+    /// number (or "-" for off) instead of a glyph.
+    text_label: Option<String>,
     /// Optional secondary icon (overlaid lower-right) — used by
     /// dropdown buttons that want a small "▼" chevron over the main
     /// glyph.
@@ -71,6 +76,7 @@ impl CircularIconButton {
                 .with_max_size(Size::new(36.0, 36.0)),
             icon,
             image_icon: None,
+            text_label: None,
             overlay_icon: None,
             overlay_image: None,
             on_click: None,
@@ -112,6 +118,21 @@ impl CircularIconButton {
     pub fn with_image_icon(mut self, image: MatterCadIcon) -> Self {
         self.image_icon = Some(image);
         self
+    }
+
+    /// Imperative variant of `with_image_icon` — lets containers like
+    /// `CircularDropdown` swap the icon every paint based on the
+    /// dropdown's current value without re-allocating the button.
+    pub fn set_image_icon(&mut self, image: Option<MatterCadIcon>) {
+        self.image_icon = image;
+    }
+
+    /// Render the short string `text` centred on the button instead
+    /// of the icon. Used by MatterCAD's `GridOptionsPanel` to show
+    /// the snap distance value ("1", "5", "-", …) inside the
+    /// trigger button.
+    pub fn set_text_label(&mut self, label: Option<String>) {
+        self.text_label = label;
     }
 
     /// Use a MatterCAD PNG as the overlay (small lower-right
@@ -307,12 +328,16 @@ impl Widget for CircularIconButton {
             self.stroke_circle(ctx, cx, cy, r, v.widget_stroke.with_alpha(0.35));
         }
 
-        // Main icon, slightly inset. PNG-based icons are blitted at
-        // the canonical MatterCAD size (16-px source, scaled to fit
-        // ~70% of the button diameter); fall back to the hand-drawn
-        // vector glyph when no PNG has been set.
+        // Main glyph. Priority: explicit text label (e.g. a snap
+        // distance value in the GridOptionsPanel-style button) wins
+        // over an image icon; otherwise PNG-based image icons are
+        // blitted at the canonical MatterCAD size (16-px source,
+        // scaled to fit ~70% of the button diameter); finally fall
+        // back to the hand-drawn vector glyph.
         let icon_color = self.icon_color(active);
-        if let Some(img) = self.image_icon {
+        if let Some(label) = self.text_label.as_ref() {
+            paint_centered_text(ctx, label, cx, cy, r, icon_color);
+        } else if let Some(img) = self.image_icon {
             paint_image_icon(
                 ctx,
                 img,
@@ -381,6 +406,46 @@ impl Widget for CircularIconButton {
             _ => EventResult::Ignored,
         }
     }
+}
+
+/// Paint `label` centred on the button at a font size that fits
+/// within `radius`. Mirrors MatterCAD's `GridOptionsPanel` which puts
+/// a `ThemedTextButton` of size equal to the icon button inside the
+/// HUD circle.
+fn paint_centered_text(
+    ctx: &mut dyn DrawCtx,
+    label: &str,
+    cx: f64,
+    cy: f64,
+    radius: f64,
+    color: Color,
+) {
+    if let Some(font) = agg_gui::font_settings::current_system_font() {
+        ctx.set_font(font);
+    }
+    // Font size scales with the button. Cap so a long label like
+    // "100" never bleeds outside the circle on the smaller HUD
+    // buttons; agg-gui will horizontal-overflow text otherwise.
+    let target_size = (radius * 1.05).clamp(9.0, 14.0);
+    ctx.set_font_size(target_size);
+    let (text_w, ascent, descent) = ctx
+        .measure_text(label)
+        .map(|m| (m.width, m.ascent, m.descent))
+        .unwrap_or((
+            target_size * label.chars().count() as f64 * 0.6,
+            target_size * 0.8,
+            target_size * 0.2,
+        ));
+    // `fill_text` interprets `(x, y)` as the baseline position of
+    // the first glyph. Y-up means higher Y is higher on screen, so
+    // the visual centre of an `ascent`-tall cap-height glyph above
+    // the baseline plus a `descent` drop below is `(ascent -
+    // descent) * 0.5` above the baseline. Add half that to the
+    // target centre to land the glyph optically centred.
+    let x = cx - text_w * 0.5;
+    let y = cy - (ascent - descent) * 0.5;
+    ctx.set_fill_color(color);
+    ctx.fill_text(label, x, y);
 }
 
 /// Blit a recoloured MatterCAD PNG icon centred on `(cx, cy)`.  The
