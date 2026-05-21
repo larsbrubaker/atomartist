@@ -29,8 +29,8 @@ use agg_gui::{
     Widget, WidgetBase,
 };
 use atomartist_renderer::{
-    CameraPoseAnimation, OrbitMode, Projection, ProjectionAnimation, RenderStyle, TumbleCubeInputs,
-    TumbleCubeWidget, Viewport3dWidget, ViewportInputs, ViewportTool,
+    CameraPoseAnimation, OrbitCamera, OrbitMode, Projection, ProjectionAnimation, RenderStyle,
+    TumbleCubeInputs, TumbleCubeWidget, Viewport3dWidget, ViewportInputs, ViewportTool,
 };
 
 use crate::app_state::AppState;
@@ -427,21 +427,23 @@ fn add_zoom_to_sel_button(overlay: &mut ViewportOverlay, state: &AppState, font:
 
 /// Turntable / Trackball orbit-mode toggle.
 ///
-/// Toggling INTO turntable applies a minimum-angle rotation
-/// (`OrbitCamera::snap_to_turntable_alignment`) to bring world +Z
-/// back to screen-up. Trackball can leave the camera rolled or
-/// upside-down, and turntable yaw (around world +Z) only feels
-/// natural when the horizon is level. Crucially the snap uses
-/// `Quat::from_rotation_arc` so the camera moves the **smallest**
-/// possible amount — if the camera is already nearly upright it
-/// barely moves at all, and if it's fully upside down it rolls
-/// 180° around the screen-up axis. MatterCAD's `AddTurnTableButton`
-/// flags the equivalent path as "WIP, this should fix the current
-/// rotation rather than reset the view" (`View3DWidget.cs:741-744`)
-/// — this minimum-angle fix is precisely what that comment was
-/// asking for.
+/// Toggling INTO turntable kicks off a 0.25-second
+/// `CameraPoseAnimation` (slerped via `Quat::slerp`) that animates
+/// the camera onto the minimum-angle "level horizon" target
+/// produced by `OrbitCamera::snap_to_turntable_alignment`. The
+/// snap itself uses `Quat::from_rotation_arc` so the camera moves
+/// the **smallest** possible amount — animated, so the user can
+/// see and follow the re-leveling instead of being teleported.
+/// If the camera is already upright (`snap_to_turntable_alignment`
+/// is a no-op) no animation runs.
+///
+/// MatterCAD's `AddTurnTableButton` flags its equivalent path as
+/// "WIP, this should fix the current rotation rather than reset
+/// the view" (`View3DWidget.cs:741-744`); this animated minimum-
+/// rotation is precisely what that comment was asking for.
 fn add_turntable_button(overlay: &mut ViewportOverlay, state: &AppState, font: &Arc<Font>, angle: f64) {
     let camera_w = state.camera.clone();
+    let animation_w = state.camera_animation.clone();
     let setting_w = state.turntable.clone();
     let setting_r = state.turntable.clone();
     let btn = CircularIconButton::new(IconKind::Turn)
@@ -450,17 +452,40 @@ fn add_turntable_button(overlay: &mut ViewportOverlay, state: &AppState, font: &
         .on_click(move || {
             let mut s = setting_w.lock().unwrap();
             *s = !*s;
-            let mut c = camera_w.lock().unwrap();
-            c.orbit_mode = if *s {
-                OrbitMode::Turntable
-            } else {
-                OrbitMode::Trackball
+            // Set the mode regardless of direction — yaw axis
+            // changes immediately so the next drag is interpreted
+            // under the new mode even before the level-up animation
+            // (if any) completes.
+            let start_camera: OrbitCamera = {
+                let mut c = camera_w.lock().unwrap();
+                c.orbit_mode = if *s {
+                    OrbitMode::Turntable
+                } else {
+                    OrbitMode::Trackball
+                };
+                c.clone()
             };
-            if *s {
-                // Switching INTO turntable: minimum-rotation snap
-                // so world +Z is screen-up again.
-                c.snap_to_turntable_alignment();
+            if !*s {
+                return;
             }
+            // Compute the target by running the snap on a clone —
+            // we don't want to apply it to the live camera here,
+            // because the animation will interpolate from
+            // `start_camera` to `target_camera` over 0.25 s.
+            let mut target_camera = start_camera.clone();
+            target_camera.snap_to_turntable_alignment();
+            // Skip the animation if the snap is already a no-op
+            // (camera was already upright).
+            let cosine = start_camera
+                .orientation
+                .dot(target_camera.orientation)
+                .abs();
+            if cosine > 0.9999 {
+                return;
+            }
+            *animation_w.lock().unwrap() =
+                Some(CameraPoseAnimation::new(&start_camera, target_camera, 0.25));
+            agg_gui::animation::request_draw();
         });
     overlay.add_ring_button(wrap_tooltip(Box::new(btn), "Turntable mode", font), angle);
 }

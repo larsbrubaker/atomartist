@@ -121,6 +121,10 @@ pub struct ProjectionAnimation {
     /// reason. Held constant so the ortho mode's `half_h` matches
     /// the perspective view's visible height at the orbit centre.
     ref_radius: f32,
+    /// `far` clip plane at toggle time. Restored at the end of
+    /// the tween — see `step` for why we need to dilate it during
+    /// the tween.
+    ref_far: f32,
     /// Projection mode the camera will land in at `progress = 1`.
     target: Projection,
     /// Progress in `[0, 1]`. `step` advances this by `dt / duration`.
@@ -140,6 +144,7 @@ impl ProjectionAnimation {
         Self {
             ref_fov: camera.fov_y,
             ref_radius: camera.radius,
+            ref_far: camera.far,
             target,
             progress: 0.0,
             duration: duration.max(1e-3),
@@ -171,6 +176,16 @@ impl ProjectionAnimation {
 
         camera.fov_y = fov;
         camera.radius = new_radius;
+        // CRITICAL: as `fov` approaches `fov_min`, `new_radius`
+        // explodes (≈ `ref_half_h / fov_min` — for a default scene
+        // that's ~43,000 units while `OrbitCamera::default().far`
+        // is only 5,000). Without the dilation below, the model
+        // ends up beyond the far clip plane for the last few
+        // frames of the tween → wgpu clips everything → a single
+        // white frame, in both directions. Dilate `far` to safely
+        // contain the puffed-up radius; restored to `ref_far` on
+        // the final frame.
+        camera.far = self.ref_far.max(new_radius * 2.0);
         // The tween itself ALWAYS runs through perspective math
         // (matches MatterCAD's `CalculatePerspectiveMatrixOffCenter`
         // call in the per-step update). The final-frame block
@@ -180,6 +195,7 @@ impl ProjectionAnimation {
         if self.progress >= 1.0 {
             camera.fov_y = self.ref_fov;
             camera.radius = self.ref_radius;
+            camera.far = self.ref_far;
             camera.projection = self.target;
             return true;
         }

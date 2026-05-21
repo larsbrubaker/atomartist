@@ -299,10 +299,13 @@ impl Viewport3dWidget {
 
     /// Re-fit the camera to the last seen mesh's AABB. Used by the Home
     /// / Fit-All button.  No-op if no mesh has been displayed yet.
+    ///
+    /// Does NOT move the floor grid — `grid_z` stays at the bed
+    /// plane (Z=0) regardless of where the model is. The grid is
+    /// a fixed world reference, like MatterCAD's `BedSurfaceZ`.
     pub fn fit_all(&mut self) {
         if let Some((mn, mx)) = self.last_aabb {
             self.cam_mut(|c| c.fit_to_bounds(mn, mx));
-            self.scene.borrow_mut().grid_z = mn[2];
         } else {
             // Reset to the default orientation when nothing has been
             // displayed yet — at least gives the user feedback.
@@ -312,19 +315,34 @@ impl Viewport3dWidget {
 
     /// Fit the camera to an explicit AABB. Used by the Zoom-to-Selection
     /// button. With per-node mesh tracking still pending, callers can
-    /// pass the displayed mesh's bounds.
+    /// pass the displayed mesh's bounds. Like `fit_all`, this only
+    /// moves the camera — the floor grid stays at Z=0.
     pub fn zoom_to_bounds(&mut self, min: [f32; 3], max: [f32; 3]) {
         self.cam_mut(|c| c.fit_to_bounds(min, max));
-        self.scene.borrow_mut().grid_z = min[2];
     }
 
+    /// Update the cached mesh AABB and — only on the very first
+    /// mesh — fit the camera to it.
+    ///
+    /// Critical UX: editing a node value re-evaluates the graph,
+    /// which produces a new mesh every keystroke / slider tick.
+    /// We must NOT call `fit_to_bounds` for those updates, or the
+    /// camera would jump every time the user adjusts a parameter.
+    /// Instead we just refresh `last_aabb` so the explicit
+    /// fit-all / zoom-to-selection buttons (and the `W` / `F`
+    /// keyboard shortcuts) have current bounds to work with the
+    /// next time the user actually asks for a fit.
+    ///
+    /// `grid_z` similarly stays at 0 (the bed in our Z-up world,
+    /// mirroring MatterCAD's `BedSurfaceZ`) rather than tracking
+    /// the model's lowest Z — the floor is a fixed reference, not
+    /// a model-derived value.
     fn maybe_auto_fit(&mut self, mesh: &MeshGL) {
         let real_ptr = mesh.vert_properties.as_ptr() as usize;
         if real_ptr == self.last_mesh_ptr {
             return;
         }
         self.last_mesh_ptr = real_ptr;
-        // Compute AABB.
         if mesh.num_prop == 0 || mesh.vert_properties.is_empty() {
             return;
         }
@@ -339,12 +357,15 @@ impl Viewport3dWidget {
                 if v > mx[k] { mx[k] = v; }
             }
         }
-        if mn[0].is_finite() && mx[0].is_finite() {
+        if !mn[0].is_finite() || !mx[0].is_finite() {
+            return;
+        }
+        let is_first_mesh = self.last_aabb.is_none();
+        self.last_aabb = Some((mn, mx));
+        if is_first_mesh {
+            // First mesh ever — fit the view so the user has
+            // something visible to start from.
             self.cam_mut(|c| c.fit_to_bounds(mn, mx));
-            // Sit the floor grid at the model's lowest point (lowest
-            // Z in a Z-up world).
-            self.scene.borrow_mut().grid_z = mn[2];
-            self.last_aabb = Some((mn, mx));
         }
     }
 

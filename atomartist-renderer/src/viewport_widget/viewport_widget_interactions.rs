@@ -269,21 +269,21 @@ impl Viewport3dWidget {
             Key::Char(c) => {
                 if c.eq_ignore_ascii_case(&'w') || c.eq_ignore_ascii_case(&'f') {
                     // W = canonical fit-all (MatterCAD); F kept as legacy alias.
-                    if let Some(mesh) = self.current_mesh() {
-                        self.last_mesh_ptr = 0;
-                        self.maybe_auto_fit(&mesh);
-                    }
+                    // Use `fit_all` directly so this is an EXPLICIT
+                    // user request — `maybe_auto_fit` no longer
+                    // refits on graph re-evaluation, so the old
+                    // "force a refit by resetting last_mesh_ptr"
+                    // trick is gone (and was always a misuse of
+                    // that field).
+                    self.fit_all();
                     return EventResult::Consumed;
                 }
                 if c.eq_ignore_ascii_case(&'z') {
-                    // Z = zoom-to-selected. With no per-node mesh tracking
-                    // yet, fall through to fit-all (Phase A4 will tighten
-                    // this to use the selected node's bounds when one is
-                    // selected).
-                    if let Some(mesh) = self.current_mesh() {
-                        self.last_mesh_ptr = 0;
-                        self.maybe_auto_fit(&mesh);
-                    }
+                    // Z = zoom-to-selected. With no per-node mesh
+                    // tracking yet, fall through to fit-all (Phase
+                    // A4 will tighten this to use the selected
+                    // node's bounds when one is selected).
+                    self.fit_all();
                     return EventResult::Consumed;
                 }
                 // Ctrl + +/- → zoom in/out.

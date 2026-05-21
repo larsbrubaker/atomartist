@@ -186,6 +186,32 @@ fn projection_animation_to_perspective_lands_in_perspective() {
     assert_eq!(cam.projection, Projection::Perspective);
 }
 
+/// Regression for the "single white frame at the end of the
+/// ortho tween" bug: mid-tween the camera is pushed back to a
+/// huge radius (`ref_half_h / tan(fov_min/2)`) so the
+/// perspective view still shows the same on-screen height as
+/// the upcoming ortho frame. Without dilating `far` to match,
+/// the model exits the far frustum and wgpu clips the entire
+/// scene — a single-frame flash to background colour. The
+/// animation must keep `radius < far` throughout the tween.
+#[test]
+fn projection_animation_keeps_radius_inside_far_plane() {
+    let mut cam = OrbitCamera::default();
+    cam.projection = Projection::Perspective;
+    let mut anim = ProjectionAnimation::new(&cam, Projection::Orthographic, 0.25);
+    // Step in small increments — the worst frames are right
+    // before progress = 1.0, when `fov` ≈ `fov_min`.
+    for _ in 0..50 {
+        anim.step(&mut cam, 0.006);
+        assert!(
+            cam.radius < cam.far,
+            "radius {} must stay inside far {}",
+            cam.radius,
+            cam.far
+        );
+    }
+}
+
 #[test]
 fn projection_animation_preserves_visible_height_mid_tween() {
     let mut cam = OrbitCamera::default();
