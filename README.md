@@ -6,6 +6,9 @@ update live in the viewport.
 
 Targets **Windows**, **macOS**, and the **web** (WASM via WebGPU / WebGL2).
 
+> **Try it in your browser:** [larsbrubaker.github.io/atomartist](https://larsbrubaker.github.io/atomartist/)
+> &nbsp;— live build of `demo-wasm` deployed automatically from `main`.
+
 > **Status:** Phase 0 — empty workspace skeleton. Active development.
 
 ---
@@ -43,6 +46,12 @@ cargo run -p demo-native --release
 
 ### Web (WASM)
 
+The hosted build at <https://larsbrubaker.github.io/atomartist/> is
+rebuilt and redeployed by [`.github/workflows/deploy-demo.yml`](./.github/workflows/deploy-demo.yml)
+on every push to `main`.
+
+To run the same bundle locally:
+
 ```bash
 # One-time install:
 cargo install wasm-pack basic-http-server
@@ -54,6 +63,26 @@ cd demo-wasm && basic-http-server .
 # /index.html — the page mounts the AtomArtist UI on a full-window
 # canvas via wgpu's WebGL2 backend.
 ```
+
+### Repository layout for sibling crates
+
+atomartist depends on several sibling repositories via path
+dependencies (so a local edit in `agg-gui` is picked up immediately).
+Clone them next to this repo so the `../../agg-gui/agg-gui` style
+paths in our `Cargo.toml` files resolve:
+
+```
+parent-dir/
+├── atomartist/        (this repo)
+├── agg-gui/
+├── agg-rust/
+├── manifold-rust/
+├── clipper2-rust/
+└── tess2-rust/
+```
+
+CI mirrors this layout on the runner — see the `Checkout …` steps in
+`.github/workflows/ci.yml` and `deploy-demo.yml`.
 
 ### Tests
 

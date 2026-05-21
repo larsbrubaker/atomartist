@@ -8,8 +8,21 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_INCREMENTAL: 0
-  RUSTFLAGS: "-D warnings"
+  CARGO_INCREMENTAL: "0"
+  # NOTE: We intentionally do not set `RUSTFLAGS: -D warnings` here.
+  # That flag propagates into the sibling path-dep crates checked
+  # out next to atomartist (agg-gui, manifold-rust, …), which have
+  # their own benign warnings we don't control. If we want strict
+  # warning-policing for atomartist's own crates, prefer adding a
+  # `cargo clippy --workspace -- -D warnings` step (clippy only
+  # lints the current workspace members, not their deps).
+
+# atomartist's crates use path-dependencies pointing at sibling repos
+# two levels up (e.g. `../../agg-gui/agg-gui`). Both CI jobs check out
+# atomartist into a `atomartist/` subdir and the sibling repos next to
+# it so the relative paths resolve the same way they do on a dev
+# machine where the user has all five repos side-by-side under
+# `rust-apps/`.
 
 jobs:
   test-native:
@@ -19,16 +32,52 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: atomartist
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout atomartist
+        uses: actions/checkout@v4
         with:
-          submodules: recursive
+          path: atomartist
+
+      - name: Checkout agg-gui
+        uses: actions/checkout@v4
+        with:
+          repository: larsbrubaker/agg-gui
+          path: agg-gui
+
+      - name: Checkout agg-rust
+        uses: actions/checkout@v4
+        with:
+          repository: larsbrubaker/agg-rust
+          path: agg-rust
+
+      - name: Checkout manifold-rust
+        uses: actions/checkout@v4
+        with:
+          repository: larsbrubaker/manifold-rust
+          path: manifold-rust
+
+      - name: Checkout clipper2-rust
+        uses: actions/checkout@v4
+        with:
+          repository: larsbrubaker/clipper2-rust
+          path: clipper2-rust
+
+      - name: Checkout tess2-rust
+        uses: actions/checkout@v4
+        with:
+          repository: larsbrubaker/tess2-rust
+          path: tess2-rust
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: atomartist
 
       - name: cargo check --workspace
         run: cargo check --workspace --all-targets
@@ -39,10 +88,44 @@ jobs:
   build-wasm:
     name: Build WASM
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: atomartist
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout atomartist
+        uses: actions/checkout@v4
         with:
-          submodules: recursive
+          path: atomartist
+
+      - name: Checkout agg-gui
+        uses: actions/checkout@v4
+        with:
+          repository: larsbrubaker/agg-gui
+          path: agg-gui
+
+      - name: Checkout agg-rust
+        uses: actions/checkout@v4
+        with:
+          repository: larsbrubaker/agg-rust
+          path: agg-rust
+
+      - name: Checkout manifold-rust
+        uses: actions/checkout@v4
+        with:
+          repository: larsbrubaker/manifold-rust
+          path: manifold-rust
+
+      - name: Checkout clipper2-rust
+        uses: actions/checkout@v4
+        with:
+          repository: larsbrubaker/clipper2-rust
+          path: clipper2-rust
+
+      - name: Checkout tess2-rust
+        uses: actions/checkout@v4
+        with:
+          repository: larsbrubaker/tess2-rust
+          path: tess2-rust
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -51,9 +134,12 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: atomartist
+          key: wasm
 
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
       - name: wasm-pack build demo-wasm
-        run: wasm-pack build demo-wasm --target web
+        run: wasm-pack build demo-wasm --target web --no-typescript

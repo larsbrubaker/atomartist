@@ -1,0 +1,112 @@
+name: Deploy WASM Demo to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one deploy at a time; cancel any in-flight runs for older commits.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  build:
+    name: Build WASM bundle
+    runs-on: ubuntu-latest
+    steps:
+      # atomartist's crates use path-dependencies pointing at sibling
+      # repos two levels up (e.g. `../../agg-gui/agg-gui`). We mirror
+      # the local dev layout on the runner by checking each one out
+      # as a sibling of the atomartist working tree.
+      - name: Checkout atomartist
+        uses: actions/checkout@v4
+        with:
+          path: atomartist
+
+      - name: Checkout agg-gui
+        uses: actions/checkout@v4
+        with:
+          repository: larsbrubaker/agg-gui
+          path: agg-gui
+
+      - name: Checkout agg-rust
+        uses: actions/checkout@v4
+        with:
+          repository: larsbrubaker/agg-rust
+          path: agg-rust
+
+      - name: Checkout manifold-rust
+        uses: actions/checkout@v4
+        with:
+          repository: larsbrubaker/manifold-rust
+          path: manifold-rust
+
+      - name: Checkout clipper2-rust
+        uses: actions/checkout@v4
+        with:
+          repository: larsbrubaker/clipper2-rust
+          path: clipper2-rust
+
+      - name: Checkout tess2-rust
+        uses: actions/checkout@v4
+        with:
+          repository: larsbrubaker/tess2-rust
+          path: tess2-rust
+
+      - name: Install Rust toolchain (wasm32 target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: atomartist
+          key: wasm
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build WASM
+        working-directory: atomartist
+        # `--release` keeps the wasm small (~few MB instead of >50MB).
+        # `--no-typescript` avoids emitting .d.ts noise.
+        run: wasm-pack build demo-wasm --target web --release --no-typescript
+
+      - name: Assemble publish/ directory
+        run: |
+          mkdir -p publish
+          cp atomartist/demo-wasm/index.html publish/index.html
+          cp -r atomartist/demo-wasm/pkg publish/pkg
+          # GitHub Pages serves Jekyll by default; the `.nojekyll` file
+          # disables that so files with underscores (wasm-bindgen output
+          # like `demo_wasm_bg.wasm`) are not silently filtered out.
+          touch publish/.nojekyll
+          ls -la publish publish/pkg
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: publish
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

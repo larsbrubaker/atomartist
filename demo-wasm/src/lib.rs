@@ -35,7 +35,9 @@ thread_local! {
 
 struct GpuHandles {
     device: Arc<wgpu::Device>,
-    queue: Arc<wgpu::Queue>,
+    // Held only to keep the queue alive for the lifetime of the
+    // surface; resize_surface() only needs `device` + `surface_format`.
+    _queue: Arc<wgpu::Queue>,
     surface_format: wgpu::TextureFormat,
 }
 
@@ -168,7 +170,7 @@ async fn init_wgpu() -> Result<(), String> {
     GPU.with(|c| {
         *c.borrow_mut() = Some(GpuHandles {
             device: device_arc,
-            queue: queue_arc,
+            _queue: queue_arc,
             surface_format,
         });
     });
