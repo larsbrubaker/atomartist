@@ -291,6 +291,48 @@ impl AppState {
         Ok(())
     }
 
+    /// Snapshot the HUD-button state into a [`crate::UiSettings`]
+    /// for persistence. Callers serialise this to disk via
+    /// `UiSettings::write_to_file`.
+    pub fn ui_settings(&self) -> crate::UiSettings {
+        crate::UiSettings {
+            perspective: *self.perspective.lock().unwrap(),
+            turntable: *self.turntable.lock().unwrap(),
+            show_bed: *self.show_bed.lock().unwrap(),
+            render_style: *self.render_style.lock().unwrap(),
+            snap_amount: *self.snap_amount.lock().unwrap(),
+        }
+    }
+
+    /// Push a saved [`crate::UiSettings`] snapshot back into the
+    /// live `AppState` AND propagate the perspective / turntable
+    /// flags into the shared camera so the very first frame after
+    /// startup matches what the user left things as. Used by the
+    /// demo-native shell on load.
+    pub fn apply_ui_settings(&self, s: crate::UiSettings) {
+        use atomartist_renderer::{OrbitMode, Projection};
+        *self.perspective.lock().unwrap() = s.perspective;
+        *self.turntable.lock().unwrap() = s.turntable;
+        *self.show_bed.lock().unwrap() = s.show_bed;
+        *self.render_style.lock().unwrap() = s.render_style;
+        *self.snap_amount.lock().unwrap() = s.snap_amount;
+        // Mirror into the camera so the very first paint sees the
+        // restored projection / orbit mode (the HUD buttons read
+        // from the same `Arc<Mutex<bool>>` slots above, so they're
+        // already correct).
+        let mut c = self.camera.lock().unwrap();
+        c.projection = if s.perspective {
+            Projection::Perspective
+        } else {
+            Projection::Orthographic
+        };
+        c.orbit_mode = if s.turntable {
+            OrbitMode::Turntable
+        } else {
+            OrbitMode::Trackball
+        };
+    }
+
     /// Save the current displayed mesh as a binary STL.
     pub fn export_stl_to_path(&self, path: &Path) -> Result<(), String> {
         let mesh = self

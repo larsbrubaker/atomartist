@@ -27,41 +27,101 @@ fn default_orientation_matches_mattercad_resetview() {
     assert!(back.y.abs() > back.z.abs(), "should be a 3/4 view, not top-down; back = {back:?}");
 }
 
-/// Turntable mode keeps the horizon level in the new Z-up world:
-/// after a long sustained pitch drag, the back vector's +Z
-/// component must saturate (not flip the camera upside down).
+/// Turntable cursor-up (`pitch_angle > 0`) tilts the camera DOWN
+/// (eye drops below the bed plane, looking up at the model — the
+/// MatterCAD "see-from-below" feel). Hammering that direction
+/// must clamp at the lower pitch limit and never let `back.z`
+/// drop below `sin(-π·0.499)`.
 #[test]
-fn turntable_yaw_clamp_keeps_horizon_level() {
+fn turntable_pitch_clamp_stops_at_lower_pole() {
     let mut c = OrbitCamera::default();
     c.orbit_mode = OrbitMode::Turntable;
     c.orientation = Quat::IDENTITY;
-    // Drive pitch hard past the pole.
     for _ in 0..200 {
         c.orbit_drag(0.0, 0.1);
     }
     let back = c.orientation * Vec3::Z;
+    let lower_pole = -(PI * 0.499).sin();
     assert!(
-        back.z <= (PI * 0.49).sin() + 1e-3,
-        "turntable pitch should clamp; back.z = {}",
-        back.z
+        back.z >= lower_pole - 1e-3,
+        "turntable pitch should clamp at lower pole; back.z = {} (limit {})",
+        back.z,
+        lower_pole
     );
 }
 
+/// Regression for "I can rotate past the top." From Top view,
+/// `pitch_angle < 0` (cursor-down) wants to tilt the camera
+/// further UP — but the camera is already at the +Z pole. The
+/// clamp must hold it there; the orientation must NOT wrap around
+/// to the other side.
+#[test]
+fn turntable_cannot_rotate_past_the_top() {
+    let mut c = OrbitCamera::default();
+    c.orbit_mode = OrbitMode::Turntable;
+    // Top view exactly.
+    c.orientation = Quat::IDENTITY;
+    // Drive the "want camera further up" direction hard.
+    for _ in 0..200 {
+        c.orbit_drag(0.0, -0.1);
+    }
+    let back = c.orientation * Vec3::Z;
+    let upper_pole = (PI * 0.499).sin();
+    // back.z must stay near the upper pole — definitely never
+    // flip below the equator (which is what "rotating past the top"
+    // looks like to the user).
+    assert!(
+        back.z >= upper_pole - 1e-3,
+        "should still be near the +Z pole; back.z = {} (clamp {})",
+        back.z,
+        upper_pole
+    );
+    assert!(back.z <= 1.0 + 1e-3, "physical bound");
+}
+
+/// Trackball and turntable must agree on the cursor-up direction:
+/// both should tilt the camera DOWN (eye Z decreases, model's
+/// underside becomes visible) so the modes feel like alternative
+/// interpretations of the SAME gesture, not opposite ones.
+#[test]
+fn trackball_and_turntable_match_on_cursor_up_direction() {
+    let mut tt = OrbitCamera::default();
+    tt.orbit_mode = OrbitMode::Turntable;
+    let mut tb = tt.clone();
+    tb.orbit_mode = OrbitMode::Trackball;
+    // The HUD layer feeds `orbit_drag(_, +scale)` for cursor-up;
+    // emulate that here.
+    let pitch = 0.2;
+    let tt_z_before = (tt.orientation * Vec3::Z).z;
+    let tb_z_before = (tb.orientation * Vec3::Z).z;
+    tt.orbit_drag(0.0, pitch);
+    tb.orbit_drag(0.0, pitch);
+    let tt_z_after = (tt.orientation * Vec3::Z).z;
+    let tb_z_after = (tb.orientation * Vec3::Z).z;
+    assert!(
+        tt_z_after < tt_z_before,
+        "turntable cursor-up must lower back.z; {tt_z_before} → {tt_z_after}"
+    );
+    assert!(
+        tb_z_after < tb_z_before,
+        "trackball cursor-up must also lower back.z; {tb_z_before} → {tb_z_after}"
+    );
+}
+
+/// Trackball still lets the camera tumble past the +Z pole when
+/// driven hard — that's the headline difference from turntable
+/// (no clamp). Drive a big drag from a Front-view start and verify
+/// the camera goes upside down (camera-up Z component flips).
 #[test]
 fn trackball_can_tumble_past_the_pole() {
     let mut c = OrbitCamera::default();
     c.orbit_mode = OrbitMode::Trackball;
-    // Start from Front view so a vertical drag tilts the camera
-    // through the world-Z pole. Camera-local +Y is screen-up
-    // (initially aligned with world +Z); after a 180° drag its
-    // world-Z component flips below zero (camera "up" now
-    // points into the bed).
     c.orientation = orientation_for_view_direction([0.0, -1.0, 0.0]);
     c.orbit_drag(0.0, PI);
     let cam_up = c.orientation * Vec3::Y;
     assert!(
         cam_up.z < 0.0,
-        "trackball should be able to tumble past the pole; up = {cam_up:?}"
+        "trackball should still be able to tumble past the pole; up = {cam_up:?}"
     );
 }
 
@@ -363,6 +423,72 @@ fn orientation_for_right_face_puts_camera_at_positive_x() {
     let up = q * Vec3::Y;
     assert!((back - Vec3::X).length() < 1e-4, "right face back = +X; got {back:?}");
     assert!((up - Vec3::Z).length() < 1e-4, "right face up = +Z; got {up:?}");
+}
+
+/// After a trackball tumble the camera can be rolled (`cam_up`
+/// no longer aligned with world +Z) or even fully upside down.
+/// `snap_to_turntable_alignment` applies the **minimum-angle**
+/// rotation that lands cam-up on world +Z, so screen-up is world
+/// +Z again and turntable yaw (around world +Z) feels natural.
+#[test]
+fn snap_to_turntable_alignment_aligns_cam_up_with_world_z() {
+    let mut c = OrbitCamera::default();
+    c.orbit_mode = OrbitMode::Trackball;
+    c.orbit_drag(0.4, 2.5);
+    c.snap_to_turntable_alignment();
+    let cam_up = c.orientation * Vec3::Y;
+    assert!(
+        (cam_up - Vec3::Z).length() < 1e-3,
+        "cam-up should equal world +Z after snap; got {cam_up:?}"
+    );
+}
+
+/// Snapping when `cam_up` already equals world +Z must be a
+/// no-op modulo numerical noise. Front view is the canonical
+/// no-roll orientation where this holds exactly.
+#[test]
+fn snap_to_turntable_alignment_is_noop_when_already_upright() {
+    let mut c = OrbitCamera::default();
+    // Front view: orientation_for_view_direction picks +Z as the
+    // up-hint so the resulting cam-up is exactly world +Z.
+    c.orientation = orientation_for_view_direction([0.0, -1.0, 0.0]);
+    let cam_up_before = c.orientation * Vec3::Y;
+    assert!(
+        (cam_up_before - Vec3::Z).length() < 1e-4,
+        "test premise: Front view should have cam_up = +Z; got {cam_up_before:?}"
+    );
+    let before = c.orientation;
+    c.snap_to_turntable_alignment();
+    let cosine = c.orientation.dot(before).abs();
+    assert!(cosine > 0.999, "already-upright → snap should be a no-op, |dot| = {cosine}");
+}
+
+/// Minimum-rotation property: when the camera is only slightly
+/// rolled, the snap angle equals that roll angle — NOT the larger
+/// distance a yaw-pitch rebuild would produce. Start from a
+/// no-roll Front view, roll the camera 10° around the back axis
+/// (cam_up tilts 10° away from +Z because back ⊥ cam_up at Front
+/// view), and verify the snap removes exactly that 10°.
+#[test]
+fn snap_to_turntable_alignment_makes_a_minimum_rotation() {
+    let mut c = OrbitCamera::default();
+    c.orientation = orientation_for_view_direction([0.0, -1.0, 0.0]);
+    let back = c.orientation * Vec3::Z;
+    let roll = Quat::from_axis_angle(back, 10f32.to_radians());
+    c.orientation = (roll * c.orientation).normalize();
+    let before = c.orientation;
+    c.snap_to_turntable_alignment();
+    let angle = before.angle_between(c.orientation);
+    assert!(
+        angle < 15f32.to_radians(),
+        "snap should be ~10° (the roll), got {} deg",
+        angle.to_degrees()
+    );
+    assert!(
+        angle > 5f32.to_radians(),
+        "snap should NOT be a no-op for a 10° roll; got {} deg",
+        angle.to_degrees()
+    );
 }
 
 #[test]

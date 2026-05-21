@@ -356,7 +356,11 @@ impl TumbleCubeRenderer {
         // view = inverse(camera world transform = T(eye) * R(orient))
         let camera_world = Mat4::from_rotation_translation(self.orientation, eye);
         let view = camera_world.inverse();
-        let proj = Mat4::perspective_rh_gl(
+        // wgpu / Vulkan / Metal depth convention — NDC z in [0, 1].
+        // See `OrbitCamera::projection_matrix` for the full story
+        // on why `_rh_gl` would break under wgpu (and especially
+        // any ortho path).
+        let proj = Mat4::perspective_rh(
             std::f32::consts::PI * 0.22,
             aspect.max(1e-6),
             0.1,

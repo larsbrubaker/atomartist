@@ -37,9 +37,15 @@ use manifold_rust::types::MeshGL;
 
 use glam::Mat4;
 
-use crate::camera::{transform_point4, OrbitCamera};
+use crate::camera::OrbitCamera;
 use crate::camera_animations::{CameraPoseAnimation, ProjectionAnimation};
 use crate::picking::{resolve_pivot_or_fallback, HitPlane, PivotResolution};
+
+#[path = "viewport_widget_helpers.rs"]
+mod viewport_widget_helpers;
+use viewport_widget_helpers::{
+    cross3, dot3, mouse_button_bit, normalize3, project, stroke_circle, sub3, vert_pos,
+};
 use crate::scene_renderer::{RenderStyle, WgpuSceneRenderer};
 
 /// Default left-mouse-drag behaviour, picked by the radio cluster of
@@ -180,6 +186,17 @@ pub struct Viewport3dWidget {
     /// the current circle uses the accent colour either way.
     #[allow(dead_code)]
     pivot_on_scene: bool,
+    /// Bitmask of currently-held mouse buttons (bit 0 = Left,
+    /// bit 1 = Right, bit 2 = Middle). Used as a safety net so a
+    /// stale `drag` state can never apply camera updates on plain
+    /// hover. Rationale: in normal operation `drag` is cleared by
+    /// `on_mouse_up`, but if a release happens outside the window
+    /// (or any other edge case where MouseUp is dropped) the drag
+    /// would otherwise linger and every subsequent MouseMove on
+    /// re-entry would orbit / pan / zoom. The check in
+    /// `on_mouse_move` resets the drag the next time a hover event
+    /// comes in with no buttons held.
+    pressed_buttons: u8,
 }
 
 impl Viewport3dWidget {
@@ -204,7 +221,25 @@ impl Viewport3dWidget {
                 normal: [0.0, 0.0, 1.0],
             },
             pivot_on_scene: false,
+            pressed_buttons: 0,
         }
+    }
+
+    /// Set the bit corresponding to a MouseButton in
+    /// `pressed_buttons`.
+    pub(crate) fn note_mouse_down(&mut self, button: MouseButton) {
+        self.pressed_buttons |= mouse_button_bit(button);
+    }
+
+    /// Clear the bit corresponding to a MouseButton in
+    /// `pressed_buttons`.
+    pub(crate) fn note_mouse_up(&mut self, button: MouseButton) {
+        self.pressed_buttons &= !mouse_button_bit(button);
+    }
+
+    /// `true` while at least one of (Left, Middle, Right) is held.
+    pub(crate) fn any_mouse_button_held(&self) -> bool {
+        self.pressed_buttons != 0
     }
 
     /// Compute the world pivot and interaction plane for a cursor
@@ -517,74 +552,10 @@ fn estimate_outline_width(mesh: &MeshGL) -> f32 {
     (extent * 0.006).max(0.005)
 }
 
-fn vert_pos(mesh: &MeshGL, i: usize, stride: usize) -> [f32; 3] {
-    [
-        mesh.vert_properties[i * stride],
-        mesh.vert_properties[i * stride + 1],
-        mesh.vert_properties[i * stride + 2],
-    ]
-}
-
-fn cross3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-fn sub3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-fn normalize3(v: [f32; 3]) -> [f32; 3] {
-    let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-12);
-    [v[0] / l, v[1] / l, v[2] / l]
-}
-
-/// Stroke a small approximate-circle in widget-local pixels.
-/// 24-segment polyline keeps the cursor smooth at the sizes we
-/// draw it (radius ≈ 8 px).
-fn stroke_circle(ctx: &mut dyn DrawCtx, cx: f64, cy: f64, r: f64) {
-    use std::f64::consts::TAU;
-    let steps = 24;
-    ctx.begin_path();
-    for i in 0..=steps {
-        let a = (i as f64 / steps as f64) * TAU;
-        let x = cx + r * a.cos();
-        let y = cy + r * a.sin();
-        if i == 0 {
-            ctx.move_to(x, y);
-        } else {
-            ctx.line_to(x, y);
-        }
-    }
-    ctx.stroke();
-}
-
-/// Project a world-space point through the MVP matrix and map to
-/// widget-local pixel coords. Returns `None` if the point is behind the
-/// near plane (w ≤ 0).
-fn project(mvp: &[f32; 16], p: [f32; 3], w: f64, h: f64) -> Option<(f64, f64)> {
-    let h4 = transform_point4(mvp, p);
-    if h4[3].abs() < 1e-6 {
-        return None;
-    }
-    let inv_w = 1.0 / h4[3];
-    if h4[3] <= 0.0 {
-        return None;
-    }
-    let ndc_x = h4[0] * inv_w;
-    let ndc_y = h4[1] * inv_w;
-    // Map NDC [-1,1] to widget local pixel space, Y-up.
-    let sx = (ndc_x as f64 * 0.5 + 0.5) * w;
-    let sy = (ndc_y as f64 * 0.5 + 0.5) * h;
-    Some((sx, sy))
-}
+// Free helpers (vector ops, projection, circle stroke, mouse-bit
+// map) live in the sibling `viewport_widget_helpers.rs` so this
+// file stays under the line-count guardrail. They're pulled in
+// via the `use` declaration near the top of this module.
 
 impl Widget for Viewport3dWidget {
     fn bounds(&self) -> Rect { self.bounds }
@@ -754,9 +725,13 @@ impl Widget for Viewport3dWidget {
     fn on_event(&mut self, event: &Event) -> EventResult {
         match event {
             Event::MouseDown { pos, button, modifiers, .. } => {
+                self.note_mouse_down(*button);
                 self.on_mouse_down(*pos, *button, *modifiers)
             }
-            Event::MouseUp { pos, button, .. } => self.on_mouse_up(*pos, *button),
+            Event::MouseUp { pos, button, .. } => {
+                self.note_mouse_up(*button);
+                self.on_mouse_up(*pos, *button)
+            }
             Event::MouseMove { pos } => self.on_mouse_move(*pos),
             Event::MouseWheel { pos, delta_y, .. } => self.on_wheel_at_pos(*pos, *delta_y),
             Event::KeyDown { key, modifiers } => self.on_key_down(key, *modifiers),

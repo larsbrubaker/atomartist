@@ -360,16 +360,17 @@ impl TumbleCubeWidget {
                 let dx = (pos.x - last_local.x) as f32;
                 let dy = (pos.y - last_local.y) as f32;
                 let scale = 0.01;
-                // Match the viewport's right-drag direction (drag
-                // right = world follows finger). The HUD's orbit code
-                // applies the same negation; do it here too so the
-                // cube's incremental orbit_drag receives consistent
-                // signs regardless of `orbit_mode`.
+                // Match the viewport's drag conventions: drag-right
+                // yaws the world the same way the cursor moves
+                // (camera goes CCW around world +Z), and drag-up
+                // tilts the camera UP. Dx is negated, dy is not —
+                // see `CameraDrag::Orbit` in viewport_widget for the
+                // full convention.
                 self.inputs
                     .camera
                     .lock()
                     .unwrap()
-                    .orbit_drag(-dx * scale, -dy * scale);
+                    .orbit_drag(-dx * scale, dy * scale);
                 *last_local = pos;
                 // Clear hover overlays during drag — the cursor isn't
                 // hovering a tile, it's manipulating the cube.

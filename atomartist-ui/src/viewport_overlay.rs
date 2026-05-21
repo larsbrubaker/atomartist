@@ -425,14 +425,21 @@ fn add_zoom_to_sel_button(overlay: &mut ViewportOverlay, state: &AppState, font:
     overlay.add_ring_button(wrap_tooltip(Box::new(btn), "Zoom to selection", font), angle);
 }
 
-/// Turntable / Trackball orbit-mode toggle. MatterCAD's
-/// `AddTurnTableButton` ALSO calls `viewControls3D.NotifyResetView()`
-/// when turning turntable ON ("WIP, this should fix the current
-/// rotation rather than reset the view" — `View3DWidget.cs:741-744`).
-/// We deliberately do NOT reset the view here: snapping the camera
-/// home on every toggle is a surprise the C# code itself flagged
-/// as wrong. Toggling just changes how the next orbit drag
-/// interprets cursor motion — handled by `OrbitCamera::orbit_drag`.
+/// Turntable / Trackball orbit-mode toggle.
+///
+/// Toggling INTO turntable applies a minimum-angle rotation
+/// (`OrbitCamera::snap_to_turntable_alignment`) to bring world +Z
+/// back to screen-up. Trackball can leave the camera rolled or
+/// upside-down, and turntable yaw (around world +Z) only feels
+/// natural when the horizon is level. Crucially the snap uses
+/// `Quat::from_rotation_arc` so the camera moves the **smallest**
+/// possible amount — if the camera is already nearly upright it
+/// barely moves at all, and if it's fully upside down it rolls
+/// 180° around the screen-up axis. MatterCAD's `AddTurnTableButton`
+/// flags the equivalent path as "WIP, this should fix the current
+/// rotation rather than reset the view" (`View3DWidget.cs:741-744`)
+/// — this minimum-angle fix is precisely what that comment was
+/// asking for.
 fn add_turntable_button(overlay: &mut ViewportOverlay, state: &AppState, font: &Arc<Font>, angle: f64) {
     let camera_w = state.camera.clone();
     let setting_w = state.turntable.clone();
@@ -443,11 +450,17 @@ fn add_turntable_button(overlay: &mut ViewportOverlay, state: &AppState, font: &
         .on_click(move || {
             let mut s = setting_w.lock().unwrap();
             *s = !*s;
-            camera_w.lock().unwrap().orbit_mode = if *s {
+            let mut c = camera_w.lock().unwrap();
+            c.orbit_mode = if *s {
                 OrbitMode::Turntable
             } else {
                 OrbitMode::Trackball
             };
+            if *s {
+                // Switching INTO turntable: minimum-rotation snap
+                // so world +Z is screen-up again.
+                c.snap_to_turntable_alignment();
+            }
         });
     overlay.add_ring_button(wrap_tooltip(Box::new(btn), "Turntable mode", font), angle);
 }

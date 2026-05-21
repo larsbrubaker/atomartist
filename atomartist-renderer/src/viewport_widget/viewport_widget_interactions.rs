@@ -96,6 +96,17 @@ impl Viewport3dWidget {
     }
 
     pub(super) fn on_mouse_move(&mut self, pos: Point) -> EventResult {
+        // Safety net: if a drag is "in progress" but no mouse button
+        // is actually held, we must have missed a MouseUp (e.g.
+        // released outside the window, focus loss, an aborted
+        // touchpad gesture, etc.). Clear the stale drag state so
+        // plain hover never orbits / pans / zooms. The cost is one
+        // extra `matches!` per MouseMove; the win is that hover
+        // can NEVER trigger a camera change, no matter how the OS
+        // delivered the prior events.
+        if !matches!(self.drag, CameraDrag::None) && !self.any_mouse_button_held() {
+            self.drag = CameraDrag::None;
+        }
         match &mut self.drag {
             CameraDrag::None => EventResult::Ignored,
             CameraDrag::Orbit { last_local } => {
@@ -106,6 +117,15 @@ impl Viewport3dWidget {
                 // pivot, so the world point that was under the
                 // cursor at mouse-down stays glued to the cursor
                 // (no scene jump on the first frame either).
+                //
+                // Sign convention: agg-gui screen Y is up, so a
+                // cursor-up drag has dy > 0. We want cursor-up to
+                // tilt the camera UP (back vector picks up more
+                // +Z) — natural CAD feel — which means orbit_drag's
+                // pitch argument should be POSITIVE for dy > 0.
+                // So no negation on dy. dx is still negated because
+                // a rightward drag (dx > 0) yaws the camera
+                // CCW around world +Z (azimuth decreasing).
                 let dx = (pos.x - last_local.x) as f32;
                 let dy = (pos.y - last_local.y) as f32;
                 let scale = 0.005;
@@ -115,7 +135,7 @@ impl Viewport3dWidget {
                     .camera
                     .lock()
                     .unwrap()
-                    .orbit_drag_around(pivot, -dx * scale, -dy * scale);
+                    .orbit_drag_around(pivot, -dx * scale, dy * scale);
                 EventResult::Consumed
             }
             CameraDrag::Pan { last_local } => {
@@ -292,8 +312,12 @@ impl Viewport3dWidget {
                     c.pan(dx * ARROW_PAN_PX * scale, dy * ARROW_PAN_PX * scale);
                 } else {
                     let scale = 0.005;
+                    // Same convention as the mouse-drag path: dx
+                    // negated, dy not. ArrowUp (dy = +1) tilts the
+                    // camera UP, matching the cursor's direction
+                    // of travel.
                     self.cam_mut(|c| {
-                        c.orbit(dx * ARROW_ORBIT_PX * scale, -dy * ARROW_ORBIT_PX * scale)
+                        c.orbit(-dx * ARROW_ORBIT_PX * scale, dy * ARROW_ORBIT_PX * scale)
                     });
                 }
                 return EventResult::Consumed;

@@ -11,8 +11,13 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use agg_gui::{App, DrawCtx, Key, Modifiers, MouseButton, Size, text::Font, theme::{set_visuals, Visuals}};
-use atomartist_ui::{build_app, fresh_state_with_starter_graph, top_menu_bar::FileDialogProvider};
+use agg_gui::{
+    persistence::AutoSave, App, DrawCtx, Key, Modifiers, MouseButton, Size, text::Font,
+    theme::{set_visuals, Visuals},
+};
+use atomartist_ui::{
+    build_app, fresh_state_with_starter_graph, top_menu_bar::FileDialogProvider, UiSettings,
+};
 use demo_wgpu::{begin_frame, WgpuGfxCtx};
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, Event, MouseScrollDelta, WindowEvent};
@@ -161,6 +166,38 @@ fn translate_winit_key(key: &winit::keyboard::Key) -> Option<Key> {
     }
 }
 
+/// Cross-platform "user config dir" for AtomArtist's settings file.
+/// We avoid the `dirs` crate dependency by reading the well-known
+/// environment variables directly:
+///   - Windows: `%APPDATA%\atomartist\settings.txt`
+///   - macOS: `$HOME/Library/Application Support/atomartist/settings.txt`
+///   - Linux / BSD: `$XDG_CONFIG_HOME/atomartist/settings.txt`
+///     or `$HOME/.config/atomartist/settings.txt`
+fn settings_path() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .map(|p| p.join("atomartist").join("settings.txt"))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var_os("HOME").map(PathBuf::from).map(|p| {
+            p.join("Library")
+                .join("Application Support")
+                .join("atomartist")
+                .join("settings.txt")
+        })
+    }
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+            .map(|p| p.join("atomartist").join("settings.txt"))
+    }
+}
+
 /// Parsed CLI: `--screenshot <path>` exits after grabbing one frame.
 struct CliArgs {
     screenshot_to: Option<PathBuf>,
@@ -235,9 +272,34 @@ fn main() {
 
     // Build the AtomArtist UI with a starter Box visible in the viewport.
     let state = fresh_state_with_starter_graph();
+    // Restore HUD button states (perspective / turntable / bed /
+    // render style / snap) from disk *before* mounting the widget
+    // tree so the first paint reflects what the user left things
+    // at. Missing or unparseable file silently falls back to the
+    // documented defaults — never blocks startup.
+    let settings_path = settings_path();
+    if let Some(ref path) = settings_path {
+        let loaded = UiSettings::read_from_file(path);
+        state.apply_ui_settings(loaded);
+    }
+    // Clone for the persistence loop — `AppState` is `Arc`-shared
+    // internally so this is just an Arc bump per field.
+    let state_for_save = state.clone();
     let dialogs: std::sync::Arc<dyn FileDialogProvider> = std::sync::Arc::new(NativeDialogs);
     let root = build_app(state, dialogs);
     let mut app = App::new(root);
+    let mut settings_auto_save = AutoSave::new();
+    // Seed the AutoSave with whatever's currently on disk so the
+    // first paint doesn't pointlessly rewrite an identical file.
+    if let Some(ref path) = settings_path {
+        if let Ok(existing) = std::fs::read_to_string(path) {
+            settings_auto_save.seed(existing);
+        }
+    }
+    // Track held mouse buttons so AutoSave only writes when the
+    // user isn't mid-drag. Same idle guard agg-gui's persistence
+    // docs recommend.
+    let mut mouse_buttons_held: u32 = 0;
 
     let mut win_w = gpu.config.width;
     let mut win_h = gpu.config.height;
@@ -292,8 +354,14 @@ fn main() {
                 } => {
                     if let Some(b) = translate_winit_button(button) {
                         match state {
-                            ElementState::Pressed => app.on_mouse_down(cursor_x, cursor_y, b, current_mods),
-                            ElementState::Released => app.on_mouse_up(cursor_x, cursor_y, b, current_mods),
+                            ElementState::Pressed => {
+                                mouse_buttons_held = mouse_buttons_held.saturating_add(1);
+                                app.on_mouse_down(cursor_x, cursor_y, b, current_mods);
+                            }
+                            ElementState::Released => {
+                                mouse_buttons_held = mouse_buttons_held.saturating_sub(1);
+                                app.on_mouse_up(cursor_x, cursor_y, b, current_mods);
+                            }
                         }
                         window.request_redraw();
                     }
@@ -338,6 +406,30 @@ fn main() {
                         && frames_painted + 1 == warmup_frames;
                     paint_frame(&gpu, &mut wgpu_ctx, &mut app, win_w, win_h, capture_now);
                     frames_painted = frames_painted.saturating_add(1);
+
+                    // Persist HUD button states to disk if anything
+                    // changed since the last save AND the user isn't
+                    // mid-drag. `AutoSave` handles the diff + idle
+                    // guard so we don't write the same blob over and
+                    // over, and so we never spam disk during a click.
+                    if let Some(ref path) = settings_path {
+                        settings_auto_save.tick(
+                            mouse_buttons_held == 0,
+                            || state_for_save.ui_settings().to_text(),
+                            |blob| {
+                                if let Some(parent) = path.parent() {
+                                    let _ = std::fs::create_dir_all(parent);
+                                }
+                                if let Err(e) = std::fs::write(path, blob) {
+                                    eprintln!(
+                                        "warning: failed to save UI settings to {}: {}",
+                                        path.display(),
+                                        e
+                                    );
+                                }
+                            },
+                        );
+                    }
                     // Some widgets (notably the tumble-cube click-to-orient
                     // animation) request another frame *during* paint.  Winit
                     // won't draw again unless the host explicitly asks for it,

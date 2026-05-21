@@ -123,8 +123,18 @@ impl OrbitCamera {
     }
 
     pub fn projection_matrix(&self, aspect: f32) -> [f32; 16] {
+        // Critical: use the **wgpu / Vulkan / Metal**-style matrices
+        // (no `_gl` suffix) so NDC z lands in [0, 1] rather than
+        // OpenGL's [-1, 1]. wgpu clips anything outside [0, 1],
+        // which is invisible under perspective (the model lands at
+        // NDC z ≈ 0.997 — well above 0) but catastrophic under
+        // orthographic where depth is linear and a 60-unit-away
+        // model maps to NDC z ≈ -0.976 → entire scene clipped
+        // (the "white screen on ortho" symptom). `screen_to_ray`
+        // below matches: it unprojects NDC z = 0 (near) and z = 1
+        // (far) instead of the GL-style ±1.
         match self.projection {
-            Projection::Perspective => Mat4::perspective_rh_gl(
+            Projection::Perspective => Mat4::perspective_rh(
                 self.fov_y,
                 aspect.max(1e-6),
                 self.near,
@@ -142,10 +152,40 @@ impl OrbitCamera {
                 // without producing a visual pop.
                 let half_h = (self.fov_y * 0.5).tan() * self.radius;
                 let half_w = half_h * aspect;
-                Mat4::orthographic_rh_gl(-half_w, half_w, -half_h, half_h, self.near, self.far)
+                Mat4::orthographic_rh(-half_w, half_w, -half_h, half_h, self.near, self.far)
                     .to_cols_array()
             }
         }
+    }
+
+    /// Apply the **minimum-angle** rotation that aligns the
+    /// camera-up vector with world +Z, then pre-multiply the
+    /// orientation by it. After the call, screen-up corresponds
+    /// to world +Z and turntable yaw (which goes around world +Z)
+    /// feels natural again.
+    ///
+    /// Used by the Turntable HUD button when toggling back from
+    /// Trackball: trackball rotation can leave the camera rolled
+    /// or upside-down, so before turntable's yaw-around-+Z kicks
+    /// in we re-align "up." Using `Quat::from_rotation_arc` gives
+    /// the **smallest** possible quaternion rotation that does
+    /// the alignment — the camera moves the minimum amount
+    /// necessary to be turntable-friendly again, which is exactly
+    /// what the user asked for. The full yaw-pitch decomposition
+    /// approach (which always rebuilt orientation from scratch)
+    /// changed the view far more than necessary when the camera
+    /// was nearly aligned.
+    pub fn snap_to_turntable_alignment(&mut self) {
+        let cam_up = (self.orientation * Vec3::Y).normalize_or_zero();
+        if cam_up == Vec3::ZERO {
+            return;
+        }
+        // Already aligned (within ~0.06°) — no-op.
+        if (cam_up - Vec3::Z).length() < 1e-3 {
+            return;
+        }
+        let snap = Quat::from_rotation_arc(cam_up, Vec3::Z);
+        self.orientation = (snap * self.orientation).normalize();
     }
 
     /// Reset the orbit pose to the default 3/4 view (used by the Home
@@ -232,8 +272,34 @@ impl OrbitCamera {
 
     /// Yaw around world-up (+Z) then pitch around the camera's
     /// right axis AFTER the yaw. The pitch is clamped so the
-    /// horizon never flips past horizontal — matches MatterCAD's
+    /// camera can't tip past the world-Z pole — matches MatterCAD's
     /// `TurntableEnabled = true` branch in `DoRotateAroundOrigin`.
+    ///
+    /// ## Sign convention (important)
+    ///
+    /// `pitch_angle > 0` means the user dragged the cursor UP and
+    /// expects the camera to TILT DOWN (eye moves below the bed
+    /// plane, looking up at the model — the "see-from-below" feel
+    /// of MatterCAD turntable drag). Geometrically:
+    ///
+    ///   * The pitch rotation is `Quat::from_axis_angle(cam_right,
+    ///     applied)` around the **horizontal** post-yaw cam-right
+    ///     axis. Rodrigues with `cam_right ⊥ back` and the right-
+    ///     hand rule gives `back.z' = back.z·cos(applied) -
+    ///     |back_h|·sin(applied)`, so `applied > 0` **decreases**
+    ///     `back.z` (camera elevation drops).
+    ///   * Therefore `applied = current_elevation - new_elevation`.
+    ///     We want `new_elevation = current_elevation - pitch_angle`,
+    ///     so `applied = pitch_angle` (subject to the clamp below).
+    ///
+    /// The previous implementation had `target_pitch = (current +
+    /// pitch_angle).clamp(...)` and `applied = target - current`,
+    /// which treated `pitch_angle > 0` as "increase elevation" —
+    /// the opposite of the rotation's true direction. The clamp
+    /// then bounded the wrong side of the motion and the camera
+    /// could freely spin past the poles into gimbal lock; tests
+    /// missed it because they drove in the direction the math
+    /// happened to agree with.
     fn turntable_delta_quat(&self, yaw_angle: f32, pitch_angle: f32) -> Quat {
         let mut q = Quat::IDENTITY;
         if yaw_angle != 0.0 {
@@ -243,16 +309,20 @@ impl OrbitCamera {
             return q;
         }
         // Apply yaw first to find where camera-right ends up; the
-        // pitch is around that post-yaw axis. Same as the original
-        // sequential apply, just expressed as a single combined
-        // quaternion so callers can re-use it for pivot rotation.
+        // pitch is around that post-yaw axis.
         let after_yaw = q * self.orientation;
         let back = after_yaw * Vec3::Z;
-        let current_pitch = back.z.clamp(-1.0, 1.0).asin();
-        let limit = PI * 0.49;
-        let target_pitch = (current_pitch + pitch_angle).clamp(-limit, limit);
-        let applied = target_pitch - current_pitch;
-        if applied == 0.0 {
+        // `current_elevation` is the angle `back` makes above the
+        // XY plane (positive when the eye is above the bed).
+        let current_elevation = back.z.clamp(-1.0, 1.0).asin();
+        // Stop just shy of ±π/2 so the post-clamp orientation
+        // never sits exactly at the pole (where the rotation axis
+        // becomes ambiguous under floating-point error).
+        let limit = PI * 0.499;
+        let raw_target = current_elevation - pitch_angle;
+        let target_elevation = raw_target.clamp(-limit, limit);
+        let applied = current_elevation - target_elevation;
+        if applied.abs() < 1e-6 {
             return q;
         }
         let cam_right = after_yaw * Vec3::X;
@@ -262,6 +332,14 @@ impl OrbitCamera {
     /// MatterCAD-style trackball: the drag vector picks a rotation
     /// axis perpendicular to it in the screen plane, with rotation
     /// magnitude equal to the drag length.
+    ///
+    /// Sign matches turntable: cursor-up (`dy > 0` once the HUD has
+    /// pre-flipped screen Y) tips the camera DOWN so the user sees
+    /// more of the model's underside. We achieve that by negating
+    /// the rotation magnitude relative to the MatterCAD convention
+    /// — MatterCAD rotates the **world**, we rotate the **camera**,
+    /// so the rotation we apply is the inverse of the world
+    /// rotation, hence the sign flip.
     fn trackball_delta_quat(&self, dx: f32, dy: f32) -> Quat {
         let length = (dx * dx + dy * dy).sqrt();
         if length < 1e-6 {
@@ -275,7 +353,11 @@ impl OrbitCamera {
         if axis_world == Vec3::ZERO {
             return Quat::IDENTITY;
         }
-        Quat::from_axis_angle(axis_world, length)
+        // Negative magnitude → rotate the camera the opposite way
+        // from MatterCAD's world rotation, matching the inverse
+        // relationship and aligning the visible result with the
+        // turntable convention above.
+        Quat::from_axis_angle(axis_world, -length)
     }
 
     /// Pan in screen-aligned axes — drag-to-pan semantics.
@@ -361,8 +443,10 @@ impl OrbitCamera {
         let proj = Mat4::from_cols_array(&self.projection_matrix(aspect));
         let inv = (proj * view).inverse();
 
-        // Unproject near (z = -1) and far (z = +1) NDC points into world.
-        let near = inv.project_point3(Vec3::new(ndc_x, ndc_y, -1.0));
+        // Unproject NDC z = 0 (near) and z = 1 (far) — wgpu / Vulkan
+        // depth convention, matching the `_rh` (not `_rh_gl`)
+        // projection matrices built by `projection_matrix`.
+        let near = inv.project_point3(Vec3::new(ndc_x, ndc_y, 0.0));
         let far = inv.project_point3(Vec3::new(ndc_x, ndc_y, 1.0));
         let dir = (far - near).normalize_or_zero();
         (near.to_array(), dir.to_array())
