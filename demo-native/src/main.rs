@@ -17,10 +17,10 @@ use agg_gui::{
 };
 use atomartist_ui::{
     build_app, fresh_state_with_starter_graph, top_menu_bar::FileDialogProvider, DebugWindowHandles,
-    UiSettings,
+    MainWindowState, UiSettings,
 };
 use demo_wgpu::{begin_frame, WgpuGfxCtx};
-use winit::dpi::LogicalSize;
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Event, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::{Window, WindowAttributes};
@@ -111,6 +111,39 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
+/// Per-frame timing breakdown. Every span here is measured around a
+/// specific stage of `paint_frame` so the periodic log can attribute
+/// frame cost to the exact phase responsible. `total_ms` covers the
+/// whole function body (acquire → present), so it includes the GPU
+/// submit + VSync wait that `app.layout` + `app.paint` *don't* see.
+#[derive(Clone, Copy, Default)]
+struct FrameTimings {
+    /// `surface.get_current_texture()` — blocks when the swap chain
+    /// is saturated (e.g. waiting on the previous frame's present).
+    acquire_ms: f32,
+    /// Drain of `WidgetBaseEdit` + `InspectorEdit` queues from the
+    /// inspector panel into the live widget tree.
+    edits_ms: f32,
+    /// `app.collect_inspector_nodes()` — only nonzero when the
+    /// inspector is visible and the invalidation epoch changed.
+    snapshot_ms: f32,
+    /// `app.layout(...)` — recomputes widget bounds.
+    layout_ms: f32,
+    /// `app.paint(ctx)` — appends `DrawCommand`s to the deferred list.
+    paint_ms: f32,
+    /// `ctx.end_frame()` — prepare phase (allocates GPU buffers /
+    /// bind groups for each draw command) + execute phase (records
+    /// the wgpu command encoder and submits to the queue).
+    end_frame_ms: f32,
+    /// `frame.present()` — typically waits on VSync with
+    /// `PresentMode::AutoVsync`.
+    present_ms: f32,
+    /// Wall-clock time for the whole `paint_frame` body. This is
+    /// the value pushed into `SharedFrameHistory` and shown in the
+    /// View → Debug → Performance Graph.
+    total_ms: f32,
+}
+
 fn paint_frame(
     gpu: &Gpu,
     ctx: &mut WgpuGfxCtx,
@@ -120,10 +153,16 @@ fn paint_frame(
     h: u32,
     capture_after: bool,
 ) {
+    let t_total = web_time::Instant::now();
+    let mut t = FrameTimings::default();
+
+    let t_acquire = web_time::Instant::now();
     let frame = match gpu.surface.get_current_texture() {
         wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
         _ => return,
     };
+    t.acquire_ms = elapsed_ms(t_acquire);
+
     // Stash the surface texture handle before begin_frame so the screenshot
     // path can copy from it (capture_screenshot reads ctx.surface_texture).
     ctx.set_surface_texture(frame.texture.clone());
@@ -137,6 +176,7 @@ fn paint_frame(
     // the snapshot the panel reads. Both must happen *before* layout +
     // paint so the inspector sees the post-edit tree and the snapshot
     // matches what we're about to draw.
+    let t_edits = web_time::Instant::now();
     {
         let mut q = debug.base_edits.borrow_mut();
         if !q.is_empty() {
@@ -155,6 +195,9 @@ fn paint_frame(
             INSPECTOR_SNAPSHOT_EPOCH.with(|c| c.set(None));
         }
     }
+    t.edits_ms = elapsed_ms(t_edits);
+
+    let t_snapshot = web_time::Instant::now();
     if debug.inspector_visible.get() {
         let epoch = agg_gui::animation::invalidation_epoch();
         let nodes_empty = debug.inspector_nodes.borrow().is_empty();
@@ -169,25 +212,147 @@ fn paint_frame(
         *debug.hovered_bounds.borrow_mut() = None;
         INSPECTOR_SNAPSHOT_EPOCH.with(|c| c.set(None));
     }
+    t.snapshot_ms = elapsed_ms(t_snapshot);
 
-    // ── Frame timing for the Performance window ─────────────────────
-    // Measure layout + paint and push into the SharedFrameHistory. The
-    // sparkline is what consumes it; "Mean ms/frame" is the same data
-    // reduced over the last 60 samples.
-    let t = web_time::Instant::now();
+    let t_layout = web_time::Instant::now();
     app.layout(Size::new(w as f64, h as f64));
-    app.paint(ctx);
-    let frame_ms = t.elapsed().as_secs_f32() * 1000.0;
-    debug.frame_history.borrow_mut().push(frame_ms);
+    t.layout_ms = elapsed_ms(t_layout);
 
+    let t_paint = web_time::Instant::now();
+    app.paint(ctx);
+    t.paint_ms = elapsed_ms(t_paint);
+
+    let t_end_frame = web_time::Instant::now();
     ctx.end_frame();
+    t.end_frame_ms = elapsed_ms(t_end_frame);
+
     if capture_after {
         // Must run between end_frame (commands flushed) and present
         // (surface texture destroyed). The captured pixels live inside
         // ctx.capture_texture and survive present.
         ctx.capture_screenshot();
     }
+
+    let t_present = web_time::Instant::now();
     frame.present();
+    t.present_ms = elapsed_ms(t_present);
+
+    t.total_ms = elapsed_ms(t_total);
+
+    // The Performance graph now reflects the *full* wall-clock cost
+    // per frame — including GPU submit and VSync wait — not just
+    // `app.layout` + `app.paint`. That's the only number a user can
+    // correlate with the perceived smoothness of the app.
+    debug.frame_history.borrow_mut().push(t.total_ms);
+    record_frame_timings(t);
+}
+
+#[inline]
+fn elapsed_ms(t: web_time::Instant) -> f32 {
+    t.elapsed().as_secs_f32() * 1000.0
+}
+
+// ── Frame-time breakdown logger ─────────────────────────────────────
+// Accumulates per-stage timings and prints an average roughly every
+// 2 seconds to stderr. Useful for explaining a high Performance Graph
+// reading: "where did the time actually go this frame?". The averaging
+// window smooths over per-frame noise; the count tells you how many
+// frames went into the average so you can spot stalls (low count =
+// few frames = something is slow).
+
+const FRAME_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_millis(2000);
+
+thread_local! {
+    static FRAME_TIMING_ACC: std::cell::RefCell<Vec<FrameTimings>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    static FRAME_LOG_LAST: std::cell::Cell<Option<web_time::Instant>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn record_frame_timings(t: FrameTimings) {
+    FRAME_TIMING_ACC.with(|acc| acc.borrow_mut().push(t));
+    let now = web_time::Instant::now();
+    let last = FRAME_LOG_LAST.with(|c| c.get());
+    let should_log = match last {
+        Some(prev) => now.duration_since(prev) >= FRAME_LOG_INTERVAL,
+        None => {
+            FRAME_LOG_LAST.with(|c| c.set(Some(now)));
+            false
+        }
+    };
+    if !should_log {
+        return;
+    }
+    FRAME_LOG_LAST.with(|c| c.set(Some(now)));
+    FRAME_TIMING_ACC.with(|acc| {
+        let buf = acc.borrow();
+        if buf.is_empty() {
+            return;
+        }
+        let n = buf.len() as f32;
+        let avg = |f: fn(&FrameTimings) -> f32| -> f32 {
+            buf.iter().map(f).sum::<f32>() / n
+        };
+        let max_total = buf.iter().map(|t| t.total_ms).fold(0.0_f32, f32::max);
+        eprintln!(
+            "[frame {:>3} samples] total avg={:.2} max={:.2} ms | acquire={:.2} edits={:.2} snapshot={:.2} layout={:.2} paint={:.2} end_frame={:.2} present={:.2}",
+            buf.len(),
+            avg(|t| t.total_ms),
+            max_total,
+            avg(|t| t.acquire_ms),
+            avg(|t| t.edits_ms),
+            avg(|t| t.snapshot_ms),
+            avg(|t| t.layout_ms),
+            avg(|t| t.paint_ms),
+            avg(|t| t.end_frame_ms),
+            avg(|t| t.present_ms),
+        );
+        drop(buf);
+        acc.borrow_mut().clear();
+    });
+}
+
+/// Cast a winit `MonitorHandle` to a plain `(x, y, w, h)` rect in
+/// physical pixels — the shape `MainWindowState::fits_on_monitors`
+/// expects so the validation helper stays winit-agnostic.
+fn monitor_to_rect(m: winit::monitor::MonitorHandle) -> (i32, i32, u32, u32) {
+    let pos = m.position();
+    let size = m.size();
+    (pos.x, pos.y, size.width, size.height)
+}
+
+/// Read the current outer position + inner size + maximized state
+/// from the live `Window`. Used at startup to seed the
+/// "last normal bounds" cache and during persistence to capture
+/// the current maximized flag.
+fn current_main_window_state(window: &Window) -> MainWindowState {
+    let pos = window.outer_position().unwrap_or(PhysicalPosition::new(0, 0));
+    let size = window.inner_size();
+    MainWindowState {
+        x: pos.x,
+        y: pos.y,
+        width: size.width,
+        height: size.height,
+        maximized: window.is_maximized(),
+    }
+}
+
+/// Pick the initial value for the live "last normal bounds" cache.
+/// Prefers the persisted bounds (so the user's pre-maximization
+/// size is preserved across launches) and falls back to whatever
+/// the OS gave us when neither side has anything sensible.
+fn initial_normal_bounds(window: &Window, restored: Option<MainWindowState>) -> MainWindowState {
+    if let Some(r) = restored {
+        // Keep the maximized flag the OS just applied — `restored`
+        // already represents the bounds we asked for, including
+        // the user's last non-maximized geometry.
+        MainWindowState {
+            maximized: window.is_maximized(),
+            ..r
+        }
+    } else {
+        current_main_window_state(window)
+    }
 }
 
 fn translate_winit_button(b: winit::event::MouseButton) -> Option<MouseButton> {
@@ -281,6 +446,17 @@ fn main() {
     let cli = parse_args();
     let event_loop = EventLoop::new().expect("event loop");
 
+    // Load persisted UI settings up-front. We need both the HUD
+    // state (applied to AppState below) AND the OS window
+    // geometry (used at window creation) from the same file, so
+    // do the read here before anything else looks at it. Missing
+    // or unparseable file silently falls back to documented
+    // defaults — never blocks startup.
+    let settings_path = settings_path();
+    let loaded_settings: Option<UiSettings> = settings_path
+        .as_ref()
+        .map(|path| UiSettings::read_from_file(path));
+
     // Install light theme as the default — AtomArtist is a CAD-style design
     // tool where high-contrast white backgrounds match user expectation.
     set_visuals(Visuals::light());
@@ -313,14 +489,74 @@ fn main() {
     agg_gui::font_settings::set_faux_italic(0.0);
     agg_gui::font_settings::set_primary_weight(1.0 / 3.0);
 
-    let window_attributes = WindowAttributes::default()
+    // Compose the initial window placement. We create the window
+    // *hidden* so we can validate the saved position against the
+    // attached monitors via `window.available_monitors()` (winit
+    // 0.30 doesn't expose monitors on `EventLoop`) without a
+    // visible "snap" from the OS-chosen position to the restored
+    // one. Saved size is safe to apply up-front; only the
+    // position needs runtime monitor validation.
+    let saved_main = loaded_settings.as_ref().map(|s| s.main_window);
+    let mut window_attributes = WindowAttributes::default()
         .with_title("AtomArtist")
-        .with_inner_size(LogicalSize::new(1280, 720));
+        .with_visible(false);
+    if let Some(w) = saved_main.filter(|w| w.has_valid_geometry()) {
+        window_attributes = window_attributes
+            .with_position(PhysicalPosition::new(w.x, w.y))
+            .with_inner_size(PhysicalSize::new(w.width, w.height));
+    } else {
+        window_attributes = window_attributes.with_inner_size(LogicalSize::new(1280, 720));
+    }
 
     let window = Arc::new(
         event_loop.create_window(window_attributes).expect("create window"),
     );
     agg_gui::set_device_scale(window.scale_factor());
+
+    // Now that the window exists we have access to the monitor
+    // list. If the saved position doesn't overlap any attached
+    // monitor by at least a draggable patch of title bar, snap
+    // back to the OS-chosen default so the window never opens
+    // invisible. We do this *before* the window becomes visible
+    // so the user sees the corrected placement on the very first
+    // frame.
+    let restored_main = saved_main
+        .filter(|w| {
+            w.has_valid_geometry()
+                && w.fits_on_monitors(window.available_monitors().map(monitor_to_rect))
+        });
+    if restored_main.is_none() && saved_main.is_some_and(|w| w.has_valid_geometry()) {
+        // Saved position is off-screen now — drop it and let the
+        // OS centre the window at the size we restored. The
+        // documented default `LogicalSize(1280, 720)` was already
+        // applied up top, so just clear the user-supplied
+        // position by recentring on the primary monitor.
+        if let Some(primary) = window.available_monitors().next() {
+            let mon = primary.position();
+            let size = primary.size();
+            let centred_x = mon.x + (size.width as i32 - window.inner_size().width as i32) / 2;
+            let centred_y = mon.y + (size.height as i32 - window.inner_size().height as i32) / 2;
+            window.set_outer_position(PhysicalPosition::new(centred_x, centred_y));
+        }
+    }
+    if let Some(w) = restored_main {
+        if w.maximized {
+            window.set_maximized(true);
+        }
+    }
+    window.set_visible(true);
+
+    // Live cache of the most recent *non-maximized* window position
+    // and size — pulled from `WindowEvent::Moved/Resized` so a
+    // user that maximizes mid-session still restores to the right
+    // bounds on next launch. Maximized flag is sampled directly
+    // off the window on save.
+    let normal_bounds: std::rc::Rc<std::cell::Cell<MainWindowState>> = std::rc::Rc::new(
+        std::cell::Cell::new(initial_normal_bounds(&window, restored_main)),
+    );
+    let normal_bounds_for_save = normal_bounds.clone();
+    let normal_bounds_for_events = normal_bounds.clone();
+    let window_for_save = window.clone();
 
     let mut gpu = Gpu::new(Arc::clone(&window));
     let init_w = gpu.config.width as f32;
@@ -335,16 +571,10 @@ fn main() {
 
     // Build the AtomArtist UI with a starter Box visible in the viewport.
     let state = fresh_state_with_starter_graph();
-    // Restore HUD button states (perspective / turntable / bed /
-    // render style / snap) AND the View → Debug window layout from
-    // disk *before* mounting the widget tree so the first paint
-    // reflects what the user left things at. Missing or
-    // unparseable file silently falls back to the documented
-    // defaults — never blocks startup.
-    let settings_path = settings_path();
-    let loaded_settings: Option<UiSettings> = settings_path
-        .as_ref()
-        .map(|path| UiSettings::read_from_file(path));
+    // Apply the HUD button states (perspective / turntable / bed /
+    // render style / snap) that were read from disk at the top of
+    // `main`, *before* mounting the widget tree so the first paint
+    // reflects what the user left things at.
     if let Some(loaded) = loaded_settings {
         state.apply_ui_settings(loaded);
     }
@@ -402,7 +632,28 @@ fn main() {
                     win_h = new_size.height;
                     gpu.resize(win_w, win_h);
                     wgpu_ctx.reset(win_w as f32, win_h as f32);
+                    // Cache the "user's preferred size" only when
+                    // the window isn't maximized — maximizing fires
+                    // a resize event with the monitor's full size,
+                    // and persisting that would clobber the bounds
+                    // we want to restore on un-maximize.
+                    if !window.is_maximized() {
+                        let mut nb = normal_bounds_for_events.get();
+                        nb.width = new_size.width;
+                        nb.height = new_size.height;
+                        normal_bounds_for_events.set(nb);
+                    }
                     window.request_redraw();
+                }
+                Event::WindowEvent {
+                    event: WindowEvent::Moved(pos), ..
+                } => {
+                    if !window.is_maximized() {
+                        let mut nb = normal_bounds_for_events.get();
+                        nb.x = pos.x;
+                        nb.y = pos.y;
+                        normal_bounds_for_events.set(nb);
+                    }
                 }
                 Event::WindowEvent {
                     event: WindowEvent::CursorMoved { position, .. }, ..
@@ -485,14 +736,20 @@ fn main() {
                         settings_auto_save.tick(
                             mouse_buttons_held == 0,
                             || {
-                                // Compose: HUD state from AppState plus
-                                // floating-window layout from the live
-                                // debug handles. Neither owns the other,
-                                // so the shell stitches them together
-                                // each time we render the persistence
-                                // blob.
+                                // Compose: HUD state from AppState
+                                // plus floating-window layout from
+                                // the live debug handles plus the
+                                // OS window's last non-maximized
+                                // bounds + current maximized flag.
+                                // None of these own each other, so
+                                // the shell stitches them together
+                                // each time we render the
+                                // persistence blob.
                                 let mut s = state_for_save.ui_settings();
                                 s.debug_windows = debug_for_save.current_state();
+                                let mut main = normal_bounds_for_save.get();
+                                main.maximized = window_for_save.is_maximized();
+                                s.main_window = main;
                                 s.to_text()
                             },
                             |blob| {

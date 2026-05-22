@@ -13,6 +13,11 @@
 //! show_bed=true
 //! render_style=Shaded
 //! snap_amount=1.0
+//! main_window_x=120
+//! main_window_y=80
+//! main_window_w=1280
+//! main_window_h=720
+//! main_window_maximized=false
 //! inspector_open=false
 //! inspector_x=60
 //! inspector_y=60
@@ -34,6 +39,102 @@
 use std::path::Path;
 
 use atomartist_renderer::RenderStyle;
+
+/// Persisted geometry + maximized flag for the host OS window the
+/// app paints into. Coordinates are **physical pixels** in the OS's
+/// virtual-desktop space (positive Y down, top-left origin) so that
+/// the position survives DPI changes when the user moves the
+/// window between monitors with different scale factors. `width`
+/// or `height` ≤ 0 means "no usable saved geometry, fall back to
+/// the launch defaults" — same convention as `DebugWindowState`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MainWindowState {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub maximized: bool,
+}
+
+impl MainWindowState {
+    /// `true` if the stored geometry is usable. Zero-area means we
+    /// have never persisted real bounds, so the shell should keep
+    /// its first-launch defaults.
+    pub fn has_valid_geometry(&self) -> bool {
+        self.width > 0 && self.height > 0
+    }
+
+    /// Decide whether the saved window placement still overlaps at
+    /// least one of the currently-attached monitors by enough area
+    /// for the user to drag the window. Monitors are passed as
+    /// `(x, y, width, height)` physical-pixel rects (same shape
+    /// `winit::monitor::MonitorHandle` reports). Requires at least
+    /// a `MIN_OVERLAP_WIDTH` × `MIN_OVERLAP_HEIGHT` patch of the
+    /// title-bar strip (top edge of the window) to be visible —
+    /// enough to grab and drag the window back.
+    pub fn fits_on_monitors<I, M>(&self, monitors: I) -> bool
+    where
+        I: IntoIterator<Item = M>,
+        M: Into<(i32, i32, u32, u32)>,
+    {
+        if !self.has_valid_geometry() {
+            return false;
+        }
+        // Restrict the visibility check to the title-bar strip
+        // (top 40 physical pixels of the window). If that strip
+        // is reachable on some monitor, the user can drag the rest
+        // of the window onto the screen.
+        let strip_w = self.width as i32;
+        let strip_h = MIN_OVERLAP_HEIGHT.min(self.height as i32);
+        let strip = (self.x, self.y, strip_w, strip_h);
+        monitors
+            .into_iter()
+            .map(Into::into)
+            .any(|m| rects_overlap_at_least(strip, m, MIN_OVERLAP_WIDTH, MIN_OVERLAP_HEIGHT))
+    }
+}
+
+impl Default for MainWindowState {
+    fn default() -> Self {
+        // Sentinel size of zero so first-launch is detected as
+        // "no saved bounds" and the shell uses its built-in
+        // initial window size. Position is irrelevant when
+        // `has_valid_geometry` returns false.
+        Self {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+            maximized: false,
+        }
+    }
+}
+
+/// Minimum on-screen overlap (physical pixels) of the window's
+/// title-bar strip required for [`MainWindowState::fits_on_monitors`]
+/// to call a saved placement "still reachable".
+pub const MIN_OVERLAP_WIDTH: i32 = 120;
+pub const MIN_OVERLAP_HEIGHT: i32 = 40;
+
+/// Geometry of an axis-aligned overlap test on two screen-space
+/// rectangles in `(x, y, w, h)` form. Returns `true` when the
+/// intersection covers at least `min_w` × `min_h` pixels.
+fn rects_overlap_at_least(
+    a: (i32, i32, i32, i32),
+    b: (i32, i32, u32, u32),
+    min_w: i32,
+    min_h: i32,
+) -> bool {
+    let (ax, ay, aw, ah) = a;
+    let (bx, by, bw, bh) = b;
+    let bw = bw as i32;
+    let bh = bh as i32;
+    let ix0 = ax.max(bx);
+    let iy0 = ay.max(by);
+    let ix1 = (ax + aw).min(bx + bw);
+    let iy1 = (ay + ah).min(by + bh);
+    (ix1 - ix0) >= min_w && (iy1 - iy0) >= min_h
+}
 
 /// Persisted geometry + visibility for one floating debug window
 /// (Inspector or Performance). Bounds are agg-gui Y-up screen
@@ -103,6 +204,12 @@ pub struct UiSettings {
     /// Active snap distance. `0.0` means snapping is off (matches
     /// the GridOptionsPanel "Off" entry).
     pub snap_amount: f64,
+    /// OS window placement (position, size, maximized). Persists
+    /// across launches; the shell validates the position against
+    /// the current monitor layout before applying so a window that
+    /// was last on a now-disconnected monitor falls back to default
+    /// placement instead of opening invisibly.
+    pub main_window: MainWindowState,
     /// Visibility + bounds for the View → Debug floating windows.
     /// These are owned by the widget tree (not `AppState`) so the
     /// shell composes them in via [`crate::debug_windows::DebugWindowHandles`]
@@ -118,6 +225,7 @@ impl Default for UiSettings {
             show_bed: true,
             render_style: RenderStyle::default(),
             snap_amount: 1.0,
+            main_window: MainWindowState::default(),
             debug_windows: DebugWindowsState::default(),
         }
     }
@@ -126,7 +234,7 @@ impl Default for UiSettings {
 impl UiSettings {
     /// Render to the on-disk text format.
     pub fn to_text(&self) -> String {
-        let mut out = String::with_capacity(320);
+        let mut out = String::with_capacity(384);
         out.push_str("# AtomArtist UI settings\n");
         out.push_str(&format!("perspective={}\n", self.perspective));
         out.push_str(&format!("turntable={}\n", self.turntable));
@@ -138,6 +246,7 @@ impl UiSettings {
         // Use the default `{}` formatting so simple values like `1`
         // round-trip cleanly without a trailing ".0".
         out.push_str(&format!("snap_amount={}\n", self.snap_amount));
+        write_main_window(&mut out, &self.main_window);
         write_debug_window(&mut out, "inspector", &self.debug_windows.inspector);
         write_debug_window(&mut out, "performance", &self.debug_windows.performance);
         out
@@ -186,6 +295,9 @@ impl UiSettings {
                     }
                 }
                 _ => {
+                    if apply_main_window_kv(&mut out.main_window, key, value) {
+                        continue;
+                    }
                     apply_debug_window_kv(&mut out.debug_windows, key, value);
                 }
             }
@@ -238,6 +350,53 @@ fn render_style_from_token(s: &str) -> Option<RenderStyle> {
         "Wireframe" | "wireframe" | "Polygons" | "polygons" => Some(RenderStyle::Wireframe),
         _ => None,
     }
+}
+
+fn write_main_window(out: &mut String, state: &MainWindowState) {
+    out.push_str(&format!("main_window_x={}\n", state.x));
+    out.push_str(&format!("main_window_y={}\n", state.y));
+    out.push_str(&format!("main_window_w={}\n", state.width));
+    out.push_str(&format!("main_window_h={}\n", state.height));
+    out.push_str(&format!("main_window_maximized={}\n", state.maximized));
+}
+
+/// Returns `true` if the key was a `main_window_*` field (regardless
+/// of whether the value parsed cleanly). Lets the dispatch in
+/// `from_text` fall through to `apply_debug_window_kv` for everything
+/// else without the two parsers stepping on each other.
+fn apply_main_window_kv(state: &mut MainWindowState, key: &str, value: &str) -> bool {
+    let Some(suffix) = key.strip_prefix("main_window_") else {
+        return false;
+    };
+    match suffix {
+        "x" => {
+            if let Ok(n) = value.parse::<i32>() {
+                state.x = n;
+            }
+        }
+        "y" => {
+            if let Ok(n) = value.parse::<i32>() {
+                state.y = n;
+            }
+        }
+        "w" => {
+            if let Ok(n) = value.parse::<u32>() {
+                state.width = n;
+            }
+        }
+        "h" => {
+            if let Ok(n) = value.parse::<u32>() {
+                state.height = n;
+            }
+        }
+        "maximized" => {
+            if let Some(b) = parse_bool(value) {
+                state.maximized = b;
+            }
+        }
+        _ => {}
+    }
+    true
 }
 
 fn write_debug_window(out: &mut String, prefix: &str, state: &DebugWindowState) {
@@ -318,6 +477,13 @@ mod tests {
             show_bed: false,
             render_style: RenderStyle::Wireframe,
             snap_amount: 0.25,
+            main_window: MainWindowState {
+                x: 250,
+                y: 180,
+                width: 1600,
+                height: 900,
+                maximized: true,
+            },
             debug_windows: DebugWindowsState {
                 inspector: DebugWindowState {
                     open: true,
@@ -353,6 +519,104 @@ mod tests {
         assert!(!s.perspective);
         assert!(!s.turntable);
         assert_eq!(s.debug_windows, DebugWindowsState::default());
+        assert_eq!(s.main_window, MainWindowState::default());
+    }
+
+    #[test]
+    fn default_main_window_state_is_not_geometry_valid() {
+        // Sentinel zero-size means "no saved geometry" so the
+        // shell falls back to its built-in launch defaults.
+        assert!(!MainWindowState::default().has_valid_geometry());
+    }
+
+    #[test]
+    fn main_window_fits_when_fully_inside_a_monitor() {
+        let win = MainWindowState {
+            x: 200,
+            y: 200,
+            width: 1280,
+            height: 720,
+            maximized: false,
+        };
+        // Single 1920×1080 monitor at origin.
+        let monitors = vec![(0, 0, 1920u32, 1080u32)];
+        assert!(win.fits_on_monitors(monitors));
+    }
+
+    #[test]
+    fn main_window_does_not_fit_when_completely_off_screen() {
+        // Window saved on a 1920×1080 second monitor that has been
+        // detached. The remaining primary monitor at (0, 0) sees
+        // nothing of the window.
+        let win = MainWindowState {
+            x: 2500,
+            y: 400,
+            width: 1280,
+            height: 720,
+            maximized: false,
+        };
+        let monitors = vec![(0, 0, 1920u32, 1080u32)];
+        assert!(!win.fits_on_monitors(monitors));
+    }
+
+    #[test]
+    fn main_window_fits_when_title_bar_just_pokes_onto_a_monitor() {
+        // Window is mostly off the right edge but the title bar
+        // strip still overlaps the monitor by more than the
+        // minimum-drag width — user can still reach it.
+        let win = MainWindowState {
+            x: 1700, // monitor goes to x = 1920, so 220px visible
+            y: 100,
+            width: 800,
+            height: 600,
+            maximized: false,
+        };
+        let monitors = vec![(0, 0, 1920u32, 1080u32)];
+        assert!(win.fits_on_monitors(monitors));
+    }
+
+    #[test]
+    fn main_window_does_not_fit_when_only_a_sliver_is_visible() {
+        // 50 px of overlap is less than `MIN_OVERLAP_WIDTH` (120 px)
+        // — not enough to grab and drag.
+        let win = MainWindowState {
+            x: 1870, // 50 px until the 1920 right edge
+            y: 100,
+            width: 800,
+            height: 600,
+            maximized: false,
+        };
+        let monitors = vec![(0, 0, 1920u32, 1080u32)];
+        assert!(!win.fits_on_monitors(monitors));
+    }
+
+    #[test]
+    fn main_window_fits_on_secondary_monitor_when_primary_does_not() {
+        // Two monitors side by side; the saved position is on the
+        // secondary. `fits_on_monitors` must accept overlap with
+        // *any* monitor, not just the first one.
+        let win = MainWindowState {
+            x: 2400,
+            y: 200,
+            width: 1280,
+            height: 720,
+            maximized: false,
+        };
+        let monitors = vec![
+            (0, 0, 1920u32, 1080u32),     // primary
+            (1920, 0, 1920u32, 1080u32),  // secondary on the right
+        ];
+        assert!(win.fits_on_monitors(monitors));
+    }
+
+    #[test]
+    fn invalid_geometry_never_fits() {
+        // Zero-size geometry is the sentinel for "no saved bounds"
+        // and must always be reported as unfit so callers fall back
+        // to first-launch placement.
+        let win = MainWindowState::default();
+        let monitors = vec![(0, 0, 1920u32, 1080u32)];
+        assert!(!win.fits_on_monitors(monitors));
     }
 
     #[test]

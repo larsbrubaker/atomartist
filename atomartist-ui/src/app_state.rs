@@ -305,9 +305,10 @@ impl AppState {
     /// for persistence. Callers serialise this to disk via
     /// `UiSettings::write_to_file`.
     ///
-    /// The `debug_windows` field is filled in with defaults — the
-    /// shell owns the live [`crate::DebugWindowHandles`] and is
-    /// responsible for splicing the current window layout in before
+    /// `debug_windows` and `main_window` are filled in with
+    /// defaults — those live outside `AppState` (the widget tree
+    /// and the platform shell respectively), so the shell is
+    /// responsible for splicing the current values in before
     /// writing the settings blob (see `demo-native::main`).
     pub fn ui_settings(&self) -> crate::UiSettings {
         crate::UiSettings {
@@ -316,6 +317,7 @@ impl AppState {
             show_bed: *self.show_bed.lock().unwrap(),
             render_style: *self.render_style.lock().unwrap(),
             snap_amount: *self.snap_amount.lock().unwrap(),
+            main_window: crate::MainWindowState::default(),
             debug_windows: crate::DebugWindowsState::default(),
         }
     }

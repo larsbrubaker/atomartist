@@ -23,7 +23,10 @@ use agg_gui::widget::{
     find_widget_by_id, find_widget_by_id_mut, find_widget_by_type, InspectorNode,
 };
 use agg_gui::{App, Key, Modifiers, MouseButton, Size, Widget};
-use atomartist_ui::{build_app, fresh_state_with_builtins, fresh_state_with_starter_graph, AppState};
+use atomartist_ui::{
+    build_app, fresh_state_with_builtins, fresh_state_with_starter_graph, AppState,
+    DebugWindowHandles,
+};
 use atomartist_ui::top_menu_bar::NoFileDialogs;
 
 /// Default viewport size — matches NodeDesigner's reference window so
@@ -40,6 +43,12 @@ const FONT_BYTES: &[u8] =
 pub struct TestHarness {
     state: AppState,
     app: App,
+    /// Handles owned by the View → Debug floating windows. Tests
+    /// use these to assert visibility toggles fire on menu clicks,
+    /// to push synthetic frame samples into the performance graph,
+    /// and to drain the same inspector edit queue the production
+    /// shell drains each paint.
+    debug: DebugWindowHandles,
     cursor: (f64, f64),
     modifiers: Modifiers,
     size: (f64, f64),
@@ -77,12 +86,17 @@ impl TestHarness {
         agg_gui::font_settings::set_system_font(Some(font));
         let dialogs: Arc<dyn atomartist_ui::top_menu_bar::FileDialogProvider> =
             Arc::new(NoFileDialogs);
-        let (root, _debug): (Box<dyn Widget>, _) = build_app(state.clone(), dialogs, None);
+        // Harness always starts with the documented default debug
+        // window layout — tests that care about persistence build
+        // their own UiSettings and pass it directly to build_app.
+        let (root, debug): (Box<dyn Widget>, DebugWindowHandles) =
+            build_app(state.clone(), dialogs, None);
         let mut app = App::new(root);
         app.layout(Size::new(DEFAULT_WIDTH, DEFAULT_HEIGHT));
         Self {
             state,
             app,
+            debug,
             cursor: (0.0, 0.0),
             modifiers: Modifiers::default(),
             size: (DEFAULT_WIDTH, DEFAULT_HEIGHT),
@@ -113,6 +127,13 @@ impl TestHarness {
     }
     pub fn app_mut(&mut self) -> &mut App {
         &mut self.app
+    }
+
+    /// Borrow the View → Debug window handles. Lets tests assert on
+    /// the inspector / performance window visibility cells and push
+    /// synthetic samples into the shared frame history.
+    pub fn debug(&self) -> &DebugWindowHandles {
+        &self.debug
     }
 
     // ── Reflection-based widget lookup ────────────────────────────────
