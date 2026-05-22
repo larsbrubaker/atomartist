@@ -625,8 +625,13 @@ impl Widget for Viewport3dWidget {
             } else {
                 [0.74, 0.78, 0.86, 1.0]
             };
+            // Light theme → muted greyish-blue lines that read against a
+            // near-white bed. Dark theme → near-white lines so the grid
+            // still pops against the dark backdrop (matches
+            // NodeDesigner's `setShadowTheme` which flips both the
+            // shadow and the grid colour together).
             s.grid_line_color = if dark {
-                [0.55, 0.58, 0.66, 0.55]
+                [0.85, 0.88, 0.94, 0.40]
             } else {
                 [0.55, 0.58, 0.66, 0.55]
             };

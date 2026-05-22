@@ -104,13 +104,15 @@ fn rectangle_through_extrude_produces_solid() {
     en.properties.insert("height", PortValue::Number(3.0));
     g.add_node(rn).unwrap();
     g.add_node(en).unwrap();
+    // Extrude's input socket is `Paths` (Path2d), not `input`.
     g.connect(
-        Edge { from: SocketId { node: r, name: "out" }, to: SocketId { node: e, name: "input" } },
+        Edge { from: SocketId { node: r, name: "out" }, to: SocketId { node: e, name: "Paths" } },
         &reg,
     ).unwrap();
 
     atomartist_lib::graph::executor::evaluate_all(&mut g, &reg).unwrap();
-    match g.get(e).unwrap().cached_outputs.get("out") {
+    // Extrude's output socket is named `Geometry`.
+    match g.get(e).unwrap().cached_outputs.get("Geometry") {
         Some(PortValue::Geometry3d(m)) => {
             // Extrude produces caps + sides; vert count > 0, tri count > 0.
             assert!(m.vert_properties.len() > 0);
@@ -127,7 +129,7 @@ fn rectangle_through_extrude_produces_solid() {
             assert!((z_min + 1.5).abs() < 1e-4);
             assert!((z_max - 1.5).abs() < 1e-4);
         }
-        _ => panic!("expected Geometry3d on Extrude.out"),
+        _ => panic!("expected Geometry3d on Extrude.Geometry"),
     }
 }
 

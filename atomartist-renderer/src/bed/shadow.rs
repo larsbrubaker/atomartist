@@ -94,6 +94,13 @@ pub struct MeshRef<'a> {
 /// `wgpu` keeps the underlying texture alive via the view's internal
 /// `Arc`, so the storage textures themselves don't need separate
 /// fields — only the views we sample / render with.
+///
+/// All per-pass uniform buffers and bind groups are allocated once
+/// during construction and reused frame after frame — uniforms are
+/// rewritten via [`wgpu::Queue::write_buffer`], not freshly created.
+/// Freshly allocating GPU resources every frame was costing ~115ms
+/// on a discrete GPU; the per-pass allocations matter even when the
+/// chain itself does run.
 pub(super) struct ShadowChain {
     shadow_view: wgpu::TextureView,
     blur_a_view: wgpu::TextureView,
@@ -108,19 +115,37 @@ pub(super) struct ShadowChain {
     quad_vbuf: wgpu::Buffer,
 
     shadow_caster_pipeline: wgpu::RenderPipeline,
-    shadow_caster_bgl: wgpu::BindGroupLayout,
+    /// Persistent UB + BG for the shadow caster's MVP.
+    shadow_caster_ub: wgpu::Buffer,
+    shadow_caster_bg: wgpu::BindGroup,
 
     blur_pipeline: wgpu::RenderPipeline,
-    blur_bgl: wgpu::BindGroupLayout,
+    /// Persistent UB + BGs for the two blur passes (H + V) — uniforms
+    /// differ only in the `direction` field which is rewritten per
+    /// run; everything else (source view, sampler, radius) is fixed
+    /// per direction.
+    blur_h_ub: wgpu::Buffer,
+    blur_h_bg: wgpu::BindGroup,
+    blur_v_ub: wgpu::Buffer,
+    blur_v_bg: wgpu::BindGroup,
 
     composite_pipeline: wgpu::RenderPipeline,
+    /// Persistent UB for the composite pass; rewritten each time the
+    /// opacity / invert flag changes (cheap `write_buffer` call).
+    composite_ub: wgpu::Buffer,
     composite_bgl: wgpu::BindGroupLayout,
+    /// Persistent bind group keyed on the current grid view. Cleared
+    /// by [`Self::invalidate_grid_binding`] whenever the bed renderer
+    /// re-bakes its grid texture (theme change) — the chain rebuilds
+    /// it on the next `render` call.
+    composite_bg: std::cell::RefCell<Option<wgpu::BindGroup>>,
 
     /// Pass-through downsample pipeline used to populate
     /// `composite_tex` mips 1..N from mip 0. Same texture, separate
-    /// view per level.
+    /// view per level. Bind groups are pre-built one per level → no
+    /// per-frame allocations inside the mip-gen loop.
     mip_pipeline: wgpu::RenderPipeline,
-    mip_bgl: wgpu::BindGroupLayout,
+    mip_bgs: Vec<wgpu::BindGroup>,
 
     /// Linear-clamp sampler reused across blur / composite / mip gen.
     linear_sampler: wgpu::Sampler,
@@ -195,16 +220,62 @@ impl ShadowChain {
         // ── Shadow caster pipeline ───────────────────────────────────
         let (shadow_caster_pipeline, shadow_caster_bgl) =
             build_shadow_caster_pipeline(device, CHAIN_FORMAT);
+        let shadow_caster_ub = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("atomartist bed shadow ub"),
+            size: std::mem::size_of::<ShadowCasterUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let shadow_caster_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("atomartist bed shadow bg"),
+            layout: &shadow_caster_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: shadow_caster_ub.as_entire_binding(),
+            }],
+        });
 
         // ── Blur pipeline ────────────────────────────────────────────
         let (blur_pipeline, blur_bgl) = build_blur_pipeline(device, CHAIN_FORMAT);
+        let (blur_h_ub, blur_h_bg) = build_blur_resources(
+            device, &blur_bgl, &linear_sampler, &shadow_view, "h",
+        );
+        let (blur_v_ub, blur_v_bg) = build_blur_resources(
+            device, &blur_bgl, &linear_sampler, &blur_a_view, "v",
+        );
 
         // ── Composite pipeline ───────────────────────────────────────
         let (composite_pipeline, composite_bgl) =
             build_composite_pipeline(device, composite_format);
+        let composite_ub = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("atomartist bed composite ub"),
+            size: std::mem::size_of::<CompositeUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
-        // ── Mip-gen pipeline ─────────────────────────────────────────
+        // ── Mip-gen pipeline + per-level bind groups ────────────────
         let (mip_pipeline, mip_bgl) = build_mip_pipeline(device, composite_format);
+        let mip_bgs: Vec<wgpu::BindGroup> = (1..composite_mip_count)
+            .map(|level| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("atomartist bed mip bg"),
+                    layout: &mip_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(
+                                &composite_mip_views[(level - 1) as usize],
+                            ),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&linear_sampler),
+                        },
+                    ],
+                })
+            })
+            .collect();
 
         Self {
             shadow_view,
@@ -215,13 +286,19 @@ impl ShadowChain {
             composite_mip_count,
             quad_vbuf,
             shadow_caster_pipeline,
-            shadow_caster_bgl,
+            shadow_caster_ub,
+            shadow_caster_bg,
             blur_pipeline,
-            blur_bgl,
+            blur_h_ub,
+            blur_h_bg,
+            blur_v_ub,
+            blur_v_bg,
             composite_pipeline,
+            composite_ub,
             composite_bgl,
+            composite_bg: std::cell::RefCell::new(None),
             mip_pipeline,
-            mip_bgl,
+            mip_bgs,
             linear_sampler,
             composite_opacity: DEFAULT_SHADOW_OPACITY,
             composite_invert: 0.0,
@@ -243,6 +320,15 @@ impl ShadowChain {
         self.composite_opacity
     }
 
+    /// Drop the cached composite bind group so the next `render` call
+    /// rebuilds it against the new grid view. Called by
+    /// [`super::BedRenderer::set_line_color`] after re-baking the grid
+    /// texture (theme flip) — without this the composite pass would
+    /// keep sampling the stale grid texture.
+    pub(super) fn invalidate_grid_binding(&self) {
+        *self.composite_bg.borrow_mut() = None;
+    }
+
     /// Record the silhouette → blur → composite → mip chain into
     /// `encoder`. When `mesh` is `None`, the silhouette pass just
     /// clears its target so the composite is grid-only.
@@ -253,22 +339,23 @@ impl ShadowChain {
     pub(super) fn render(
         &self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         mesh: Option<MeshRef<'_>>,
         grid_view: &wgpu::TextureView,
         bed_z: f32,
         camera_center_xy: [f32; 2],
     ) {
-        self.run_shadow_pass(device, encoder, mesh, bed_z, camera_center_xy);
-        self.run_blur_pass(device, encoder, &self.shadow_view, &self.blur_a_view, [1.0, 0.0]);
-        self.run_blur_pass(device, encoder, &self.blur_a_view, &self.blur_b_view, [0.0, 1.0]);
-        self.run_composite_pass(device, encoder, grid_view, &self.blur_b_view);
-        self.regenerate_composite_mips(device, encoder);
+        self.run_shadow_pass(queue, encoder, mesh, bed_z, camera_center_xy);
+        self.run_blur_h(queue, encoder);
+        self.run_blur_v(queue, encoder);
+        self.run_composite_pass(device, queue, encoder, grid_view);
+        self.regenerate_composite_mips(encoder);
     }
 
     fn run_shadow_pass(
         &self,
-        device: &wgpu::Device,
+        queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         mesh: Option<MeshRef<'_>>,
         bed_z: f32,
@@ -285,19 +372,8 @@ impl ShadowChain {
         let mvp = (proj * view).to_cols_array();
 
         let uniforms = ShadowCasterUniforms { mvp };
-        let ub = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("atomartist bed shadow ub"),
-            contents: bytemuck::bytes_of(&uniforms),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
-        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("atomartist bed shadow bg"),
-            layout: &self.shadow_caster_bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: ub.as_entire_binding(),
-            }],
-        });
+        queue.write_buffer(&self.shadow_caster_ub, 0, bytemuck::bytes_of(&uniforms));
+
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("atomartist bed shadow pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -326,54 +402,38 @@ impl ShadowChain {
         if let Some(m) = mesh {
             if m.index_count > 0 {
                 pass.set_pipeline(&self.shadow_caster_pipeline);
-                pass.set_bind_group(0, &bg, &[]);
+                pass.set_bind_group(0, &self.shadow_caster_bg, &[]);
                 pass.set_vertex_buffer(0, m.vbuf.slice(..));
                 pass.set_index_buffer(m.ibuf.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..m.index_count, 0, 0..1);
             }
         }
-        drop(pass);
-        let _ = (ub, bg);
     }
 
-    fn run_blur_pass(
+    fn run_blur_h(&self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder) {
+        queue.write_buffer(
+            &self.blur_h_ub,
+            0,
+            bytemuck::bytes_of(&blur_uniforms([1.0, 0.0])),
+        );
+        self.encode_blur(encoder, &self.blur_a_view, &self.blur_h_bg);
+    }
+
+    fn run_blur_v(&self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder) {
+        queue.write_buffer(
+            &self.blur_v_ub,
+            0,
+            bytemuck::bytes_of(&blur_uniforms([0.0, 1.0])),
+        );
+        self.encode_blur(encoder, &self.blur_b_view, &self.blur_v_bg);
+    }
+
+    fn encode_blur(
         &self,
-        device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
-        src: &wgpu::TextureView,
         dst: &wgpu::TextureView,
-        direction: [f32; 2],
+        bg: &wgpu::BindGroup,
     ) {
-        let uniforms = BlurUniforms {
-            inv_resolution: [
-                1.0 / SHADOW_TEX_SIZE as f32,
-                1.0 / SHADOW_TEX_SIZE as f32,
-            ],
-            direction,
-            radius: BLUR_RADIUS,
-            _pad: 0.0,
-            _pad2: [0.0; 2],
-        };
-        let ub = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("atomartist bed blur ub"),
-            contents: bytemuck::bytes_of(&uniforms),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
-        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("atomartist bed blur bg"),
-            layout: &self.blur_bgl,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: ub.as_entire_binding() },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(src),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
-                },
-            ],
-        });
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("atomartist bed blur pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -400,51 +460,57 @@ impl ShadowChain {
         );
         pass.set_scissor_rect(0, 0, SHADOW_TEX_SIZE, SHADOW_TEX_SIZE);
         pass.set_pipeline(&self.blur_pipeline);
-        pass.set_bind_group(0, &bg, &[]);
+        pass.set_bind_group(0, bg, &[]);
         pass.set_vertex_buffer(0, self.quad_vbuf.slice(..));
         pass.draw(0..6, 0..1);
-        drop(pass);
-        let _ = (ub, bg);
     }
 
     fn run_composite_pass(
         &self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         grid_view: &wgpu::TextureView,
-        shadow_view: &wgpu::TextureView,
     ) {
         let uniforms = CompositeUniforms {
             params: [self.composite_opacity, self.composite_invert, 0.0, 0.0],
         };
-        let ub = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("atomartist bed composite ub"),
-            contents: bytemuck::bytes_of(&uniforms),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
-        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("atomartist bed composite bg"),
-            layout: &self.composite_bgl,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: ub.as_entire_binding() },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(grid_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(shadow_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
-                },
-            ],
-        });
+        queue.write_buffer(&self.composite_ub, 0, bytemuck::bytes_of(&uniforms));
+
+        // Lazily (re)build the composite bind group on first use and
+        // any time `invalidate_grid_binding` cleared it — both are
+        // rare events (startup, theme flip).
+        let mut bg_slot = self.composite_bg.borrow_mut();
+        if bg_slot.is_none() {
+            *bg_slot = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("atomartist bed composite bg"),
+                layout: &self.composite_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.composite_ub.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(grid_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&self.blur_b_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
+                    },
+                ],
+            }));
+        }
+        let bg = bg_slot.as_ref().expect("composite_bg just populated");
+
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("atomartist bed composite pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -471,37 +537,17 @@ impl ShadowChain {
         );
         pass.set_scissor_rect(0, 0, SHADOW_TEX_SIZE, SHADOW_TEX_SIZE);
         pass.set_pipeline(&self.composite_pipeline);
-        pass.set_bind_group(0, &bg, &[]);
+        pass.set_bind_group(0, bg, &[]);
         pass.set_vertex_buffer(0, self.quad_vbuf.slice(..));
         pass.draw(0..6, 0..1);
-        drop(pass);
-        let _ = (ub, bg);
     }
 
-    fn regenerate_composite_mips(
-        &self,
-        device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
-    ) {
+    fn regenerate_composite_mips(&self, encoder: &mut wgpu::CommandEncoder) {
         for level in 1..self.composite_mip_count {
-            let src_view = &self.composite_mip_views[(level - 1) as usize];
             let dst_view = &self.composite_mip_views[level as usize];
             let dst_w = (SHADOW_TEX_SIZE >> level).max(1);
             let dst_h = (SHADOW_TEX_SIZE >> level).max(1);
-            let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("atomartist bed mip bg"),
-                layout: &self.mip_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(src_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
-                    },
-                ],
-            });
+            let bg = &self.mip_bgs[(level - 1) as usize];
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("atomartist bed mip pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -521,11 +567,56 @@ impl ShadowChain {
             pass.set_viewport(0.0, 0.0, dst_w as f32, dst_h as f32, 0.0, 1.0);
             pass.set_scissor_rect(0, 0, dst_w, dst_h);
             pass.set_pipeline(&self.mip_pipeline);
-            pass.set_bind_group(0, &bg, &[]);
+            pass.set_bind_group(0, bg, &[]);
             pass.set_vertex_buffer(0, self.quad_vbuf.slice(..));
             pass.draw(0..6, 0..1);
-            drop(pass);
-            let _ = bg;
         }
     }
+}
+
+fn blur_uniforms(direction: [f32; 2]) -> BlurUniforms {
+    BlurUniforms {
+        inv_resolution: [
+            1.0 / SHADOW_TEX_SIZE as f32,
+            1.0 / SHADOW_TEX_SIZE as f32,
+        ],
+        direction,
+        radius: BLUR_RADIUS,
+        _pad: 0.0,
+        _pad2: [0.0; 2],
+    }
+}
+
+fn build_blur_resources(
+    device: &wgpu::Device,
+    bgl: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    src_view: &wgpu::TextureView,
+    label_suffix: &str,
+) -> (wgpu::Buffer, wgpu::BindGroup) {
+    let ub = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(&format!("atomartist bed blur ub {label_suffix}")),
+        size: std::mem::size_of::<BlurUniforms>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(&format!("atomartist bed blur bg {label_suffix}")),
+        layout: bgl,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: ub.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(src_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
+    });
+    (ub, bg)
 }

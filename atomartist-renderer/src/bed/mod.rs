@@ -16,6 +16,8 @@
 //! `draw_bed`, `set_line_color`, `set_dark_mode`) are the only API
 //! the scene renderer needs.
 
+use std::cell::Cell;
+
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
@@ -30,6 +32,32 @@ use texture::bake_grid_texture;
 
 pub use shadow::MeshRef;
 
+/// All inputs that affect the contents of `composite_tex`. When this
+/// matches the value used to populate the texture, the entire
+/// silhouette → blur → composite → mip chain can be skipped — saves
+/// ~14 render passes per idle frame. See `BedRenderer::render_to_composite`.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct CompositeKey {
+    /// Stable identity for the mesh's vertex/index buffers. `0` ⇒ no
+    /// mesh (composite reduces to the grid alone). The scene renderer
+    /// already tracks mesh upload identity via its `mesh_ptr` field,
+    /// so we forward that value here unchanged.
+    mesh_id: u64,
+    /// Camera centre, quantised to 0.01 world units. The shadow ortho
+    /// is anchored to this XY so the silhouette stays under the
+    /// model as the user pans; sub-pixel jitter shouldn't churn the
+    /// cache.
+    cam_x_q: i32,
+    cam_y_q: i32,
+    /// `1` ⇒ dark-mode shadow inversion enabled.
+    invert_flag: u8,
+    /// Grid-line colour packed as RGBA8. Re-baking the grid texture
+    /// is what actually invalidates the composite — but tracking the
+    /// colour here makes the dependency explicit and survives the
+    /// `colors_equal` quantisation step in `set_line_color`.
+    color_key: u32,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct BedUniforms {
@@ -37,6 +65,12 @@ struct BedUniforms {
     /// xy = half-extents of the bed quad in world units,
     /// z = world-Z height of the plane, w = pad.
     plane: [f32; 4],
+    /// xy = world-space XY offset added to every quad vertex so the
+    /// bed follows the camera-pan pivot. The contact-shadow ortho is
+    /// also anchored to this XY, so keeping the quad in lockstep
+    /// means the UV-to-world mapping is identity regardless of pan.
+    /// zw = pad.
+    bed_offset: [f32; 4],
 }
 
 #[repr(C)]
@@ -60,11 +94,33 @@ pub struct BedRenderer {
     /// we keep only the view (re-bake replaces it).
     grid_view: wgpu::TextureView,
     grid_line_color: [f32; 4],
+    /// Tracks the current dark-mode flag for [`CompositeKey`] so the
+    /// invalidation logic in `render_to_composite` can detect a
+    /// theme flip without rereading the chain's private state.
+    is_dark: bool,
 
     bed_pipeline: wgpu::RenderPipeline,
-    bed_bgl: wgpu::BindGroupLayout,
     bed_vbuf: wgpu::Buffer,
-    bed_sampler: wgpu::Sampler,
+    /// Kept alive only to back the persistent `bed_bg` below — the
+    /// sampler binding holds a borrow into this field internally.
+    _bed_sampler: wgpu::Sampler,
+    /// Persistent uniform buffer + bind group for the bed quad —
+    /// rewritten via `queue.write_buffer` each frame instead of being
+    /// reallocated. Allocating fresh wgpu resources per frame is the
+    /// single biggest source of CPU-side render overhead in the
+    /// frame-time logger, and a static-size UB lets us avoid it.
+    bed_ub: wgpu::Buffer,
+    bed_bg: wgpu::BindGroup,
+
+    /// Last `CompositeKey` the offscreen chain was rendered with.
+    /// `None` means the composite texture has never been populated
+    /// (first frame) and must be rendered unconditionally. Interior
+    /// mutability so `render_to_composite` can stay `&self`.
+    last_composite_key: Cell<Option<CompositeKey>>,
+    /// Frames since startup. Used purely by the diagnostic logging in
+    /// `render_to_composite` so we can rate-limit the cache-miss
+    /// chatter on stderr (set `ATOMARTIST_BED_LOG=1` to enable).
+    frame_counter: Cell<u64>,
 }
 
 impl BedRenderer {
@@ -116,15 +172,50 @@ impl BedRenderer {
         let (bed_pipeline, bed_bgl) =
             build_bed_pipeline(device, surface_format, msaa_sample_count);
 
+        let bed_ub = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("atomartist bed quad ub"),
+            size: std::mem::size_of::<BedUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        // The composite view, sampler, and uniform buffer are all
+        // stable for the lifetime of the renderer — re-baking the
+        // grid does NOT invalidate the bed quad's bind group because
+        // the quad samples `composite_view`, not the grid view. We
+        // can therefore allocate the bind group once and reuse it
+        // every frame.
+        let bed_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("atomartist bed quad bg"),
+            layout: &bed_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: bed_ub.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(chain.composite_view()),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&bed_sampler),
+                },
+            ],
+        });
+
         Self {
             surface_format,
             chain,
             grid_view,
             grid_line_color: initial_line_color,
+            is_dark: false,
             bed_pipeline,
-            bed_bgl,
             bed_vbuf,
-            bed_sampler,
+            _bed_sampler: bed_sampler,
+            bed_ub,
+            bed_bg,
+            last_composite_key: Cell::new(None),
+            frame_counter: Cell::new(0),
         }
     }
 
@@ -138,7 +229,9 @@ impl BedRenderer {
 
     /// Re-bake the grid texture with a new line colour. Cheap — single
     /// CPU paint + mip box-downsample + upload, runs once per theme
-    /// change.
+    /// change. The shadow chain's composite bind group references the
+    /// old grid view, so it must be invalidated here; the chain will
+    /// rebuild it lazily on its next `render` call.
     pub fn set_line_color(
         &mut self,
         device: &wgpu::Device,
@@ -151,81 +244,136 @@ impl BedRenderer {
         self.grid_line_color = new_color;
         self.grid_view = bake_grid_texture(device, queue, self.surface_format, new_color)
             .create_view(&wgpu::TextureViewDescriptor::default());
+        self.chain.invalidate_grid_binding();
     }
 
     /// Inverts the composite shader's shadow colour for dark themes
     /// (white shadows against a dark bed); pass `false` for light
     /// themes (black shadows). Cheap — single uniform value flip.
     pub fn set_dark_mode(&mut self, is_dark: bool) {
+        self.is_dark = is_dark;
         self.chain.set_dark_mode(is_dark);
     }
 
     /// Run the silhouette → blur → composite → mip chain. Pass `None`
     /// for `mesh` when no model is loaded — the shadow pass just
     /// clears its target and the composite is grid-only.
+    ///
+    /// `mesh_id` is a stable identity for the mesh buffers (the scene
+    /// renderer's `mesh_ptr`, or `0` for "no mesh"). When the inputs
+    /// are unchanged from the last successful render, the entire
+    /// chain is skipped — the composite texture is already correct
+    /// and re-running 14 GPU passes would just retrace the same
+    /// pixels. This is what keeps the bed cheap on idle frames.
     pub fn render_to_composite(
         &self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         mesh: Option<MeshRef<'_>>,
+        mesh_id: u64,
         bed_z: f32,
         camera_center_xy: [f32; 2],
     ) {
+        let key = CompositeKey {
+            mesh_id: if mesh.is_some() { mesh_id } else { 0 },
+            cam_x_q: (camera_center_xy[0] * 100.0).round() as i32,
+            cam_y_q: (camera_center_xy[1] * 100.0).round() as i32,
+            invert_flag: u8::from(self.is_dark),
+            color_key: pack_rgba8(self.grid_line_color),
+        };
+        let prev = self.last_composite_key.get();
+        if prev == Some(key) {
+            self.frame_counter.set(self.frame_counter.get().wrapping_add(1));
+            return;
+        }
+        log_cache_miss(prev, key);
         self.chain.render(
             device,
+            queue,
             encoder,
             mesh,
             &self.grid_view,
             bed_z,
             camera_center_xy,
         );
+        self.last_composite_key.set(Some(key));
+        self.frame_counter.set(self.frame_counter.get().wrapping_add(1));
     }
 
     /// Draw the bed quad into the currently-bound render pass. Caller
     /// is responsible for having set the correct viewport / scissor;
     /// this just configures pipeline + bind group + draw.
+    ///
+    /// `camera_center_xy` must match the value passed to
+    /// [`Self::render_to_composite`] this frame — the quad is
+    /// translated to that XY so the composite texture's UVs line up
+    /// with world coords. Without this the shadow drifts off the
+    /// model as the user pans.
     pub fn draw_bed<'rpass>(
         &'rpass self,
-        device: &wgpu::Device,
+        queue: &wgpu::Queue,
         pass: &mut wgpu::RenderPass<'rpass>,
         mvp: [f32; 16],
         bed_z: f32,
+        camera_center_xy: [f32; 2],
     ) {
         let uniforms = BedUniforms {
             mvp,
             plane: [BED_HALF_EXTENT, BED_HALF_EXTENT, bed_z, 0.0],
+            bed_offset: [camera_center_xy[0], camera_center_xy[1], 0.0, 0.0],
         };
-        let ub = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("atomartist bed quad ub"),
-            contents: bytemuck::bytes_of(&uniforms),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
-        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("atomartist bed quad bg"),
-            layout: &self.bed_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: ub.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(self.chain.composite_view()),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&self.bed_sampler),
-                },
-            ],
-        });
+        queue.write_buffer(&self.bed_ub, 0, bytemuck::bytes_of(&uniforms));
         pass.set_pipeline(&self.bed_pipeline);
-        pass.set_bind_group(0, &bg, &[]);
+        pass.set_bind_group(0, &self.bed_bg, &[]);
         pass.set_vertex_buffer(0, self.bed_vbuf.slice(..));
         pass.draw(0..6, 0..1);
-        // Drop the temporaries after the draw — wgpu keeps them alive
-        // for the encoded commands via internal Arc bumps.
-        drop(bg);
-        drop(ub);
+    }
+}
+
+fn pack_rgba8(c: [f32; 4]) -> u32 {
+    let q = |v: f32| -> u32 { (v.clamp(0.0, 1.0) * 255.0).round() as u32 };
+    (q(c[0]) << 24) | (q(c[1]) << 16) | (q(c[2]) << 8) | q(c[3])
+}
+
+/// Print a single human-readable line on every shadow-chain cache miss
+/// when `ATOMARTIST_BED_LOG=1` is set. Helps identify which input is
+/// churning when frame time spikes (mesh upload, panning, theme flip,
+/// or a real first-frame populate).
+fn log_cache_miss(prev: Option<CompositeKey>, now: CompositeKey) {
+    if !bed_log_enabled() {
+        return;
+    }
+    match prev {
+        None => eprintln!("[bed] first-frame chain run; key={now:?}"),
+        Some(p) => {
+            let mut diffs: Vec<&'static str> = Vec::new();
+            if p.mesh_id != now.mesh_id { diffs.push("mesh_id"); }
+            if p.cam_x_q != now.cam_x_q { diffs.push("cam_x"); }
+            if p.cam_y_q != now.cam_y_q { diffs.push("cam_y"); }
+            if p.invert_flag != now.invert_flag { diffs.push("invert"); }
+            if p.color_key != now.color_key { diffs.push("color"); }
+            eprintln!("[bed] cache miss — changed: {diffs:?}; prev={p:?} now={now:?}");
+        }
+    }
+}
+
+fn bed_log_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("ATOMARTIST_BED_LOG")
+            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "on" | "yes"))
+            .unwrap_or(false)
+    })
+}
+
+impl std::fmt::Debug for CompositeKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{{mesh=0x{:x} cam=({}, {}) inv={} col=0x{:08x}}}",
+            self.mesh_id, self.cam_x_q, self.cam_y_q, self.invert_flag, self.color_key
+        )
     }
 }
 

@@ -91,7 +91,6 @@ struct Vertex {
 
 struct GpuState {
     pipeline: wgpu::RenderPipeline,
-    bind_group_layout: wgpu::BindGroupLayout,
     surface_format: wgpu::TextureFormat,
     /// Cached vertex/index buffers and the source mesh pointer they were built from.
     mesh_ptr: usize,
@@ -103,12 +102,21 @@ struct GpuState {
     /// [`crate::bed`] for the off-screen silhouette → blur → composite
     /// pipeline that runs each frame before the main pass.
     bed: BedRenderer,
+    /// Persistent scene uniform buffer + bind group. The contents
+    /// (MVP, light dir, base colour) change every frame, but the
+    /// buffer is fixed-size so `queue.write_buffer` is enough — no
+    /// per-frame allocation. Saves measurable CPU on debug builds
+    /// where wgpu validates every newly created resource.
+    scene_ub: wgpu::Buffer,
+    scene_bg: wgpu::BindGroup,
     /// Inverted-hull outline pipeline — inflates each vertex along its
     /// normal in the vertex shader, draws *only* the back-faces (so the
     /// inflated rim peeks out from behind the regular front-face render).
     /// Pairs with the same vbuf/ibuf as the main mesh.
     outline_pipeline: wgpu::RenderPipeline,
-    outline_bind_group_layout: wgpu::BindGroupLayout,
+    /// Persistent outline UB + BG — same rationale as `scene_ub`.
+    outline_ub: wgpu::Buffer,
+    outline_bg: wgpu::BindGroup,
     /// Offscreen framebuffer + matching depth attachment, sized to the
     /// viewport widget's pixel rect. The 3-D pass renders here first, then
     /// composites onto the surface via the shared 2-D `tex_pipeline`.
@@ -358,17 +366,48 @@ impl WgpuSceneRenderer {
             cache: None,
         });
 
+        let scene_ub = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("atomartist scene ub"),
+            size: std::mem::size_of::<Uniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let scene_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("atomartist scene bg"),
+            layout: &bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: scene_ub.as_entire_binding(),
+            }],
+        });
+        let outline_ub = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("atomartist outline ub"),
+            size: std::mem::size_of::<OutlineUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let outline_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("atomartist outline bg"),
+            layout: &outline_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: outline_ub.as_entire_binding(),
+            }],
+        });
+
         self.state = Some(GpuState {
             pipeline,
-            bind_group_layout: bgl,
             surface_format,
             mesh_ptr: 0,
             vbuf: None,
             ibuf: None,
             index_count: 0,
             bed,
+            scene_ub,
+            scene_bg,
             outline_pipeline,
-            outline_bind_group_layout: outline_bgl,
+            outline_ub,
+            outline_bg,
             framebuffer: None,
         });
     }
@@ -497,19 +536,7 @@ impl WgpuCustomRender for WgpuSceneRenderer {
             base_color: self.base_color,
         };
 
-        let ub = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("atomartist scene ub"),
-            contents: bytemuck::bytes_of(&uniforms),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
-        let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("atomartist scene bg"),
-            layout: &s.bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: ub.as_entire_binding(),
-            }],
-        });
+        ctx.queue.write_buffer(&s.scene_ub, 0, bytemuck::bytes_of(&uniforms));
 
         // ── Pass 0: refresh the bed composite (grid + contact shadow) ──────
         // Runs in its own set of off-screen passes against `ctx.encoder`
@@ -528,8 +555,10 @@ impl WgpuCustomRender for WgpuSceneRenderer {
             };
             s.bed.render_to_composite(
                 ctx.device,
+                ctx.queue,
                 ctx.encoder,
                 mesh_ref,
+                s.mesh_ptr as u64,
                 self.grid_z,
                 [self.camera.center[0], self.camera.center[1]],
             );
@@ -577,7 +606,13 @@ impl WgpuCustomRender for WgpuSceneRenderer {
             // distance-scaled offset).
             if self.draw_grid {
                 let bed_z = self.bed_render_z();
-                s.bed.draw_bed(ctx.device, &mut pass, mvp, bed_z);
+                s.bed.draw_bed(
+                    ctx.queue,
+                    &mut pass,
+                    mvp,
+                    bed_z,
+                    [self.camera.center[0], self.camera.center[1]],
+                );
             }
 
             // Mesh — only when both a vertex buffer and index buffer are
@@ -595,7 +630,7 @@ impl WgpuCustomRender for WgpuSceneRenderer {
                 if s.index_count > 0 {
                     if draw_surface {
                         pass.set_pipeline(&s.pipeline);
-                        pass.set_bind_group(0, &bg, &[]);
+                        pass.set_bind_group(0, &s.scene_bg, &[]);
                         pass.set_vertex_buffer(0, vbuf.slice(..));
                         pass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
                         pass.draw_indexed(0..s.index_count, 0, 0..1);
@@ -612,26 +647,16 @@ impl WgpuCustomRender for WgpuSceneRenderer {
                             color: self.outline_color,
                             width: [self.outline_width, 0.0, 0.0, 0.0],
                         };
-                        let outline_ub = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                            label: Some("atomartist outline ub"),
-                            contents: bytemuck::bytes_of(&outline_uniforms),
-                            usage: wgpu::BufferUsages::UNIFORM,
-                        });
-                        let outline_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                            label: Some("atomartist outline bg"),
-                            layout: &s.outline_bind_group_layout,
-                            entries: &[wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: outline_ub.as_entire_binding(),
-                            }],
-                        });
+                        ctx.queue.write_buffer(
+                            &s.outline_ub,
+                            0,
+                            bytemuck::bytes_of(&outline_uniforms),
+                        );
                         pass.set_pipeline(&s.outline_pipeline);
-                        pass.set_bind_group(0, &outline_bg, &[]);
+                        pass.set_bind_group(0, &s.outline_bg, &[]);
                         pass.set_vertex_buffer(0, vbuf.slice(..));
                         pass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
                         pass.draw_indexed(0..s.index_count, 0, 0..1);
-                        drop(outline_bg);
-                        drop(outline_ub);
                     }
                 }
             }
