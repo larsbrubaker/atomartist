@@ -107,6 +107,18 @@ impl Viewport3dWidget {
         if !matches!(self.drag, CameraDrag::None) && !self.any_mouse_button_held() {
             self.drag = CameraDrag::None;
         }
+        // Orbit / pan / zoom drag branches all mutate camera state
+        // and need to claim a redraw — the native shell now runs
+        // a fully reactive loop (matches agg-gui's demo) and won't
+        // pump a frame just because the cursor moved.  Without this
+        // call, drags would stop visibly updating between mouse
+        // events.  The plain `CameraDrag::None` / `Selecting`
+        // branches are NOT camera-mutating, so we skip the call
+        // there to avoid spuriously re-painting on hover.
+        let did_change = !matches!(self.drag, CameraDrag::None | CameraDrag::Selecting { .. });
+        if did_change {
+            agg_gui::animation::request_draw();
+        }
         match &mut self.drag {
             CameraDrag::None => EventResult::Ignored,
             CameraDrag::Orbit { last_local } => {
@@ -253,6 +265,7 @@ impl Viewport3dWidget {
             ];
             c.zoom(factor);
         }
+        agg_gui::animation::request_draw();
         EventResult::Consumed
     }
 
@@ -265,6 +278,12 @@ impl Viewport3dWidget {
         const ARROW_ORBIT_PX: f32 = 24.0;
         const KEYBOARD_ZOOM_FACTOR: f32 = 1.1;
 
+        // Every match arm below mutates camera state and ends with
+        // `return EventResult::Consumed`; we centralise the
+        // `request_draw` here so the keyboard branches don't each
+        // need their own copy.  The `_ => {}` fall-through that
+        // returns `Ignored` legitimately skips the redraw — no
+        // state changed.
         match key {
             Key::Char(c) => {
                 if c.eq_ignore_ascii_case(&'w') || c.eq_ignore_ascii_case(&'f') {
@@ -276,6 +295,7 @@ impl Viewport3dWidget {
                     // trick is gone (and was always a misuse of
                     // that field).
                     self.fit_all();
+                    agg_gui::animation::request_draw();
                     return EventResult::Consumed;
                 }
                 if c.eq_ignore_ascii_case(&'z') {
@@ -284,16 +304,19 @@ impl Viewport3dWidget {
                     // A4 will tighten this to use the selected
                     // node's bounds when one is selected).
                     self.fit_all();
+                    agg_gui::animation::request_draw();
                     return EventResult::Consumed;
                 }
                 // Ctrl + +/- → zoom in/out.
                 if mods.ctrl {
                     if *c == '+' || *c == '=' {
                         self.cam_mut(|c| c.zoom(1.0 / KEYBOARD_ZOOM_FACTOR));
+                        agg_gui::animation::request_draw();
                         return EventResult::Consumed;
                     }
                     if *c == '-' || *c == '_' {
                         self.cam_mut(|c| c.zoom(KEYBOARD_ZOOM_FACTOR));
+                        agg_gui::animation::request_draw();
                         return EventResult::Consumed;
                     }
                 }
@@ -320,6 +343,7 @@ impl Viewport3dWidget {
                         c.orbit(-dx * ARROW_ORBIT_PX * scale, dy * ARROW_ORBIT_PX * scale)
                     });
                 }
+                agg_gui::animation::request_draw();
                 return EventResult::Consumed;
             }
             _ => {}

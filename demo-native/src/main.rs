@@ -465,10 +465,23 @@ fn main() {
                     // viewport size passed to app.layout. Don't pre-convert
                     // here; that double-flips and causes hit-testing to
                     // route every event to the viewport at the bottom.
+                    //
+                    // DELIBERATELY no `window.request_redraw()` here.
+                    // `app.on_mouse_move` runs through agg-gui's
+                    // `dispatch_event`, which tracks the invalidation
+                    // epoch before/after each widget's `on_event` —
+                    // if any widget actually changed visible state
+                    // (hover highlight, drag preview, etc.) it will
+                    // call `animation::request_draw()` and the epoch
+                    // bumps, which `AboutToWait` picks up via
+                    // `app.wants_draw()`.  Forcing a redraw here
+                    // re-paints on EVERY mouse pixel even when
+                    // nothing visible changed — exactly the
+                    // continuous-paint-on-cursor-move behaviour the
+                    // user reported.
                     cursor_x = position.x;
                     cursor_y = position.y;
                     app.on_mouse_move(cursor_x, cursor_y);
-                    window.request_redraw();
                 }
                 Event::WindowEvent {
                     event: WindowEvent::MouseInput { state, button, .. }, ..
@@ -484,7 +497,13 @@ fn main() {
                                 app.on_mouse_up(cursor_x, cursor_y, b, current_mods);
                             }
                         }
-                        window.request_redraw();
+                        // No explicit request_redraw — the same epoch /
+                        // dirty-bubble path that handles CursorMoved
+                        // handles click events too.  A button widget
+                        // that flips its `pressed` visual state calls
+                        // request_draw from inside `on_event`; one that
+                        // doesn't (e.g. a click on empty canvas
+                        // background) should NOT trigger a repaint.
                     }
                 }
                 Event::WindowEvent {
@@ -495,7 +514,6 @@ fn main() {
                         MouseScrollDelta::PixelDelta(p) => p.y,
                     };
                     app.on_mouse_wheel(cursor_x, cursor_y, dy);
-                    window.request_redraw();
                 }
                 Event::WindowEvent {
                     event: WindowEvent::ModifiersChanged(mods), ..
@@ -516,7 +534,6 @@ fn main() {
                             ElementState::Pressed => app.on_key_down(k, current_mods),
                             ElementState::Released => app.on_key_up(k, current_mods),
                         }
-                        window.request_redraw();
                     }
                 }
                 Event::WindowEvent {
