@@ -135,6 +135,17 @@ struct FrameTimings {
     /// bind groups for each draw command) + execute phase (records
     /// the wgpu command encoder and submits to the queue).
     end_frame_ms: f32,
+    /// Inside `end_frame`: CPU walk that turns `DrawCommand`s into
+    /// `Prepared` GPU resources (per-command buffer + bind-group
+    /// allocation). Reported by `WgpuGfxCtx::last_end_frame_stats()`.
+    ef_prepare_ms: f32,
+    /// Inside `end_frame`: render-pass walk that records draw calls
+    /// into the command encoder.
+    ef_execute_ms: f32,
+    /// Inside `end_frame`: `queue.submit()` cost.
+    ef_submit_ms: f32,
+    /// `DrawCommand` count from the most recent end_frame.
+    cmd_count: u32,
     /// `frame.present()` — typically waits on VSync with
     /// `PresentMode::AutoVsync`.
     present_ms: f32,
@@ -225,6 +236,19 @@ fn paint_frame(
     let t_end_frame = web_time::Instant::now();
     ctx.end_frame();
     t.end_frame_ms = elapsed_ms(t_end_frame);
+    // Pull the in-renderer per-phase split so we can attribute end_frame
+    // cost across prepare (per-DrawCommand buffer + bind-group allocation),
+    // execute (render-pass walk), and submit (queue.submit). Different
+    // dominators imply different fixes. Skip the read when logging is off
+    // — the renderer still computes the numbers (cheap), we just don't
+    // copy them into the per-frame struct.
+    if frame_log_enabled() {
+        let ef = ctx.last_end_frame_stats();
+        t.ef_prepare_ms = ef.prepare_us as f32 / 1000.0;
+        t.ef_execute_ms = ef.execute_us as f32 / 1000.0;
+        t.ef_submit_ms = ef.submit_us as f32 / 1000.0;
+        t.cmd_count = ef.command_count;
+    }
 
     if capture_after {
         // Must run between end_frame (commands flushed) and present
@@ -259,8 +283,21 @@ fn elapsed_ms(t: web_time::Instant) -> f32 {
 // window smooths over per-frame noise; the count tells you how many
 // frames went into the average so you can spot stalls (low count =
 // few frames = something is slow).
+//
+// Off by default — set `ATOMARTIST_FRAME_LOG=1` to enable. The check is
+// cheap (one atomic load per frame) and only happens after `OnceLock`
+// resolves the env var on the very first frame.
 
 const FRAME_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_millis(2000);
+
+fn frame_log_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("ATOMARTIST_FRAME_LOG")
+            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "on" | "yes"))
+            .unwrap_or(false)
+    })
+}
 
 thread_local! {
     static FRAME_TIMING_ACC: std::cell::RefCell<Vec<FrameTimings>> =
@@ -270,6 +307,9 @@ thread_local! {
 }
 
 fn record_frame_timings(t: FrameTimings) {
+    if !frame_log_enabled() {
+        return;
+    }
     FRAME_TIMING_ACC.with(|acc| acc.borrow_mut().push(t));
     let now = web_time::Instant::now();
     let last = FRAME_LOG_LAST.with(|c| c.get());
@@ -294,8 +334,9 @@ fn record_frame_timings(t: FrameTimings) {
             buf.iter().map(f).sum::<f32>() / n
         };
         let max_total = buf.iter().map(|t| t.total_ms).fold(0.0_f32, f32::max);
+        let avg_cmds = buf.iter().map(|t| t.cmd_count as f32).sum::<f32>() / n;
         eprintln!(
-            "[frame {:>3} samples] total avg={:.2} max={:.2} ms | acquire={:.2} edits={:.2} snapshot={:.2} layout={:.2} paint={:.2} end_frame={:.2} present={:.2}",
+            "[frame {:>3} samples] total avg={:.2} max={:.2} ms | acquire={:.2} edits={:.2} snapshot={:.2} layout={:.2} paint={:.2} end_frame={:.2} (prep={:.2} exec={:.2} sub={:.2} cmds={:.0}) present={:.2}",
             buf.len(),
             avg(|t| t.total_ms),
             max_total,
@@ -305,6 +346,10 @@ fn record_frame_timings(t: FrameTimings) {
             avg(|t| t.layout_ms),
             avg(|t| t.paint_ms),
             avg(|t| t.end_frame_ms),
+            avg(|t| t.ef_prepare_ms),
+            avg(|t| t.ef_execute_ms),
+            avg(|t| t.ef_submit_ms),
+            avg_cmds,
             avg(|t| t.present_ms),
         );
         drop(buf);

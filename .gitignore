@@ -21,3 +21,6 @@ Thumbs.db
 /screenshot.png
 
 # Local Claude state — keep skills + settings.local.json checked in (they live in .claude/)
+frame_log.txt
+frame_log2.txt
+frame_log3.txt

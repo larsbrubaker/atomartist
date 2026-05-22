@@ -5,6 +5,18 @@
 //! framebuffer (matching [`super::super::scene_renderer::WgpuSceneRenderer`]'s
 //! approach), then blitting the buffer onto the active 2-D target.
 //!
+//! ## Anti-aliasing — SSAA, not MSAA
+//!
+//! Hardware MSAA is disabled across AtomArtist's 3-D paths so the future
+//! depth-peeled scene renderer can rely on the stencil buffer without
+//! per-pass MSAA attachment juggling (see the crate-root
+//! [`crate`] doc → "Anti-aliasing policy"). To still get crisp cube edges
+//! at the small 100 px widget size, the cube renders into an oversized
+//! offscreen backbuffer (`SSAA_SCALE × screen_rect`) and the shared
+//! `MsaaFramebuffer::blit_to` bilinear pipeline downsamples the result
+//! onto the active 2-D target. This is the reference implementation for
+//! the SSAA pattern documented at the crate root.
+//!
 //! The cube's own camera is independent of the main viewport: it sits
 //! on a small orbit at the origin with `(azimuth, elevation)` mirrored
 //! from the main camera so the cube's orientation faithfully reflects
@@ -19,9 +31,27 @@ use wgpu::util::DeviceExt;
 use super::cube_geometry::{build_cube, CubeVertex};
 use super::face_textures::{FaceTexture, TEX_SIZE};
 
-/// Keep AtomArtist custom 3-D passes single-sample so the renderer can share
-/// the same attachment assumptions as the depth-peeled scene path.
+/// Hardware MSAA sample count. Must stay `1` so the offscreen framebuffer
+/// matches the depth-peeled scene path (see crate-root docs →
+/// "Anti-aliasing policy"). All anti-aliasing for the cube comes from
+/// `SSAA_SCALE`.
 const SAMPLE_COUNT: u32 = 1;
+
+/// Linear supersampling factor for the offscreen render target. The cube is
+/// rasterized into a framebuffer `SSAA_SCALE × screen_rect` pixels on each
+/// axis, then box-downsampled when compositing onto the widget rect.
+///
+/// Valid values:
+/// - `1` — no SSAA; the cube renders 1:1 with the widget rect.
+/// - `2` — 4× pixel cost. The composite uses `MsaaFramebuffer::blit_to`
+///   (single bilinear tap = exact 2×2 box).
+/// - `4` — 16× pixel cost. The composite uses
+///   `MsaaFramebuffer::blit_downsample_4x_to` (4 bilinear taps = exact
+///   4×4 box). A single bilinear tap at this scale would drop 12 of 16
+///   source texels per output pixel — visually identical to `2` at 4×
+///   the cost — so the dedicated 4× pipeline is required.
+const SSAA_SCALE: u32 = 4;
+
 const FACE_MIP_COUNT: u32 = 9; // 256 -> 1
 
 /// Radius of the miniature cube camera.  A radius of 3 made the cube
@@ -295,11 +325,16 @@ impl TumbleCubeRenderer {
         });
     }
 
-    fn ensure_framebuffer(&mut self, device: &wgpu::Device, w: u32, h: u32) {
+    /// Allocate the offscreen framebuffer. `(screen_w, screen_h)` is the
+    /// widget's pixel rect; the framebuffer itself is sized to
+    /// `screen_w * SSAA_SCALE × screen_h * SSAA_SCALE` so the cube
+    /// rasterizes at supersampled resolution and the composite blit
+    /// downsamples to the widget rect.
+    fn ensure_framebuffer(&mut self, device: &wgpu::Device, screen_w: u32, screen_h: u32) {
         let s = match &mut self.state { Some(s) => s, None => return };
         let format = s.surface_format;
-        let w = w.max(1);
-        let h = h.max(1);
+        let w = screen_w.max(1).saturating_mul(SSAA_SCALE).max(1);
+        let h = screen_h.max(1).saturating_mul(SSAA_SCALE).max(1);
         match &mut s.framebuffer {
             Some(fb) => fb.ensure_size(device, w, h),
             None => {
@@ -373,15 +408,23 @@ impl TumbleCubeRenderer {
 impl WgpuCustomRender for TumbleCubeRenderer {
     fn render(&mut self, ctx: WgpuCustomRenderCtx<'_>) {
         self.ensure_state(ctx.device, ctx.surface_format);
-        let fb_w = ctx.screen_rect.width.max(1.0) as u32;
-        let fb_h = ctx.screen_rect.height.max(1.0) as u32;
-        if fb_w == 0 || fb_h == 0 {
+        // Widget-pixel rect — used as the composite destination so hover /
+        // click coordinates from the widget stay consistent with what's
+        // drawn.  The cube itself rasterizes into a `SSAA_SCALE`× larger
+        // offscreen target and is downsampled on composite.
+        let screen_w = ctx.screen_rect.width.max(1.0) as u32;
+        let screen_h = ctx.screen_rect.height.max(1.0) as u32;
+        if screen_w == 0 || screen_h == 0 {
             return;
         }
-        self.ensure_framebuffer(ctx.device, fb_w, fb_h);
+        self.ensure_framebuffer(ctx.device, screen_w, screen_h);
         self.upload_dirty_faces(ctx.queue);
 
-        let aspect = fb_w as f32 / fb_h.max(1) as f32;
+        // Offscreen framebuffer dims — `screen_* × SSAA_SCALE`. Aspect ratio
+        // is preserved so the cube projection matches the on-screen rect.
+        let ssaa_w = screen_w.saturating_mul(SSAA_SCALE).max(1);
+        let ssaa_h = screen_h.saturating_mul(SSAA_SCALE).max(1);
+        let aspect = ssaa_w as f32 / ssaa_h.max(1) as f32;
         let mvp = self.build_mvp(aspect);
         let uniforms = CubeUniforms {
             mvp,
@@ -455,8 +498,8 @@ impl WgpuCustomRender for TumbleCubeRenderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_viewport(0.0, 0.0, fb_w as f32, fb_h as f32, 0.0, 1.0);
-            pass.set_scissor_rect(0, 0, fb_w, fb_h);
+            pass.set_viewport(0.0, 0.0, ssaa_w as f32, ssaa_h as f32, 0.0, 1.0);
+            pass.set_scissor_rect(0, 0, ssaa_w, ssaa_h);
             pass.set_pipeline(&s.pipeline);
             pass.set_vertex_buffer(0, s.vbuf.slice(..));
             pass.set_index_buffer(s.ibuf.slice(..), wgpu::IndexFormat::Uint32);
@@ -468,18 +511,42 @@ impl WgpuCustomRender for TumbleCubeRenderer {
             }
         }
 
-        // Composite the offscreen colour onto the active 2-D target,
-        // alpha-blending so the cube reads on whatever sits behind it
-        // (the viewport scene + 2-D HUD ring).
-        fb.blit_to(
-            ctx.device,
-            ctx.encoder,
-            ctx.target_view,
-            ctx.target_size,
-            ctx.screen_rect,
-            ctx.parent_clip,
-            ctx.pipelines,
-        );
+        // Composite the offscreen colour onto the active 2-D target.
+        // The framebuffer is `SSAA_SCALE`× the size of `screen_rect`, so
+        // the downsample-on-blit needs a kernel that matches the scale:
+        //   - `SSAA_SCALE ∈ {1, 2}` → `blit_to` (single bilinear tap is a
+        //     perfect 1×1 / 2×2 box).
+        //   - `SSAA_SCALE = 4` → `blit_downsample_4x_to` (4 bilinear taps
+        //     for an exact 4×4 box). The single-tap pipeline would only
+        //     read 4 of 16 source texels per output and silently throw
+        //     away most of the SSAA work.
+        // `SSAA_SCALE` is `const`, so the compiler folds this branch and
+        // emits a single call site at the chosen scale.
+        // Both pipelines use `BLEND_STANDARD` (`SrcAlpha / OneMinusSrcAlpha`
+        // for colour, `One / OneMinusSrcAlpha` for alpha) so the cube
+        // reads correctly on whatever sits behind it (the viewport scene
+        // + 2-D HUD ring).
+        if SSAA_SCALE >= 4 {
+            fb.blit_downsample_4x_to(
+                ctx.device,
+                ctx.encoder,
+                ctx.target_view,
+                ctx.target_size,
+                ctx.screen_rect,
+                ctx.parent_clip,
+                ctx.pipelines,
+            );
+        } else {
+            fb.blit_to(
+                ctx.device,
+                ctx.encoder,
+                ctx.target_view,
+                ctx.target_size,
+                ctx.screen_rect,
+                ctx.parent_clip,
+                ctx.pipelines,
+            );
+        }
     }
 }
 
