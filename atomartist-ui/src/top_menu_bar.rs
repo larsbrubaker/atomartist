@@ -12,6 +12,26 @@ use agg_gui::{text::Font, MenuBar, MenuEntry, MenuItem, TopMenu, Widget};
 
 use crate::app_state::AppState;
 
+mod bi {
+    pub const ARROW_CLOCKWISE: char = '\u{f116}';
+    pub const ARROW_COUNTERCLOCKWISE: char = '\u{f117}';
+    pub const ARROWS_ANGLE_EXPAND: char = '\u{f14a}';
+    pub const BOOK: char = '\u{f194}';
+    pub const BOX: char = '\u{f1c8}';
+    pub const BOX_ARROW_UP_RIGHT: char = '\u{f1c5}';
+    pub const BOX_SEAM: char = '\u{f1c7}';
+    pub const CALCULATOR: char = '\u{f1e0}';
+    pub const FILE_PLUS: char = '\u{f3ab}';
+    pub const FLOPPY: char = '\u{f7d8}';
+    pub const FOLDER2_OPEN: char = '\u{f3d8}';
+    pub const INFO_CIRCLE: char = '\u{f431}';
+    pub const PLUG: char = '\u{f4f7}';
+    pub const PLUS_CIRCLE: char = '\u{f4fa}';
+    pub const SUN: char = '\u{f5a2}';
+    pub const TRASH: char = '\u{f5de}';
+    pub const VECTOR_PEN: char = '\u{f604}';
+}
+
 /// Platform-supplied file-picker hooks. demo-native provides an `rfd`-
 /// backed implementation; demo-wasm will provide a browser File API
 /// version. The trait is invoked from the menu's action callback so the
@@ -51,38 +71,38 @@ pub fn build_menu_bar(
         TopMenu::new(
             "File",
             vec![
-                MenuEntry::Item(MenuItem::action("New", "file.new")),
-                MenuEntry::Item(MenuItem::action("Open\u{2026}", "file.open")),
+                MenuEntry::Item(MenuItem::action("New", "file.new").icon(bi::FILE_PLUS)),
+                MenuEntry::Item(MenuItem::action("Open\u{2026}", "file.open").icon(bi::FOLDER2_OPEN)),
                 MenuEntry::Separator,
-                MenuEntry::Item(MenuItem::action("Save", "file.save")),
-                MenuEntry::Item(MenuItem::action("Save As\u{2026}", "file.save_as")),
+                MenuEntry::Item(MenuItem::action("Save", "file.save").icon(bi::FLOPPY)),
+                MenuEntry::Item(MenuItem::action("Save As\u{2026}", "file.save_as").icon(bi::FLOPPY)),
                 MenuEntry::Separator,
-                MenuEntry::Item(MenuItem::action("Export STL\u{2026}", "file.export_stl")),
+                MenuEntry::Item(MenuItem::action("Export STL\u{2026}", "file.export_stl").icon(bi::BOX_ARROW_UP_RIGHT)),
             ],
         ),
         TopMenu::new(
             "Edit",
             vec![
-                MenuEntry::Item(MenuItem::action("Undo", "edit.undo")),
-                MenuEntry::Item(MenuItem::action("Redo", "edit.redo")),
+                MenuEntry::Item(MenuItem::action("Undo", "edit.undo").icon(bi::ARROW_COUNTERCLOCKWISE)),
+                MenuEntry::Item(MenuItem::action("Redo", "edit.redo").icon(bi::ARROW_CLOCKWISE)),
                 MenuEntry::Separator,
-                MenuEntry::Item(MenuItem::action("Delete Selected", "edit.delete")),
-                MenuEntry::Item(MenuItem::action("Select All", "edit.select_all")),
+                MenuEntry::Item(MenuItem::action("Delete Selected", "edit.delete").icon(bi::TRASH)),
+                MenuEntry::Item(MenuItem::action("Select All", "edit.select_all").icon(bi::ARROWS_ANGLE_EXPAND)),
             ],
         ),
         TopMenu::new(
             "Settings",
             vec![
-                MenuEntry::Item(MenuItem::action("Light Theme", "settings.theme.light")),
-                MenuEntry::Item(MenuItem::action("Dark Theme", "settings.theme.dark")),
+                MenuEntry::Item(MenuItem::action("Light Theme", "settings.theme.light").icon(bi::SUN)),
+                MenuEntry::Item(MenuItem::action("Dark Theme", "settings.theme.dark").icon(bi::SUN)),
             ],
         ),
         TopMenu::new(
             "Help",
             vec![
-                MenuEntry::Item(MenuItem::action("Documentation", "help.docs")),
-                MenuEntry::Item(MenuItem::action("License", "help.license")),
-                MenuEntry::Item(MenuItem::action("About", "help.about")),
+                MenuEntry::Item(MenuItem::action("Documentation", "help.docs").icon(bi::BOOK)),
+                MenuEntry::Item(MenuItem::action("License", "help.license").icon(bi::INFO_CIRCLE)),
+                MenuEntry::Item(MenuItem::action("About", "help.about").icon(bi::INFO_CIRCLE)),
             ],
         ),
         // "Add Node" lists every registered node type, grouped by category.
@@ -124,12 +144,28 @@ fn build_add_node_entries(state: &AppState) -> Vec<MenuEntry> {
                 MenuEntry::Item(MenuItem::action(
                     d.display_name(),
                     format!("add.{}", d.type_id()),
-                ))
+                ).icon(bi::PLUS_CIRCLE))
             })
             .collect();
-        out.push(MenuEntry::Item(MenuItem::submenu(cat, items)));
+        let submenu = match category_icon(cat) {
+            Some(icon) => MenuItem::submenu(cat, items).icon(icon),
+            None => MenuItem::submenu(cat, items),
+        };
+        out.push(MenuEntry::Item(submenu));
     }
     out
+}
+
+fn category_icon(category: &str) -> Option<char> {
+    match category {
+        "Primitives 2D" | "Operations 2D" => Some(bi::VECTOR_PEN),
+        "Primitives 3D" => Some(bi::BOX),
+        "Operations 3D" => Some(bi::ARROWS_ANGLE_EXPAND),
+        "Mesh" => Some(bi::BOX_SEAM),
+        "Math" => Some(bi::CALCULATOR),
+        "Output" => Some(bi::PLUG),
+        _ => None,
+    }
 }
 
 fn handle_action(state: &AppState, dialogs: &dyn FileDialogProvider, action: &str) {

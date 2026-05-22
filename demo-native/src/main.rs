@@ -26,6 +26,7 @@ use winit::window::{Window, WindowAttributes};
 
 const DEFAULT_FONT_BYTES: &[u8] =
     include_bytes!("../../../agg-gui/agg-gui/assets/fonts/NotoSans-Regular.ttf");
+const ICON_FONT_BYTES: &[u8] = include_bytes!("../../atomartist-ui/assets/bootstrap-icons.ttf");
 
 struct Gpu {
     device: Arc<wgpu::Device>,
@@ -226,8 +227,12 @@ fn main() {
     // tool where high-contrast white backgrounds match user expectation.
     set_visuals(Visuals::light());
 
+    let icon_font =
+        Arc::new(Font::from_bytes(ICON_FONT_BYTES.to_vec()).expect("load Bootstrap Icons"));
     let font = Arc::new(
-        Font::from_bytes(DEFAULT_FONT_BYTES.to_vec()).expect("load NotoSans-Regular"),
+        Font::from_bytes(DEFAULT_FONT_BYTES.to_vec())
+            .expect("load NotoSans-Regular")
+            .with_fallback(icon_font),
     );
     // Make the font available to every widget via agg-gui's thread-local
     // system-font slot, so widgets can fall back to it without an explicit

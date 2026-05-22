@@ -76,6 +76,14 @@ cargo test test_name -- --exact
 cargo test -- --nocapture
 ```
 
+## Testing
+
+- Tests MUST test actual production code, not copies - Never duplicate production logic in tests. Import and call the real code. Tests that verify copied code prove nothing about the actual system.
+- Tests should run as fast as possible—fast tests get run more often
+- Write tests for regressions and complex logic
+- Avoid redundant tests that verify the same behavior
+- All tests must pass before merging
+
 ## Coding Standards
 
 ### File length
@@ -124,9 +132,6 @@ Follow Rust conventions (`snake_case` functions/variables, `PascalCase` types,
   bottleneck through profiling data or timing measurements.
 - Validate that each change produces a measurable improvement.
 - **Targets:** average frame render < 10 ms; 50-node graph re-evaluation < 10 ms.
-
-### Refactoring
-Improve code when it serves a purpose, not for aesthetics.
 
 ## UI / UX testing
 

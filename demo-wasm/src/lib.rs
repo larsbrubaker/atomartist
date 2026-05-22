@@ -23,6 +23,7 @@ use wasm_bindgen::JsCast;
 
 const DEFAULT_FONT_BYTES: &[u8] =
     include_bytes!("../../../agg-gui/agg-gui/assets/fonts/NotoSans-Regular.ttf");
+const ICON_FONT_BYTES: &[u8] = include_bytes!("../../atomartist-ui/assets/bootstrap-icons.ttf");
 
 thread_local! {
     static APP:      RefCell<Option<App>>           = RefCell::new(None);
@@ -63,9 +64,12 @@ pub fn start() {
 
     // Theme + font setup mirrors the native shell.
     set_visuals(Visuals::light());
+    let icon_font =
+        Arc::new(Font::from_bytes(ICON_FONT_BYTES.to_vec()).expect("load Bootstrap Icons"));
     let font = Arc::new(
         Font::from_bytes(DEFAULT_FONT_BYTES.to_vec())
-            .expect("load NotoSans-Regular"),
+            .expect("load NotoSans-Regular")
+            .with_fallback(icon_font),
     );
     agg_gui::font_settings::set_system_font(Some(font));
     // LCD subpixel rendering is unreliable on retina; assume hi-DPI on
