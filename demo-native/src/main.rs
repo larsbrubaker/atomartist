@@ -573,7 +573,11 @@ fn main() {
                     // so pump agg-gui's draw flag here; otherwise animations
                     // advance one frame and then appear to resume only when the
                     // user moves the mouse.
-                    if agg_gui::animation::wants_draw() {
+                    let continuous =
+                        debug_for_save.run_mode.get() == agg_gui::RunMode::Continuous;
+                    if continuous {
+                        window.request_redraw();
+                    } else if agg_gui::animation::wants_draw() {
                         window.request_redraw();
                     } else if app.wants_draw() {
                         window.request_redraw();
@@ -612,7 +616,17 @@ fn main() {
                     }
                 }
                 Event::AboutToWait => {
-                    if agg_gui::animation::wants_draw() || app.wants_draw() {
+                    // Continuous run-mode keeps the loop spinning every
+                    // frame regardless of widget invalidation — required
+                    // when the Performance window's selector is flipped
+                    // to "Continuous" so the FPS readout reflects a real
+                    // sustained framerate, not just per-input wakeups.
+                    let continuous =
+                        debug_for_save.run_mode.get() == agg_gui::RunMode::Continuous;
+                    if continuous
+                        || agg_gui::animation::wants_draw()
+                        || app.wants_draw()
+                    {
                         next_scheduled_redraw = None;
                         window.request_redraw();
                     } else if let Some(deadline) = next_scheduled_redraw {

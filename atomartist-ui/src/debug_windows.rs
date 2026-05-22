@@ -29,7 +29,9 @@ use std::sync::Arc;
 use agg_gui::text::Font;
 use agg_gui::widget::{InspectorNode, InspectorOverlay, WidgetBaseEdit};
 use agg_gui::widgets::{InspectorPanel, PerformanceView, Window};
-use agg_gui::{shared_frame_history, InspectorEdit, Rect, SharedFrameHistory, Widget};
+use agg_gui::{
+    shared_frame_history, shared_run_mode, InspectorEdit, Rect, RunMode, SharedFrameHistory, Widget,
+};
 
 use crate::settings::{DebugWindowState, DebugWindowsState};
 
@@ -49,6 +51,13 @@ pub struct DebugWindowHandles {
     pub inspector_edits: Rc<RefCell<Vec<InspectorEdit>>>,
 
     pub frame_history: SharedFrameHistory,
+    /// Reactive vs. Continuous host-loop mode.  Read by the platform
+    /// shell's main loop to decide whether to pump frames; written by
+    /// the Reactive/Continuous segmented selector embedded in the
+    /// Performance window's `PerformanceView`.  Defaults to Reactive —
+    /// AtomArtist only needs to repaint on input or animation, unlike
+    /// e.g. Antidote which runs a continuous simulation.
+    pub run_mode: Rc<Cell<RunMode>>,
 }
 
 impl DebugWindowHandles {
@@ -70,6 +79,7 @@ impl DebugWindowHandles {
             inspector_edits: Rc::new(RefCell::new(Vec::new())),
 
             frame_history: shared_frame_history(),
+            run_mode: shared_run_mode(RunMode::Reactive),
         }
     }
 
@@ -124,16 +134,38 @@ pub fn build_debug_windows(font: Arc<Font>, handles: &DebugWindowHandles) -> Vec
     let perf_view = PerformanceView::new(font.clone(), handles.frame_history.clone())
         .with_padding(12.0)
         .with_sparkline_height(64.0)
-        // The perf window only exists to show live numbers, so opt
-        // in to the per-revision redraw path — same convention
-        // Solitaire and Marbles use.
-        .with_history_redraw(true);
+        // Embed the Reactive/Continuous segmented selector so the user
+        // can flip the host loop mode without leaving the Performance
+        // window.  In Continuous mode the host pumps frames and the
+        // graph stays live; in Reactive mode no internal redraws are
+        // claimed, but the Window's `with_live_content(true)` below
+        // ensures the cached pixels refresh whenever some other widget
+        // triggers a paint — so the readout still updates with mouse
+        // movement, animations, etc., without trapping the shell into
+        // continuous repaint.
+        .with_run_mode_selector(handles.run_mode.clone());
 
     let perf_window = Window::new("Performance", font, Box::new(perf_view))
         .with_bounds(handles.perf_bounds.get())
         .with_visible_cell(handles.perf_visible.clone())
         .with_position_cell(handles.perf_bounds.clone())
-        .with_resizable(true);
+        .with_resizable(true)
+        // The perf graph reads from a `Rc<RefCell<FrameHistory>>` the
+        // shell pushes samples into outside the widget tree, so the
+        // framework has no event-dispatch path to mark this Window's
+        // GL backbuffer dirty when fresh data lands.  Without this
+        // flag the cached bitmap blits forever and the readout shows
+        // stale numbers unless the user happens to hover something
+        // INSIDE the window (event dispatch through this subtree
+        // marks the ancestors dirty automatically).  This is the
+        // canonical agg-gui "stale pixels" fix — see `Window::new`
+        // for the discussion.  It does NOT cause continuous painting:
+        // the flag invalidates the cache on each frame the window IS
+        // painted, but it never claims a redraw itself.  In Reactive
+        // mode the shell stays idle; only external invalidations
+        // (mouse moves, animations) trigger paints, and when they do
+        // the perf graph re-rasterises with the latest samples.
+        .with_live_content(true);
 
     vec![Box::new(inspector_window), Box::new(perf_window)]
 }

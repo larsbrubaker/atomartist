@@ -5,6 +5,7 @@
 //! survive a roundtrip through `build_app`, and the debug windows
 //! show up inside the production widget tree.
 
+use agg_gui::RunMode;
 use atomartist_ui::DebugWindowsState;
 use atomartist_ui_test::TestHarness;
 
@@ -62,6 +63,74 @@ fn frame_history_is_writable_and_observed_by_perf_widget() {
     }
     let mean = history.borrow().mean_ms();
     assert!((mean - 10.0).abs() < 1e-6, "mean of [8, 12] should be 10.0, got {mean}");
+}
+
+#[test]
+fn perf_widget_never_claims_its_own_redraws() {
+    // Regression: pushing a sample used to flip
+    // `PerformanceView::needs_draw()` to true via the
+    // `with_history_redraw(true)` opt-in, which then trapped the
+    // shell into a continuous repaint loop (paint → push sample →
+    // needs_draw=true → paint → …).  AtomArtist now drops the
+    // history-redraw opt-in entirely and relies on the Window's
+    // `with_live_content(true)` to refresh the cached pixels
+    // whenever an external invalidation triggers a paint.  Net
+    // effect: the perf widget never claims its own redraws in
+    // either mode — Continuous-mode pumping is driven by the
+    // native shell's main loop reading `run_mode`, not by any
+    // widget claim.
+    let h = TestHarness::new();
+    h.debug().perf_visible.set(true);
+
+    {
+        let mut hist = h.debug().frame_history.borrow_mut();
+        hist.push(8.0);
+        hist.push(12.0);
+    }
+
+    // Reactive — the original (and primary) regression.
+    assert_eq!(h.debug().run_mode.get(), RunMode::Reactive);
+    let perf = h
+        .find_by_type("PerformanceView")
+        .expect("Performance widget should live in the tree");
+    assert!(
+        !perf.needs_draw(),
+        "Reactive mode must NOT claim redraws even with fresh history samples"
+    );
+
+    // Continuous — symmetry check.  The shell loop is responsible
+    // for pumping in Continuous; the widget itself stays passive.
+    h.debug().run_mode.set(RunMode::Continuous);
+    let perf = h
+        .find_by_type("PerformanceView")
+        .expect("Performance widget should live in the tree");
+    assert!(
+        !perf.needs_draw(),
+        "Continuous-mode redraws come from the shell loop, not from the perf widget"
+    );
+}
+
+#[test]
+fn run_mode_defaults_to_reactive_and_round_trips_through_cell() {
+    // AtomArtist should start in Reactive (only paint on input or
+    // animation), unlike Antidote / sim-driven apps that pump frames
+    // continuously.  The Reactive/Continuous segmented buttons inside
+    // the Performance window's `PerformanceView` write through to the
+    // same `run_mode` cell the native shell's main loop reads, so a
+    // direct cell flip is the moral equivalent of clicking a button.
+    let h = TestHarness::new();
+    let cell = h.debug().run_mode.clone();
+    assert_eq!(cell.get(), RunMode::Reactive, "default starts Reactive");
+
+    cell.set(RunMode::Continuous);
+    assert_eq!(h.debug().run_mode.get(), RunMode::Continuous);
+
+    // The tree must contain a RunModeRow so the user has a way to
+    // flip back without re-launching the app.
+    assert!(
+        h.find_by_type("RunModeRow").is_some(),
+        "RunModeRow segmented buttons should live inside PerformanceView"
+    );
 }
 
 #[test]
