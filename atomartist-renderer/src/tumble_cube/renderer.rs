@@ -1,10 +1,9 @@
 //! wgpu custom-render impl for the tumble cube.
 //!
 //! Allocates and re-uses one render pipeline + six texture/sampler bind
-//! groups for the cube faces, painting into a per-widget MSAA
+//! groups for the cube faces, painting into a per-widget offscreen
 //! framebuffer (matching [`super::super::scene_renderer::WgpuSceneRenderer`]'s
-//! approach), then blitting the resolved buffer onto the active 2-D
-//! target.
+//! approach), then blitting the buffer onto the active 2-D target.
 //!
 //! The cube's own camera is independent of the main viewport: it sits
 //! on a small orbit at the origin with `(azimuth, elevation)` mirrored
@@ -20,9 +19,9 @@ use wgpu::util::DeviceExt;
 use super::cube_geometry::{build_cube, CubeVertex};
 use super::face_textures::{FaceTexture, TEX_SIZE};
 
-/// 4× MSAA matches the main scene renderer; lets the cube edges read
-/// crisply at the small 100 px widget size.
-const SAMPLE_COUNT: u32 = 4;
+/// Keep AtomArtist custom 3-D passes single-sample so the renderer can share
+/// the same attachment assumptions as the depth-peeled scene path.
+const SAMPLE_COUNT: u32 = 1;
 const FACE_MIP_COUNT: u32 = 9; // 256 -> 1
 
 /// Radius of the miniature cube camera.  A radius of 3 made the cube
@@ -469,7 +468,7 @@ impl WgpuCustomRender for TumbleCubeRenderer {
             }
         }
 
-        // Composite the resolved colour onto the active 2-D target,
+        // Composite the offscreen colour onto the active 2-D target,
         // alpha-blending so the cube reads on whatever sits behind it
         // (the viewport scene + 2-D HUD ring).
         fb.blit_to(

@@ -340,6 +340,7 @@ name = "atomartist-lib"
 version = "0.0.1"
 dependencies = [
  "agg-gui",
+ "bevy_reflect",
  "manifold-rust",
  "serde",
  "serde_json",

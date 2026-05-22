@@ -203,19 +203,29 @@ impl EvalTask {
     }
 
     fn pick_display_mesh(&self, g: &Graph) -> Option<Arc<MeshGL>> {
+        // Look up any Geometry3d cached output on the node — sockets
+        // names vary across node types (`"out"` for primitives, `"Geometry"`
+        // for Extrude). Picking by type is more robust than picking by
+        // a hard-coded name.
+        let first_geometry = |n: &atomartist_lib::graph::node::NodeInstance| {
+            n.cached_outputs.values().find_map(|v| match v {
+                PortValue::Geometry3d(m) => Some(m.clone()),
+                _ => None,
+            })
+        };
         let display_id = *self.display_node.lock().unwrap();
         if let Some(id) = display_id {
             if let Some(n) = g.get(id) {
-                if let Some(PortValue::Geometry3d(m)) = n.cached_outputs.get("out") {
-                    return Some(m.clone());
+                if let Some(m) = first_geometry(n) {
+                    return Some(m);
                 }
             }
         }
         let mut best: Option<(NodeId, Arc<MeshGL>)> = None;
         for n in g.nodes() {
-            if let Some(PortValue::Geometry3d(m)) = n.cached_outputs.get("out") {
+            if let Some(m) = first_geometry(n) {
                 if best.as_ref().map(|(id, _)| n.id > *id).unwrap_or(true) {
-                    best = Some((n.id, m.clone()));
+                    best = Some((n.id, m));
                 }
             }
         }

@@ -132,11 +132,11 @@ pub fn fresh_state_with_starter_graph() -> AppState {
             &state.registry,
         );
         let _ = g.connect(
-            Edge { from: SocketId { node: inflate, name: "out" }, to: SocketId { node: extrude, name: "input" } },
+            Edge { from: SocketId { node: inflate, name: "out" }, to: SocketId { node: extrude, name: "Paths" } },
             &state.registry,
         );
         let _ = g.connect(
-            Edge { from: SocketId { node: extrude, name: "out" }, to: SocketId { node: output, name: "in" } },
+            Edge { from: SocketId { node: extrude, name: "Geometry" }, to: SocketId { node: output, name: "in" } },
             &state.registry,
         );
         output

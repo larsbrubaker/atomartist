@@ -9,20 +9,18 @@
 //! to live inside the 3-D pass), the renderer owns a dedicated
 //! [`MsaaFramebuffer`] sized to the viewport widget's pixel rect:
 //!
-//! 1. Allocate an offscreen colour texture (4× MSAA + matching depth) at
-//!    the widget's pixel size.
+//! 1. Allocate an offscreen colour texture + matching depth at the widget's
+//!    pixel size.
 //! 2. Render the 3-D scene (floor grid + selected mesh + outline pass +
-//!    future gizmos) into the MSAA color attachment with depth on.
-//! 3. Resolve MSAA → the single-sample colour texture (built-in wgpu
-//!    `resolve_target` on the colour attachment).
-//! 4. Composite the resolved colour onto the active 2-D target through the
+//!    future gizmos) into that color attachment with depth on.
+//! 3. Composite the offscreen colour onto the active 2-D target through the
 //!    shared `tex_pipeline` (alpha-blended) so 2-D content beneath the
 //!    widget rect shows through transparent pixels and 2-D content drawn
 //!    on top of the widget composites cleanly.
 //!
-//! This keeps 4× sampling scoped to the 3-D content alone — UI overlays
-//! drawn on top stay sharp, and future viewport-corner toolbars / gizmos
-//! drop into a clean 2-D layer.
+//! This keeps the 3-D content isolated from the 2-D UI layer while avoiding
+//! full-screen MSAA; the depth-peeled path depends on stencil and should run
+//! single-sample.
 //!
 //! The shader stack is single Blinn-Phong-ish: vertex carries position +
 //! normal; fragment shades against a fixed key + fill light plus ambient.
@@ -63,11 +61,11 @@ impl Default for RenderStyle {
     }
 }
 
-/// Sample count for the offscreen 3-D framebuffer.  4× is the WebGPU
-/// guaranteed-supported MSAA value (matches what `MsaaFramebuffer::new`
-/// clamps anything > 1 to).  Higher values would require feature opt-in
-/// and aren't supported on every backend.
-const SAMPLE_COUNT: u32 = 4;
+/// Sample count for the offscreen 3-D framebuffer.
+///
+/// Keep this single-sample: the depth-peeled renderer uses stencil, so
+/// full-screen MSAA adds attachment complexity without helping that path.
+const SAMPLE_COUNT: u32 = 1;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -131,11 +129,9 @@ struct GpuState {
     /// Pairs with the same vbuf/ibuf as the main mesh.
     outline_pipeline: wgpu::RenderPipeline,
     outline_bind_group_layout: wgpu::BindGroupLayout,
-    /// Offscreen MSAA framebuffer + matching depth attachment, sized to
-    /// the viewport widget's pixel rect.  The 3-D pass renders into this
-    /// framebuffer's colour attachment (4× MSAA), which resolves into a
-    /// single-sample colour texture; that resolved texture is then
-    /// composited onto the surface via the shared 2-D `tex_pipeline`.
+    /// Offscreen framebuffer + matching depth attachment, sized to the
+    /// viewport widget's pixel rect. The 3-D pass renders here first, then
+    /// composites onto the surface via the shared 2-D `tex_pipeline`.
     framebuffer: Option<MsaaFramebuffer>,
 }
 
@@ -471,7 +467,7 @@ impl WgpuSceneRenderer {
         });
     }
 
-    /// Lazily allocate (or resize) the offscreen MSAA framebuffer to match
+    /// Lazily allocate (or resize) the offscreen framebuffer to match
     /// the widget's pixel rect.  Cheap when the size is stable.
     fn ensure_framebuffer(&mut self, device: &wgpu::Device, w: u32, h: u32) {
         let s = match &mut self.state { Some(s) => s, None => return };
@@ -537,8 +533,8 @@ impl WgpuCustomRender for WgpuSceneRenderer {
         self.ensure_state(ctx.device, ctx.surface_format);
 
         // Pixel size of the viewport widget rect.  The framebuffer matches
-        // this exactly (1:1 mapping), so blit_to runs a no-op bilinear
-        // sampler — the 4× MSAA in the offscreen pass is the only AA.
+        // this exactly (1:1 mapping), so blit_to runs an effectively no-op
+        // bilinear sampler.
         let fb_w = ctx.screen_rect.width.max(1.0) as u32;
         let fb_h = ctx.screen_rect.height.max(1.0) as u32;
         if fb_w == 0 || fb_h == 0 {
@@ -582,9 +578,9 @@ impl WgpuCustomRender for WgpuSceneRenderer {
             }],
         });
 
-        // ── Pass 1: render 3-D into the offscreen MSAA framebuffer ─────────
-        // The colour attachment is the multisample colour view; on store
-        // the implicit resolve writes into the single-sample resolve view.
+        // ── Pass 1: render 3-D into the offscreen framebuffer ──────────────
+        // With SAMPLE_COUNT = 1 the framebuffer writes directly into the
+        // single-sample texture that the composite pass samples from.
         // No 2-D content beneath the widget bleeds through because we
         // clear to fully transparent and the composite pass below
         // alpha-blends only where the 3-D content covered pixels.
@@ -703,7 +699,7 @@ impl WgpuCustomRender for WgpuSceneRenderer {
             }
         } // pass dropped — encoder freed for the composite pass.
 
-        // ── Pass 2: composite resolved colour onto the active 2-D target ───
+        // ── Pass 2: composite offscreen colour onto the active 2-D target ──
         // 1:1 size mapping (framebuffer matches widget pixel rect), so
         // the bilinear sampler in the shared `tex_pipeline` is identity-
         // equivalent.  Alpha-blends through `BLEND_STANDARD` so transparent

@@ -15,7 +15,8 @@ pub mod socket_types;
 
 pub use graph::{Edge, Graph, GraphError, NodeId, NodeInstance, PortValue, SocketId};
 pub use registry::{
-    NodeDef, NodeError, NodeInputs, NodeOutputs, NodeProperties, NodeRegistry, PropDef, SocketDef,
+    EditorKind, NodeDef, NodeError, NodeFieldAttrs, NodeInputs, NodeOutputs, NodeProperties,
+    NodeRegistry, NumberAttrs, PropDef, SocketDef,
 };
 pub use socket_types::SocketType;
 

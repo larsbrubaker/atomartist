@@ -16,8 +16,8 @@
 //!   - [`hit_test`] — face / tile resolution (corner / edge / centre).
 //!   - [`orient`] — `(face, tile)` → `(azimuth, elevation)` mapping +
 //!     animation glue.
-//!   - [`renderer`] — `WgpuCustomRender` impl with MSAA framebuffer and
-//!     six per-face texture bind groups.
+//!   - [`renderer`] — `WgpuCustomRender` impl with offscreen framebuffer
+//!     and six per-face texture bind groups.
 
 pub mod cube_geometry;
 pub mod face_textures;

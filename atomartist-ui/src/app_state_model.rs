@@ -70,9 +70,10 @@ impl AppStateModel {
         }
     }
 
-    /// Map a `PortValue` to an editor-side `PropertyValue`. Numbers
-    /// and bools are inline-editable; everything else round-trips as
-    /// a display string and isn't draggable.
+    /// Map a `PortValue` to an editor-side `PropertyValue`. Numbers,
+    /// bools, and colors get rich inline visuals; matrices / paths /
+    /// meshes round-trip through `Other` and rely on host-side
+    /// editors.
     fn property_value_to_ne(v: &PortValue) -> ne::PropertyValue {
         match v {
             PortValue::Number(n) => ne::PropertyValue::Number(*n),
@@ -80,17 +81,15 @@ impl AppStateModel {
             PortValue::StringVal(s) => ne::PropertyValue::Other {
                 display: s.as_str().to_string(),
             },
-            PortValue::Color(_) => ne::PropertyValue::Other {
-                display: "Color".into(),
-            },
+            PortValue::Color(c) => ne::PropertyValue::Color(*c),
             PortValue::Matrix4x4(_) => ne::PropertyValue::Other {
-                display: "Matrix4x4".into(),
+                display: "Matrix".into(),
             },
             PortValue::Path2d(_) => ne::PropertyValue::Other {
                 display: "Path2d".into(),
             },
             PortValue::Geometry3d(_) => ne::PropertyValue::Other {
-                display: "Geometry3d".into(),
+                display: "Geometry".into(),
             },
             PortValue::None => ne::PropertyValue::Other { display: "—".into() },
         }
@@ -110,7 +109,7 @@ impl ne::NodeGraphModel for AppStateModel {
                     .map(|s| ne::SocketView {
                         name: s.name.into(),
                         socket_type: Self::socket_type_to_id(s.socket_type),
-                        display_label: None,
+                        display_label: s.display_label.map(Into::into),
                     })
                     .collect();
                 let outputs: Vec<ne::SocketView> = def
@@ -119,7 +118,7 @@ impl ne::NodeGraphModel for AppStateModel {
                     .map(|s| ne::SocketView {
                         name: s.name.into(),
                         socket_type: Self::socket_type_to_id(s.socket_type),
-                        display_label: None,
+                        display_label: s.display_label.map(Into::into),
                     })
                     .collect();
                 let properties: Vec<ne::PropertyView> = def
@@ -133,9 +132,11 @@ impl ne::NodeGraphModel for AppStateModel {
                             .unwrap_or_else(|| p.default.clone());
                         ne::PropertyView {
                             name: p.name.into(),
+                            display_label: p.label.map(Into::into),
                             current: Self::property_value_to_ne(&current),
                             min: p.min,
                             max: p.max,
+                            bound_input: p.bound_input.map(Into::into),
                         }
                     })
                     .collect();
@@ -307,6 +308,7 @@ impl ne::NodeGraphModel for AppStateModel {
         let port_value = match value {
             ne::PropertyValue::Number(n) => PortValue::Number(n),
             ne::PropertyValue::Bool(b) => PortValue::Bool(b),
+            ne::PropertyValue::Color(c) => PortValue::Color(c),
             ne::PropertyValue::Other { .. } => return,
         };
         {
@@ -458,5 +460,59 @@ mod tests {
         let mut model = AppStateModel::new(state);
         ne::NodeGraphModel::on_primary_selection_changed(&mut model, Some(ne::NodeId(id.0)));
         assert_eq!(*model.state.selection.lock().unwrap(), Some(id));
+    }
+
+    #[test]
+    fn extrude_view_pairs_inputs_with_bound_properties() {
+        let state = fixture();
+        let id = {
+            let mut g = state.graph.lock().unwrap();
+            crate::node_helpers::add_node_with_defaults(&mut g, &state.registry, "Extrude", [0.0, 0.0])
+                .unwrap()
+        };
+        let model = AppStateModel::new(state);
+        let nodes = ne::NodeGraphModel::nodes(&model);
+        let n = nodes.iter().find(|n| n.id.0 == id.0).unwrap();
+        // Outputs come first in NodeDesigner-style layout.
+        assert_eq!(n.outputs.len(), 1);
+        assert_eq!(n.outputs[0].name, "Geometry");
+        // Each optional input must be paired with a bound property.
+        let optional_input_names: Vec<&str> = vec![
+            "Height",
+            "Radius",
+            "Segments",
+            "Bottom Radius",
+            "Bottom Segments",
+            "Color",
+            "Matrix",
+        ];
+        for name in optional_input_names {
+            let matched = n
+                .properties
+                .iter()
+                .any(|p| p.bound_input.as_deref() == Some(name));
+            assert!(matched, "no property bound to input '{}'", name);
+        }
+        // Sockets carry display labels.
+        let height_input = n.inputs.iter().find(|s| s.name == "Height").unwrap();
+        assert_eq!(height_input.display_label.as_deref(), Some("Height"));
+    }
+
+    #[test]
+    fn extrude_color_property_round_trips_as_color_value() {
+        let state = fixture();
+        let _id = {
+            let mut g = state.graph.lock().unwrap();
+            crate::node_helpers::add_node_with_defaults(&mut g, &state.registry, "Extrude", [0.0, 0.0])
+                .unwrap()
+        };
+        let model = AppStateModel::new(state);
+        let nodes = ne::NodeGraphModel::nodes(&model);
+        let n = &nodes[0];
+        let color = n.properties.iter().find(|p| p.name == "color").unwrap();
+        match &color.current {
+            ne::PropertyValue::Color(c) => assert_eq!(*c, [1.0, 1.0, 1.0, 1.0]),
+            other => panic!("expected Color, got {:?}", other),
+        }
     }
 }

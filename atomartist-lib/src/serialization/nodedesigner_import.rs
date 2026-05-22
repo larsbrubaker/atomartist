@@ -208,17 +208,31 @@ fn parse_hex_color(s: &str) -> Option<[f32; 4]> {
 /// `"out"` for outputs). Returns `None` when no AtomArtist analogue is
 /// known — the importer drops the edge then.
 fn map_socket_name(node_atomartist_type: &str, nd_name: &str, is_output: bool) -> Option<&'static str> {
-    // Output side is almost always our "out".
+    // Output side is almost always our "out", with a few node types
+    // whose output names were promoted to readable identifiers in the
+    // AtomArtist schema.
     if is_output {
-        return Some("out");
+        return match (node_atomartist_type, nd_name) {
+            ("Extrude", _) => Some("Geometry"),
+            _ => Some("out"),
+        };
     }
     // Input side depends on the node.
     match (node_atomartist_type, nd_name) {
         // Output node has a Geometry input named "in" in our model.
         ("Output", "Geometry") | ("Output", "geometry") => Some("in"),
-        // Transform / Extrude / Inflate use "input"
+        // Transform / Inflate keep the legacy `input` name; Extrude was
+        // promoted to NodeDesigner-style socket names so we pass each
+        // NodeDesigner socket through to its AtomArtist counterpart.
         ("Transform", "Geometry") => Some("input"),
-        ("Extrude",   "Paths")    => Some("input"),
+        ("Extrude",   "Paths")    => Some("Paths"),
+        ("Extrude",   "Height")   => Some("Height"),
+        ("Extrude",   "Radius")   => Some("Radius"),
+        ("Extrude",   "Segments") => Some("Segments"),
+        ("Extrude",   "Bottom Radius")   => Some("Bottom Radius"),
+        ("Extrude",   "Bottom Segments") => Some("Bottom Segments"),
+        ("Extrude",   "Color")    => Some("Color"),
+        ("Extrude",   "Matrix")   => Some("Matrix"),
         ("Inflate",   "Paths")    => Some("input"),
         // Combine — NodeDesigner has "Geometry 1" .. "Geometry 8";
         // we use "input_1" .. "input_8".
@@ -398,6 +412,12 @@ mod tests {
     use crate::graph::node::PortValue;
     use crate::nodes;
 
+    // Gated on the `local_fds_examples` feature because the include_str!
+    // path reaches into a sibling `MatterHackers/FDS` checkout that isn't
+    // present in every developer's environment. Enable with
+    // `cargo test -p atomartist-lib --features local_fds_examples` if you
+    // have NodeDesigner cloned alongside this repo.
+    #[cfg(feature = "local_fds_examples")]
     #[test]
     fn imports_simple_box_example() {
         let json = include_str!(

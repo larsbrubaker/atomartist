@@ -2,7 +2,7 @@
 name = "atomartist-lib"
 version = "0.0.1"
 edition = "2021"
-rust-version = "1.70"
+rust-version = "1.85"
 authors = ["Lars Brubaker <larsbrubaker@matterhackers.com>"]
 license = "MIT"
 description = "AtomArtist core: graph engine, node types, geometry, serialization."
@@ -18,3 +18,15 @@ manifold-rust = { path = "../../manifold-rust" }
 tess2-rust    = { path = "../../tess2-rust" }
 serde         = { version = "1", features = ["derive"] }
 serde_json    = "1"
+# `bevy_reflect` powers typed node-field discovery: node property structs
+# derive `Reflect` so we can iterate field names + types at runtime and
+# attach editor hints via `#[reflect(@NodeFieldAttrs { ... })]` custom
+# attributes. We turn off the heavy `auto_register_inventory` default so
+# this stays a quiet dependency — we only need the derive + TypeInfo APIs.
+bevy_reflect  = { version = "0.18", default-features = false, features = ["std"] }
+
+[features]
+# Enables tests that include scene fixtures from a sibling `MatterHackers/FDS`
+# checkout. Off by default because the sibling path isn't present in
+# every developer's environment.
+local_fds_examples = []

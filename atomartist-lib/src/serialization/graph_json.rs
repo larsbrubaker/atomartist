@@ -288,6 +288,49 @@ mod tests {
     }
 
     #[test]
+    fn round_trip_extrude_preserves_color_and_matrix_properties() {
+        let reg = registry();
+        let mut g = Graph::new();
+        let id = g.allocate_id();
+        let mut node = NodeInstance::new(id, "Extrude", [0.0, 0.0]);
+        node.properties.insert("height", PortValue::Number(8.5));
+        node.properties.insert("bevel_radius", PortValue::Number(1.25));
+        node.properties.insert("bevel_segments", PortValue::Number(12.0));
+        node.properties
+            .insert("color", PortValue::Color([0.25, 0.5, 0.75, 1.0]));
+        let m: [f32; 16] = [
+            1.0, 0.0, 0.0, 0.0, //
+            0.0, 1.0, 0.0, 0.0, //
+            0.0, 0.0, 1.0, 0.0, //
+            2.0, 3.0, 4.0, 1.0,
+        ];
+        node.properties.insert("matrix", PortValue::Matrix4x4(m));
+        g.add_node(node).unwrap();
+
+        let json = graph_to_json_string(&g);
+        let LoadResult { graph: g2, warnings } = graph_from_json_str(&json, &reg).unwrap();
+        assert!(warnings.is_empty(), "warnings: {:?}", warnings);
+
+        let restored = g2.nodes().find(|n| n.type_id == "Extrude").unwrap();
+        match restored.properties.get("color").unwrap() {
+            PortValue::Color(c) => assert_eq!(*c, [0.25, 0.5, 0.75, 1.0]),
+            _ => panic!("color did not round-trip as Color"),
+        }
+        match restored.properties.get("matrix").unwrap() {
+            PortValue::Matrix4x4(mm) => assert_eq!(*mm, m),
+            _ => panic!("matrix did not round-trip as Matrix4x4"),
+        }
+        match restored.properties.get("height").unwrap() {
+            PortValue::Number(v) => assert!((v - 8.5).abs() < 1e-9),
+            _ => panic!(),
+        }
+        match restored.properties.get("bevel_segments").unwrap() {
+            PortValue::Number(v) => assert!((v - 12.0).abs() < 1e-9),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
     fn unknown_node_type_is_skipped_with_warning() {
         let reg = registry();
         let json = r#"{
