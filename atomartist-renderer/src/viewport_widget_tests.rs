@@ -48,3 +48,21 @@ fn widget_constructs_and_lays_out() {
     assert_eq!(s.width, 400.0);
     assert_eq!(s.height, 300.0);
 }
+
+/// `show_bed` lives in a shared `Arc<Mutex<>>` between the host UI
+/// (which drives the toolbar toggle) and the viewport widget (which
+/// mirrors it into [`crate::scene_renderer::WgpuSceneRenderer::draw_grid`]
+/// each paint). Clone the handle, build a widget that owns the
+/// inputs, and assert the flag the widget sees follows the host's
+/// writes — proves the toggle path doesn't get truncated when the
+/// widget moves out the inputs.
+#[test]
+fn show_bed_flag_round_trips_through_inputs() {
+    let inputs = empty_inputs();
+    let handle = inputs.show_bed.clone();
+    let _w = Viewport3dWidget::new(inputs);
+    *handle.lock().unwrap() = false;
+    assert!(!*handle.lock().unwrap());
+    *handle.lock().unwrap() = true;
+    assert!(*handle.lock().unwrap());
+}

@@ -39,6 +39,7 @@
 //! `2×` SSAA offscreen framebuffer, compositing at widget size through the
 //! shared bilinear blit pipeline.
 
+pub mod bed;
 pub mod camera;
 pub mod camera_animations;
 pub mod picking;

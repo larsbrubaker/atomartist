@@ -21,6 +21,9 @@ wgpu           = { version = "29", default-features = false, features = ["wgsl"]
 bytemuck       = { version = "1", features = ["derive"] }
 glam           = { workspace = true }
 
+[dev-dependencies]
+pollster       = "0.3"
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies.wgpu]
 version = "29"
 default-features = false

@@ -630,14 +630,9 @@ impl Widget for Viewport3dWidget {
             } else {
                 [0.55, 0.58, 0.66, 0.55]
             };
-            // Background: same as the viewport bg so grid lines composite
-            // cleanly against whatever 2-D content sits behind.
-            s.grid_bg_color = [
-                self.bg_color.r,
-                self.bg_color.g,
-                self.bg_color.b,
-                0.0,
-            ];
+            // Theme flag drives the contact-shadow composite — black
+            // shadows for light bg, bright shadows for dark.
+            s.grid_dark_mode = dark;
         }
 
         // Install system font so any text we paint actually renders.

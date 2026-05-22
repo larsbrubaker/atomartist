@@ -40,67 +40,6 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-pub(super) const GRID_SHADER: &str = r#"
-struct GridU {
-    mvp: mat4x4<f32>,
-    cell: vec4<f32>,        // x = minor cell size, y = major cell stride, z = grid_z (world-Z height of the plane)
-    line_color: vec4<f32>,
-    bg_color: vec4<f32>,
-};
-
-@group(0) @binding(0) var<uniform> u: GridU;
-
-struct VOut {
-    @builtin(position) clip: vec4<f32>,
-    @location(0) world_xy: vec2<f32>,
-};
-
-@vertex
-fn vs(@location(0) pos: vec3<f32>) -> VOut {
-    var o: VOut;
-    // Bed is the XY plane in a Z-up world. The Rust-side
-    // `GridVertex` quad is laid out in the XY plane (z = 0); we
-    // substitute the dynamic floor height u.cell.z here so the bed
-    // tracks the model's lowest point.
-    let p = vec3<f32>(pos.x, pos.y, u.cell.z);
-    o.clip = u.mvp * vec4<f32>(p, 1.0);
-    o.world_xy = p.xy;
-    return o;
-}
-
-// Coverage of a 1-pixel-wide line at integer grid coordinates, derived
-// from screen-space derivatives so it stays sharp at any zoom.
-fn line_coverage(coord: vec2<f32>) -> f32 {
-    let d = fwidth(coord);
-    let g = abs(fract(coord - 0.5) - 0.5) / d;
-    let line = min(g.x, g.y);
-    return 1.0 - clamp(line, 0.0, 1.0);
-}
-
-@fragment
-fn fs(in: VOut) -> @location(0) vec4<f32> {
-    let cell  = u.cell.x;
-    let major = u.cell.y;
-
-    // Minor + major grid coverages (in world-space cell units).
-    let minor_c = coord_to_cell(in.world_xy, cell);
-    let major_c = coord_to_cell(in.world_xy, cell * major);
-    let minor_a = line_coverage(minor_c) * 0.35;
-    let major_a = line_coverage(major_c);
-
-    let alpha = max(minor_a, major_a);
-    if alpha < 0.01 {
-        discard;
-    }
-    let col = mix(u.bg_color.rgb, u.line_color.rgb, alpha);
-    return vec4<f32>(col, alpha * u.line_color.a);
-}
-
-fn coord_to_cell(p: vec2<f32>, cell: f32) -> vec2<f32> {
-    return p / cell;
-}
-"#;
-
 pub(super) const OUTLINE_SHADER: &str = r#"
 struct U {
     mvp: mat4x4<f32>,

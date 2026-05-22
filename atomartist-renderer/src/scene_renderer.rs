@@ -34,8 +34,9 @@ use wgpu::util::DeviceExt;
 
 use glam::Mat4;
 
+use crate::bed::BedRenderer;
 use crate::camera::OrbitCamera;
-use crate::scene_shaders::{GRID_SHADER, OUTLINE_SHADER, SHADER};
+use crate::scene_shaders::{OUTLINE_SHADER, SHADER};
 
 /// Render-style picker beneath the tumble cube.  Drives the surface
 /// pipeline used by [`WgpuSceneRenderer`] so the user can compare a
@@ -88,26 +89,6 @@ struct Vertex {
 }
 
 
-/// Procedural floor grid. Draws a single large quad at a configurable Y
-/// and computes line coverage in the fragment shader so the grid stays
-/// sharp at any zoom and fades to transparent at distance.
-
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct GridUniforms {
-    mvp: [f32; 16],
-    /// x = minor cell size, y = major cell stride (in cells), z/w = pad
-    cell: [f32; 4],
-    line_color: [f32; 4],
-    bg_color: [f32; 4],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct GridVertex {
-    pos: [f32; 3],
-}
-
 struct GpuState {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
@@ -117,12 +98,11 @@ struct GpuState {
     vbuf: Option<wgpu::Buffer>,
     ibuf: Option<wgpu::Buffer>,
     index_count: u32,
-    /// Floor grid pipeline + buffers — built lazily alongside the mesh
-    /// pipeline. `grid_vbuf` covers a large XZ plane at Y=0; the shader
-    /// fades grid lines via screen-space derivatives.
-    grid_pipeline: wgpu::RenderPipeline,
-    grid_bind_group_layout: wgpu::BindGroupLayout,
-    grid_vbuf: wgpu::Buffer,
+    /// Bed renderer — owns the baked grid texture and the contact-shadow
+    /// chain. Replaces the old procedural floor-grid pipeline. See
+    /// [`crate::bed`] for the off-screen silhouette → blur → composite
+    /// pipeline that runs each frame before the main pass.
+    bed: BedRenderer,
     /// Inverted-hull outline pipeline — inflates each vertex along its
     /// normal in the vertex shader, draws *only* the back-faces (so the
     /// inflated rim peeks out from behind the regular front-face render).
@@ -155,14 +135,17 @@ pub struct WgpuSceneRenderer {
     pub base_color: [f32; 4],
     pub light_dir: [f32; 3],
     /// Floor-grid line color — caller adapts to the active theme.
+    /// Forwarded to [`crate::bed::BedRenderer::set_line_color`] each
+    /// frame; cheap when unchanged.
     pub grid_line_color: [f32; 4],
-    /// Floor-grid background — typically the viewport bg, used to blend
-    /// grid lines against the existing 2-D backdrop already painted there.
-    pub grid_bg_color: [f32; 4],
-    /// True to draw the floor grid before the mesh.
+    /// True when the bed should render dark-mode contact shadows
+    /// (bright instead of black). Mirrored from the viewport theme by
+    /// [`crate::viewport_widget::Viewport3dWidget::paint`].
+    pub grid_dark_mode: bool,
+    /// True to draw the bed before the mesh.
     pub draw_grid: bool,
-    /// World Z (height) where the floor grid sits — `Viewport3dWidget`
-    /// updates this to the model's bounds-min Z so the grid always
+    /// World Z (height) where the bed sits — `Viewport3dWidget`
+    /// updates this to the model's bounds-min Z so the bed always
     /// feels like a floor in the Z-up world.
     pub grid_z: f32,
     /// Render the inverted-hull outline pass. The host sets this when a
@@ -191,7 +174,7 @@ impl WgpuSceneRenderer {
             base_color: [0.62, 0.66, 0.78, 1.0],
             light_dir: [0.4, 0.7, 0.6],
             grid_line_color: [0.55, 0.58, 0.66, 0.7],
-            grid_bg_color: [1.0, 1.0, 1.0, 0.0],
+            grid_dark_mode: false,
             draw_grid: true,
             grid_z: 0.0,
             outline_enabled: false,
@@ -201,7 +184,12 @@ impl WgpuSceneRenderer {
         }
     }
 
-    fn ensure_state(&mut self, device: &wgpu::Device, surface_format: wgpu::TextureFormat) {
+    fn ensure_state(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        surface_format: wgpu::TextureFormat,
+    ) {
         if let Some(s) = &self.state {
             if s.surface_format == surface_format {
                 return;
@@ -282,95 +270,15 @@ impl WgpuSceneRenderer {
             cache: None,
         });
 
-        // ── Grid pipeline + vbuf ────────────────────────────────────────────
-        let grid_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("atomartist grid shader"),
-            source: wgpu::ShaderSource::Wgsl(GRID_SHADER.into()),
-        });
-        let grid_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("atomartist grid bgl"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
-        let grid_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("atomartist grid pl"),
-            bind_group_layouts: &[Some(&grid_bgl)],
-            immediate_size: 0,
-        });
-        let grid_vert_layout = wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<GridVertex>() as u64,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &[wgpu::VertexAttribute {
-                offset: 0,
-                shader_location: 0,
-                format: wgpu::VertexFormat::Float32x3,
-            }],
-        };
-        let grid_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("atomartist grid pipeline"),
-            layout: Some(&grid_pl),
-            vertex: wgpu::VertexState {
-                module: &grid_shader,
-                entry_point: Some("vs"),
-                buffers: &[grid_vert_layout],
-                compilation_options: Default::default(),
-            },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                // Grid writes depth so the model occludes lines behind it.
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: SAMPLE_COUNT,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &grid_shader,
-                entry_point: Some("fs"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
-        // Two triangles forming a large XZ-plane quad at Y=0.
-        // Quad covering the XY plane at z=0; the grid shader
-        // substitutes the dynamic floor height (`u.cell.z`) at draw
-        // time so this geometry never has to be rebuilt.
-        let plane: [GridVertex; 6] = [
-            GridVertex { pos: [-2000.0, -2000.0, 0.0] },
-            GridVertex { pos: [ 2000.0, -2000.0, 0.0] },
-            GridVertex { pos: [ 2000.0,  2000.0, 0.0] },
-            GridVertex { pos: [-2000.0, -2000.0, 0.0] },
-            GridVertex { pos: [ 2000.0,  2000.0, 0.0] },
-            GridVertex { pos: [-2000.0,  2000.0, 0.0] },
-        ];
-        let grid_vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("atomartist grid vb"),
-            contents: bytemuck::cast_slice(&plane),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
+        // ── Bed renderer (replaces old grid pipeline) ──────────────────────
+        let mut bed = BedRenderer::new(
+            device,
+            queue,
+            surface_format,
+            SAMPLE_COUNT,
+            self.grid_line_color,
+        );
+        bed.set_dark_mode(self.grid_dark_mode);
 
         // ── Outline (inverted-hull) pipeline ───────────────────────────────
         let outline_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -458,9 +366,7 @@ impl WgpuSceneRenderer {
             vbuf: None,
             ibuf: None,
             index_count: 0,
-            grid_pipeline,
-            grid_bind_group_layout: grid_bgl,
-            grid_vbuf,
+            bed,
             outline_pipeline,
             outline_bind_group_layout: outline_bgl,
             framebuffer: None,
@@ -482,6 +388,22 @@ impl WgpuSceneRenderer {
                 ));
             }
         }
+    }
+
+    /// Compute the bed-quad's render-time Z, slightly nudged away
+    /// from the camera so the bed never Z-fights with model geometry
+    /// that rests at `grid_z`. Port of NodeDesigner's `three-viewer`
+    /// camera-distance offset: at typical zoom the offset is a few
+    /// thousandths of a world unit — invisible to the eye but well
+    /// above depth-buffer precision noise.
+    fn bed_render_z(&self) -> f32 {
+        let eye_z = self.camera.eye()[2];
+        let dist = (eye_z - self.grid_z).abs();
+        let sign = if eye_z >= self.grid_z { -1.0 } else { 1.0 };
+        // Nudge toward the camera so the bed sits *in front of*
+        // geometry resting at grid_z; the bed's depth-write still
+        // lets the model occlude grid lines behind it.
+        self.grid_z + sign * dist * 0.004
     }
 
     /// Re-upload mesh buffers if the mesh changed since the last frame.
@@ -530,7 +452,7 @@ impl Default for WgpuSceneRenderer {
 impl WgpuCustomRender for WgpuSceneRenderer {
     fn render(&mut self, ctx: WgpuCustomRenderCtx<'_>) {
         // Lazy GPU init — runs once.
-        self.ensure_state(ctx.device, ctx.surface_format);
+        self.ensure_state(ctx.device, ctx.queue, ctx.surface_format);
 
         // Pixel size of the viewport widget rect.  The framebuffer matches
         // this exactly (1:1 mapping), so blit_to runs an effectively no-op
@@ -543,6 +465,17 @@ impl WgpuCustomRender for WgpuSceneRenderer {
 
         self.ensure_framebuffer(ctx.device, fb_w, fb_h);
         self.ensure_mesh_buffers(ctx.device);
+
+        // Forward theme inputs to the bed before any pass runs — these
+        // are cheap (no-ops when unchanged) and let the bed grid /
+        // composite-shadow chain track the active theme without extra
+        // plumbing in the host widget.
+        let grid_line = self.grid_line_color;
+        let grid_dark = self.grid_dark_mode;
+        if let Some(s) = &mut self.state {
+            s.bed.set_line_color(ctx.device, ctx.queue, grid_line);
+            s.bed.set_dark_mode(grid_dark);
+        }
 
         let s = match &self.state { Some(s) => s, None => return };
         let fb = match &s.framebuffer { Some(fb) => fb, None => return };
@@ -578,6 +511,30 @@ impl WgpuCustomRender for WgpuSceneRenderer {
             }],
         });
 
+        // ── Pass 0: refresh the bed composite (grid + contact shadow) ──────
+        // Runs in its own set of off-screen passes against `ctx.encoder`
+        // BEFORE we open the main framebuffer pass, so the bed quad in
+        // the main pass can sample the freshly-blitted composite
+        // texture. Skipped when the bed is hidden — no shadow update
+        // needed if the bed isn't being drawn.
+        if self.draw_grid {
+            let mesh_ref = match (&s.vbuf, &s.ibuf) {
+                (Some(vbuf), Some(ibuf)) if s.index_count > 0 => Some(crate::bed::MeshRef {
+                    vbuf,
+                    ibuf,
+                    index_count: s.index_count,
+                }),
+                _ => None,
+            };
+            s.bed.render_to_composite(
+                ctx.device,
+                ctx.encoder,
+                mesh_ref,
+                self.grid_z,
+                [self.camera.center[0], self.camera.center[1]],
+            );
+        }
+
         // ── Pass 1: render 3-D into the offscreen framebuffer ──────────────
         // With SAMPLE_COUNT = 1 the framebuffer writes directly into the
         // single-sample texture that the composite pass samples from.
@@ -612,34 +569,15 @@ impl WgpuCustomRender for WgpuSceneRenderer {
             pass.set_viewport(0.0, 0.0, fb_w as f32, fb_h as f32, 0.0, 1.0);
             pass.set_scissor_rect(0, 0, fb_w, fb_h);
 
-            // Floor grid first — depth-write on so the mesh occludes lines
-            // hidden behind it.
+            // Bed first — depth-write on so the mesh occludes the lines
+            // hidden behind it. The bed pipeline samples the composite
+            // texture we refreshed in Pass 0. A small camera-distance Z
+            // nudge keeps the plane from Z-fighting with model geometry
+            // resting on Z = grid_z (port of NodeDesigner three-viewer's
+            // distance-scaled offset).
             if self.draw_grid {
-                let grid_uniforms = GridUniforms {
-                    mvp,
-                    cell: [1.0, 10.0, self.grid_z, 0.0],
-                    line_color: self.grid_line_color,
-                    bg_color: self.grid_bg_color,
-                };
-                let grid_ub = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("atomartist grid ub"),
-                    contents: bytemuck::bytes_of(&grid_uniforms),
-                    usage: wgpu::BufferUsages::UNIFORM,
-                });
-                let grid_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("atomartist grid bg"),
-                    layout: &s.grid_bind_group_layout,
-                    entries: &[wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: grid_ub.as_entire_binding(),
-                    }],
-                });
-                pass.set_pipeline(&s.grid_pipeline);
-                pass.set_bind_group(0, &grid_bg, &[]);
-                pass.set_vertex_buffer(0, s.grid_vbuf.slice(..));
-                pass.draw(0..6, 0..1);
-                drop(grid_bg);
-                drop(grid_ub);
+                let bed_z = self.bed_render_z();
+                s.bed.draw_bed(ctx.device, &mut pass, mvp, bed_z);
             }
 
             // Mesh — only when both a vertex buffer and index buffer are
@@ -730,5 +668,35 @@ mod tests {
     fn renderer_is_constructible() {
         let r = WgpuSceneRenderer::new();
         assert!(r.mesh.is_none());
+    }
+
+    /// Bed Z-fight offset nudges the plane toward the camera — when
+    /// the camera is above `grid_z` the result is below `grid_z`, and
+    /// vice versa. Magnitude scales with camera distance so the
+    /// adjustment is invisible at typical zooms but always exceeds
+    /// depth-buffer precision.
+    #[test]
+    fn bed_render_z_nudges_toward_camera() {
+        let mut r = WgpuSceneRenderer::new();
+        r.grid_z = 0.0;
+        // Default camera looks at the origin from radius=300-ish on +Z;
+        // exact value isn't important — only the sign of the nudge.
+        let eye_z = r.camera.eye()[2];
+        let bed_z = r.bed_render_z();
+        assert!(bed_z != r.grid_z);
+        if eye_z > 0.0 {
+            assert!(bed_z < 0.0, "camera above bed -> bed nudged below");
+        } else {
+            assert!(bed_z > 0.0, "camera below bed -> bed nudged above");
+        }
+        // 0.004 × distance scaling — the offset for a 100-unit eye
+        // should be at least 0.3 (much larger than f32 depth noise).
+        assert!(bed_z.abs() > 0.001 * eye_z.abs().max(1.0));
+    }
+
+    #[test]
+    fn bed_toggle_default_is_on() {
+        let r = WgpuSceneRenderer::new();
+        assert!(r.draw_grid);
     }
 }
