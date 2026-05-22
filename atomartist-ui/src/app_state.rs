@@ -304,6 +304,11 @@ impl AppState {
     /// Snapshot the HUD-button state into a [`crate::UiSettings`]
     /// for persistence. Callers serialise this to disk via
     /// `UiSettings::write_to_file`.
+    ///
+    /// The `debug_windows` field is filled in with defaults — the
+    /// shell owns the live [`crate::DebugWindowHandles`] and is
+    /// responsible for splicing the current window layout in before
+    /// writing the settings blob (see `demo-native::main`).
     pub fn ui_settings(&self) -> crate::UiSettings {
         crate::UiSettings {
             perspective: *self.perspective.lock().unwrap(),
@@ -311,6 +316,7 @@ impl AppState {
             show_bed: *self.show_bed.lock().unwrap(),
             render_style: *self.render_style.lock().unwrap(),
             snap_amount: *self.snap_amount.lock().unwrap(),
+            debug_windows: crate::DebugWindowsState::default(),
         }
     }
 

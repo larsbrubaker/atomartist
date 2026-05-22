@@ -13,7 +13,7 @@ name = "atomartist_ui"
 path = "src/lib.rs"
 
 [dependencies]
-agg-gui             = { path = "../../agg-gui/agg-gui", default-features = false }
+agg-gui             = { path = "../../agg-gui/agg-gui", default-features = false, features = ["reflect"] }
 agg-gui-node-editor = { path = "../../agg-gui/node-editor" }
 agg-rust            = { path = "../../agg-rust" }
 atomartist-lib      = { path = "../atomartist-lib" }

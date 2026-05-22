@@ -77,7 +77,7 @@ impl TestHarness {
         agg_gui::font_settings::set_system_font(Some(font));
         let dialogs: Arc<dyn atomartist_ui::top_menu_bar::FileDialogProvider> =
             Arc::new(NoFileDialogs);
-        let root: Box<dyn Widget> = build_app(state.clone(), dialogs);
+        let (root, _debug): (Box<dyn Widget>, _) = build_app(state.clone(), dialogs, None);
         let mut app = App::new(root);
         app.layout(Size::new(DEFAULT_WIDTH, DEFAULT_HEIGHT));
         Self {

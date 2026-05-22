@@ -16,7 +16,8 @@ use agg_gui::{
     theme::{set_visuals, Visuals},
 };
 use atomartist_ui::{
-    build_app, fresh_state_with_starter_graph, top_menu_bar::FileDialogProvider, UiSettings,
+    build_app, fresh_state_with_starter_graph, top_menu_bar::FileDialogProvider, DebugWindowHandles,
+    UiSettings,
 };
 use demo_wgpu::{begin_frame, WgpuGfxCtx};
 use winit::dpi::LogicalSize;
@@ -101,10 +102,20 @@ impl Gpu {
     }
 }
 
+// Per-frame inspector epoch tracker. Mirrors agg-gui's
+// `demo-wgpu::render_app_frame` so the inspector tree only gets
+// re-collected when widget invalidation actually changes — collecting
+// every frame would torch the budget on a large widget tree.
+thread_local! {
+    static INSPECTOR_SNAPSHOT_EPOCH: std::cell::Cell<Option<u64>> =
+        const { std::cell::Cell::new(None) };
+}
+
 fn paint_frame(
     gpu: &Gpu,
     ctx: &mut WgpuGfxCtx,
     app: &mut App,
+    debug: &DebugWindowHandles,
     w: u32,
     h: u32,
     capture_after: bool,
@@ -120,8 +131,55 @@ fn paint_frame(
     ctx.reset(w as f32, h as f32);
     ctx.set_lcd_mode(agg_gui::font_settings::lcd_enabled());
     begin_frame(ctx, view);
+
+    // ── Inspector wiring (View → Debug → Inspector) ─────────────────
+    // Drain queued edits the inspector pushed last frame, then refresh
+    // the snapshot the panel reads. Both must happen *before* layout +
+    // paint so the inspector sees the post-edit tree and the snapshot
+    // matches what we're about to draw.
+    {
+        let mut q = debug.base_edits.borrow_mut();
+        if !q.is_empty() {
+            for edit in q.drain(..) {
+                let _ = agg_gui::apply_widget_base_edit(app.root_mut(), &edit);
+            }
+            INSPECTOR_SNAPSHOT_EPOCH.with(|c| c.set(None));
+        }
+    }
+    {
+        let mut q = debug.inspector_edits.borrow_mut();
+        if !q.is_empty() {
+            for edit in q.drain(..) {
+                let _ = agg_gui::apply_inspector_edit(app.root_mut(), &edit);
+            }
+            INSPECTOR_SNAPSHOT_EPOCH.with(|c| c.set(None));
+        }
+    }
+    if debug.inspector_visible.get() {
+        let epoch = agg_gui::animation::invalidation_epoch();
+        let nodes_empty = debug.inspector_nodes.borrow().is_empty();
+        let captured = app.has_captured_pointer();
+        let should_refresh =
+            nodes_empty || (!captured && INSPECTOR_SNAPSHOT_EPOCH.with(|c| c.get() != Some(epoch)));
+        if should_refresh {
+            *debug.inspector_nodes.borrow_mut() = app.collect_inspector_nodes();
+            INSPECTOR_SNAPSHOT_EPOCH.with(|c| c.set(Some(epoch)));
+        }
+    } else {
+        *debug.hovered_bounds.borrow_mut() = None;
+        INSPECTOR_SNAPSHOT_EPOCH.with(|c| c.set(None));
+    }
+
+    // ── Frame timing for the Performance window ─────────────────────
+    // Measure layout + paint and push into the SharedFrameHistory. The
+    // sparkline is what consumes it; "Mean ms/frame" is the same data
+    // reduced over the last 60 samples.
+    let t = web_time::Instant::now();
     app.layout(Size::new(w as f64, h as f64));
     app.paint(ctx);
+    let frame_ms = t.elapsed().as_secs_f32() * 1000.0;
+    debug.frame_history.borrow_mut().push(frame_ms);
+
     ctx.end_frame();
     if capture_after {
         // Must run between end_frame (commands flushed) and present
@@ -278,21 +336,27 @@ fn main() {
     // Build the AtomArtist UI with a starter Box visible in the viewport.
     let state = fresh_state_with_starter_graph();
     // Restore HUD button states (perspective / turntable / bed /
-    // render style / snap) from disk *before* mounting the widget
-    // tree so the first paint reflects what the user left things
-    // at. Missing or unparseable file silently falls back to the
-    // documented defaults — never blocks startup.
+    // render style / snap) AND the View → Debug window layout from
+    // disk *before* mounting the widget tree so the first paint
+    // reflects what the user left things at. Missing or
+    // unparseable file silently falls back to the documented
+    // defaults — never blocks startup.
     let settings_path = settings_path();
-    if let Some(ref path) = settings_path {
-        let loaded = UiSettings::read_from_file(path);
+    let loaded_settings: Option<UiSettings> = settings_path
+        .as_ref()
+        .map(|path| UiSettings::read_from_file(path));
+    if let Some(loaded) = loaded_settings {
         state.apply_ui_settings(loaded);
     }
     // Clone for the persistence loop — `AppState` is `Arc`-shared
     // internally so this is just an Arc bump per field.
     let state_for_save = state.clone();
     let dialogs: std::sync::Arc<dyn FileDialogProvider> = std::sync::Arc::new(NativeDialogs);
-    let root = build_app(state, dialogs);
+    let (root, debug) = build_app(state, dialogs, loaded_settings);
     let mut app = App::new(root);
+    // Clone for the persistence + paint loops — every field is an
+    // Rc internally so this is cheap.
+    let debug_for_save = debug.clone();
     let mut settings_auto_save = AutoSave::new();
     // Seed the AutoSave with whatever's currently on disk so the
     // first paint doesn't pointlessly rewrite an identical file.
@@ -409,7 +473,7 @@ fn main() {
                     next_scheduled_redraw = None;
                     let capture_now = screenshot_path.is_some()
                         && frames_painted + 1 == warmup_frames;
-                    paint_frame(&gpu, &mut wgpu_ctx, &mut app, win_w, win_h, capture_now);
+                    paint_frame(&gpu, &mut wgpu_ctx, &mut app, &debug, win_w, win_h, capture_now);
                     frames_painted = frames_painted.saturating_add(1);
 
                     // Persist HUD button states to disk if anything
@@ -420,7 +484,17 @@ fn main() {
                     if let Some(ref path) = settings_path {
                         settings_auto_save.tick(
                             mouse_buttons_held == 0,
-                            || state_for_save.ui_settings().to_text(),
+                            || {
+                                // Compose: HUD state from AppState plus
+                                // floating-window layout from the live
+                                // debug handles. Neither owns the other,
+                                // so the shell stitches them together
+                                // each time we render the persistence
+                                // blob.
+                                let mut s = state_for_save.ui_settings();
+                                s.debug_windows = debug_for_save.current_state();
+                                s.to_text()
+                            },
                             |blob| {
                                 if let Some(parent) = path.parent() {
                                     let _ = std::fs::create_dir_all(parent);

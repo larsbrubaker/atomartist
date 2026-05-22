@@ -8,12 +8,14 @@ use std::sync::Arc;
 
 use agg_gui::{
     font_settings::current_system_font, FlexColumn, FlexRow, HAnchor, Insets, Label,
-    Spacer, Splitter, VAnchor, Widget,
+    Spacer, Splitter, Stack, VAnchor, Widget,
 };
 
 use crate::app_state::AppState;
 use agg_gui_node_editor::NodeEditor;
 use crate::app_state_model::shared_model_for;
+use crate::debug_windows::{build_debug_windows, DebugWindowHandles};
+use crate::settings::UiSettings;
 use crate::status_bar::StatusBar;
 use crate::top_menu_bar::{build_menu_bar_sized, FileDialogProvider};
 #[cfg(test)]
@@ -23,8 +25,26 @@ use crate::viewport_overlay::build_viewport_overlay;
 /// Build the application root widget tree.
 ///
 /// Layout (matching NodeDesigner): vertical stack — top menu bar, then
-/// 3D viewport (60% of remaining height), then node canvas (40%).
-pub fn build_app(state: AppState, dialogs: Arc<dyn FileDialogProvider>) -> Box<dyn Widget> {
+/// 3D viewport (60% of remaining height), then node canvas (40%). The
+/// `View → Debug` floating windows (Inspector, Performance graph) are
+/// stacked on top of the column so they paint above the splitter and
+/// hit-test first.
+///
+/// `saved_ui` seeds the debug-window visibility and bounds; pass
+/// `None` to use first-launch defaults.
+///
+/// Returns the root widget and a [`DebugWindowHandles`] the platform
+/// shell uses to (a) push per-frame samples into the performance
+/// history, (b) drain inspector edits + refresh the inspector node
+/// snapshot, and (c) read the live window state back for persistence.
+pub fn build_app(
+    state: AppState,
+    dialogs: Arc<dyn FileDialogProvider>,
+    saved_ui: Option<UiSettings>,
+) -> (Box<dyn Widget>, DebugWindowHandles) {
+    let saved_windows = saved_ui.map(|s| s.debug_windows).unwrap_or_default();
+    let debug = DebugWindowHandles::new(saved_windows);
+
     // The node-canvas widget is now the generic `agg_gui_node_editor::NodeEditor`
     // driven by an `AppStateModel` adapter. We keep the widget id "node-canvas"
     // so existing tests (find_widget_by_id("node-canvas")) and external
@@ -39,7 +59,8 @@ pub fn build_app(state: AppState, dialogs: Arc<dyn FileDialogProvider>) -> Box<d
 
     let viewport: Box<dyn Widget> = build_viewport_overlay(state.clone(), font.clone());
 
-    let menu_bar: Box<dyn Widget> = build_menu_bar_sized(state.clone(), font.clone(), dialogs.clone());
+    let menu_bar: Box<dyn Widget> =
+        build_menu_bar_sized(state.clone(), font.clone(), dialogs.clone(), debug.clone());
 
     // Top chrome row: menu bar on the left, spacer pushes the project
     // title to the right. License / About live inside the Help menu —
@@ -74,13 +95,26 @@ pub fn build_app(state: AppState, dialogs: Arc<dyn FileDialogProvider>) -> Box<d
     let status: Box<dyn Widget> = Box::new(StatusBar::new(state.clone()));
 
     // FlexColumn lays out top→bottom in Y-up coords (first add = top).
-    let column = FlexColumn::new()
+    let column: Box<dyn Widget> = Box::new(
+        FlexColumn::new()
+            .with_h_anchor(HAnchor::STRETCH)
+            .with_v_anchor(VAnchor::STRETCH)
+            .add(top_row)
+            .add_flex(split, 1.0)
+            .add(status),
+    );
+
+    // Stack: column behind, debug windows in front. Stack hit-tests
+    // last-child first, so the windows consume input before the main
+    // UI when visible.
+    let mut stack = Stack::new()
         .with_h_anchor(HAnchor::STRETCH)
         .with_v_anchor(VAnchor::STRETCH)
-        .add(top_row)
-        .add_flex(split, 1.0)
-        .add(status);
-    Box::new(column)
+        .add(column);
+    for w in build_debug_windows(font, &debug) {
+        stack = stack.add(w);
+    }
+    (Box::new(stack), debug)
 }
 
 /// Convenience: build a fresh `AppState` with all built-in node types

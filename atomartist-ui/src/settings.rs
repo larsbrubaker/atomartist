@@ -1,8 +1,9 @@
 //! Persistent HUD settings (perspective / turntable / bed-visible /
-//! render-mode / snap-amount).
+//! render-mode / snap-amount) and floating debug-window layout
+//! (Inspector, Performance graph).
 //!
 //! The settings live in a single text file on disk so we don't pull
-//! `serde` into the crate just for five scalar fields. The format is
+//! `serde` into the crate just for a few scalar fields. The format is
 //! one `key=value` per line, comments allowed with a leading `#`:
 //!
 //! ```text
@@ -12,6 +13,16 @@
 //! show_bed=true
 //! render_style=Shaded
 //! snap_amount=1.0
+//! inspector_open=false
+//! inspector_x=60
+//! inspector_y=60
+//! inspector_w=420
+//! inspector_h=520
+//! performance_open=false
+//! performance_x=60
+//! performance_y=620
+//! performance_w=360
+//! performance_h=160
 //! ```
 //!
 //! `read_from_str` is forgiving: unknown keys are skipped, missing
@@ -23,6 +34,59 @@
 use std::path::Path;
 
 use atomartist_renderer::RenderStyle;
+
+/// Persisted geometry + visibility for one floating debug window
+/// (Inspector or Performance). Bounds are agg-gui Y-up screen
+/// coordinates (origin bottom-left) — see `agg_gui::Rect`. `width`
+/// or `height` ≤ 0 means "use the default window placement".
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DebugWindowState {
+    pub open: bool,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+impl DebugWindowState {
+    /// `true` if the stored bounds are usable. We treat zero-area or
+    /// negative-area bounds as "ignored" so the window falls back to
+    /// its hard-coded default placement on next startup.
+    pub fn has_valid_bounds(&self) -> bool {
+        self.width > 0.0 && self.height > 0.0
+    }
+}
+
+/// Layout state for every floating debug window AtomArtist ships.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DebugWindowsState {
+    pub inspector: DebugWindowState,
+    pub performance: DebugWindowState,
+}
+
+impl Default for DebugWindowsState {
+    fn default() -> Self {
+        // Defaults chosen so the Inspector and Performance windows
+        // open in the bottom-left corner without overlapping each
+        // other and without covering the 3-D viewport in the centre.
+        Self {
+            inspector: DebugWindowState {
+                open: false,
+                x: 60.0,
+                y: 60.0,
+                width: 420.0,
+                height: 520.0,
+            },
+            performance: DebugWindowState {
+                open: false,
+                x: 60.0,
+                y: 620.0,
+                width: 360.0,
+                height: 160.0,
+            },
+        }
+    }
+}
 
 /// Snapshot of the HUD widget states that should survive across
 /// runs of the app.
@@ -39,6 +103,11 @@ pub struct UiSettings {
     /// Active snap distance. `0.0` means snapping is off (matches
     /// the GridOptionsPanel "Off" entry).
     pub snap_amount: f64,
+    /// Visibility + bounds for the View → Debug floating windows.
+    /// These are owned by the widget tree (not `AppState`) so the
+    /// shell composes them in via [`crate::debug_windows::DebugWindowHandles`]
+    /// before writing to disk.
+    pub debug_windows: DebugWindowsState,
 }
 
 impl Default for UiSettings {
@@ -49,6 +118,7 @@ impl Default for UiSettings {
             show_bed: true,
             render_style: RenderStyle::default(),
             snap_amount: 1.0,
+            debug_windows: DebugWindowsState::default(),
         }
     }
 }
@@ -56,7 +126,7 @@ impl Default for UiSettings {
 impl UiSettings {
     /// Render to the on-disk text format.
     pub fn to_text(&self) -> String {
-        let mut out = String::with_capacity(160);
+        let mut out = String::with_capacity(320);
         out.push_str("# AtomArtist UI settings\n");
         out.push_str(&format!("perspective={}\n", self.perspective));
         out.push_str(&format!("turntable={}\n", self.turntable));
@@ -68,6 +138,8 @@ impl UiSettings {
         // Use the default `{}` formatting so simple values like `1`
         // round-trip cleanly without a trailing ".0".
         out.push_str(&format!("snap_amount={}\n", self.snap_amount));
+        write_debug_window(&mut out, "inspector", &self.debug_windows.inspector);
+        write_debug_window(&mut out, "performance", &self.debug_windows.performance);
         out
     }
 
@@ -113,7 +185,9 @@ impl UiSettings {
                         out.snap_amount = if f.is_finite() && f >= 0.0 { f } else { 0.0 };
                     }
                 }
-                _ => {}
+                _ => {
+                    apply_debug_window_kv(&mut out.debug_windows, key, value);
+                }
             }
         }
         out
@@ -166,6 +240,64 @@ fn render_style_from_token(s: &str) -> Option<RenderStyle> {
     }
 }
 
+fn write_debug_window(out: &mut String, prefix: &str, state: &DebugWindowState) {
+    out.push_str(&format!("{prefix}_open={}\n", state.open));
+    out.push_str(&format!("{prefix}_x={}\n", state.x));
+    out.push_str(&format!("{prefix}_y={}\n", state.y));
+    out.push_str(&format!("{prefix}_w={}\n", state.width));
+    out.push_str(&format!("{prefix}_h={}\n", state.height));
+}
+
+/// Dispatch a single `key=value` line into the matching field on
+/// `DebugWindowsState`. Unknown prefixes / suffixes are silently
+/// ignored so old config files keep loading.
+fn apply_debug_window_kv(state: &mut DebugWindowsState, key: &str, value: &str) {
+    let Some((prefix, suffix)) = key.split_once('_') else {
+        return;
+    };
+    let target: &mut DebugWindowState = match prefix {
+        "inspector" => &mut state.inspector,
+        "performance" => &mut state.performance,
+        _ => return,
+    };
+    match suffix {
+        "open" => {
+            if let Some(b) = parse_bool(value) {
+                target.open = b;
+            }
+        }
+        "x" => {
+            if let Ok(f) = value.parse::<f64>() {
+                if f.is_finite() {
+                    target.x = f;
+                }
+            }
+        }
+        "y" => {
+            if let Ok(f) = value.parse::<f64>() {
+                if f.is_finite() {
+                    target.y = f;
+                }
+            }
+        }
+        "w" => {
+            if let Ok(f) = value.parse::<f64>() {
+                if f.is_finite() && f > 0.0 {
+                    target.width = f;
+                }
+            }
+        }
+        "h" => {
+            if let Ok(f) = value.parse::<f64>() {
+                if f.is_finite() && f > 0.0 {
+                    target.height = f;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,9 +318,41 @@ mod tests {
             show_bed: false,
             render_style: RenderStyle::Wireframe,
             snap_amount: 0.25,
+            debug_windows: DebugWindowsState {
+                inspector: DebugWindowState {
+                    open: true,
+                    x: 100.0,
+                    y: 200.0,
+                    width: 480.0,
+                    height: 600.0,
+                },
+                performance: DebugWindowState {
+                    open: true,
+                    x: 800.0,
+                    y: 100.0,
+                    width: 320.0,
+                    height: 140.0,
+                },
+            },
         };
         let parsed = UiSettings::from_text(&s.to_text());
         assert_eq!(s, parsed);
+    }
+
+    #[test]
+    fn missing_debug_windows_block_defaults_cleanly() {
+        // Older config files predate the View → Debug windows
+        // section; loading them must not corrupt the rest of the
+        // settings and must surface the documented defaults for
+        // the new fields.
+        let text = "\
+            perspective=false\n\
+            turntable=false\n\
+        ";
+        let s = UiSettings::from_text(text);
+        assert!(!s.perspective);
+        assert!(!s.turntable);
+        assert_eq!(s.debug_windows, DebugWindowsState::default());
     }
 
     #[test]

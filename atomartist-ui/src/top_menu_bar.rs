@@ -11,6 +11,7 @@ use std::sync::Arc;
 use agg_gui::{text::Font, MenuBar, MenuEntry, MenuItem, TopMenu, Widget};
 
 use crate::app_state::AppState;
+use crate::debug_windows::DebugWindowHandles;
 
 mod bi {
     pub const ARROW_CLOCKWISE: char = '\u{f116}';
@@ -20,6 +21,7 @@ mod bi {
     pub const BOX: char = '\u{f1c8}';
     pub const BOX_ARROW_UP_RIGHT: char = '\u{f1c5}';
     pub const BOX_SEAM: char = '\u{f1c7}';
+    pub const BUG: char = '\u{f2a3}';
     pub const CALCULATOR: char = '\u{f1e0}';
     pub const FILE_PLUS: char = '\u{f3ab}';
     pub const FLOPPY: char = '\u{f7d8}';
@@ -27,6 +29,7 @@ mod bi {
     pub const INFO_CIRCLE: char = '\u{f431}';
     pub const PLUG: char = '\u{f4f7}';
     pub const PLUS_CIRCLE: char = '\u{f4fa}';
+    pub const SPEEDOMETER: char = '\u{f55a}';
     pub const SUN: char = '\u{f5a2}';
     pub const TRASH: char = '\u{f5de}';
     pub const VECTOR_PEN: char = '\u{f604}';
@@ -61,11 +64,14 @@ impl FileDialogProvider for NoFileDialogs {
 /// Build the application's top menu bar widget. `state` is captured so
 /// menu actions can mutate the graph (load/save, undo/redo, add-node).
 /// `dialogs` injects platform-specific file pickers; pass
-/// `NoFileDialogs` from tests / non-native shells.
+/// `NoFileDialogs` from tests / non-native shells. `debug` carries the
+/// shared visibility cells so the `View → Debug` items can toggle the
+/// Inspector / Performance windows.
 pub fn build_menu_bar(
     state: AppState,
     font: Arc<Font>,
     dialogs: Arc<dyn FileDialogProvider>,
+    debug: DebugWindowHandles,
 ) -> MenuBar {
     let menus = vec![
         TopMenu::new(
@@ -91,6 +97,24 @@ pub fn build_menu_bar(
             ],
         ),
         TopMenu::new(
+            "View",
+            vec![MenuEntry::Item(
+                MenuItem::submenu(
+                    "Debug",
+                    vec![
+                        MenuEntry::Item(
+                            MenuItem::action("Inspector", "view.debug.inspector").icon(bi::BUG),
+                        ),
+                        MenuEntry::Item(
+                            MenuItem::action("Performance Graph", "view.debug.performance")
+                                .icon(bi::SPEEDOMETER),
+                        ),
+                    ],
+                )
+                .icon(bi::BUG),
+            )],
+        ),
+        TopMenu::new(
             "Settings",
             vec![
                 MenuEntry::Item(MenuItem::action("Light Theme", "settings.theme.light").icon(bi::SUN)),
@@ -111,8 +135,14 @@ pub fn build_menu_bar(
 
     let dispatch_state = state;
     let dispatch_dialogs = dialogs;
+    let dispatch_debug = debug;
     MenuBar::new(font, menus, move |action| {
-        handle_action(&dispatch_state, dispatch_dialogs.as_ref(), action);
+        handle_action(
+            &dispatch_state,
+            dispatch_dialogs.as_ref(),
+            &dispatch_debug,
+            action,
+        );
     })
     .with_font_size(13.0)
     // Tight width — lets the parent FlexRow place chrome on the right.
@@ -126,8 +156,9 @@ pub fn build_menu_bar_sized(
     state: AppState,
     font: Arc<Font>,
     dialogs: Arc<dyn FileDialogProvider>,
+    debug: DebugWindowHandles,
 ) -> Box<dyn Widget> {
-    Box::new(build_menu_bar(state, font, dialogs))
+    Box::new(build_menu_bar(state, font, dialogs, debug))
 }
 
 /// Walk the `NodeRegistry` and build a category-grouped Add Node submenu
@@ -168,7 +199,12 @@ fn category_icon(category: &str) -> Option<char> {
     }
 }
 
-fn handle_action(state: &AppState, dialogs: &dyn FileDialogProvider, action: &str) {
+fn handle_action(
+    state: &AppState,
+    dialogs: &dyn FileDialogProvider,
+    debug: &DebugWindowHandles,
+    action: &str,
+) {
     use agg_gui::theme::{set_visuals, Visuals};
     if let Some(type_id) = action.strip_prefix("add.") {
         // Find the action's NodeDef by its dynamic type_id string and
@@ -273,6 +309,12 @@ fn handle_action(state: &AppState, dialogs: &dyn FileDialogProvider, action: &st
                 in the project repository.\n\n\
                 https://github.com/larsbrubaker/atomartist",
             );
+        }
+        "view.debug.inspector" => {
+            debug.inspector_visible.set(!debug.inspector_visible.get());
+        }
+        "view.debug.performance" => {
+            debug.perf_visible.set(!debug.perf_visible.get());
         }
         _ => {}
     }

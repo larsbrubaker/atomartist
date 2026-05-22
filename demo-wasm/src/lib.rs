@@ -16,6 +16,7 @@ use std::sync::Arc;
 use agg_gui::{theme::{set_visuals, Visuals}, App, MouseButton, Modifiers, Size, text::Font};
 use atomartist_ui::{
     build_app, fresh_state_with_starter_graph, top_menu_bar::{FileDialogProvider, NoFileDialogs},
+    DebugWindowHandles,
 };
 use demo_wgpu::{begin_frame, WgpuGfxCtx};
 use wasm_bindgen::prelude::*;
@@ -32,6 +33,14 @@ thread_local! {
     static GPU:      RefCell<Option<GpuHandles>>    = RefCell::new(None);
     static SIZE:     RefCell<(u32, u32)>            = RefCell::new((0, 0));
     static CURSOR:   RefCell<(f64, f64)>            = RefCell::new((0.0, 0.0));
+    // View → Debug window handles (inspector + performance). Set on
+    // wgpu init; consumed each frame by `render` for edit draining,
+    // node snapshotting, and `FrameHistory::push`.
+    static DEBUG:    RefCell<Option<DebugWindowHandles>> = RefCell::new(None);
+    // Mirrors agg-gui's `render_app_frame::INSPECTOR_SNAPSHOT_EPOCH`
+    // so we only re-collect when widget invalidation changes.
+    static INSPECTOR_SNAPSHOT_EPOCH: std::cell::Cell<Option<u64>> =
+        const { std::cell::Cell::new(None) };
 }
 
 struct GpuHandles {
@@ -165,10 +174,13 @@ async fn init_wgpu() -> Result<(), String> {
         initial_size.1 as f32,
     );
 
-    // Build the AtomArtist UI tree.
+    // Build the AtomArtist UI tree. The WASM shell has no persistence
+    // path yet, so we always start with the documented defaults — the
+    // View → Debug windows are toggled off and laid out in their
+    // first-launch positions.
     let state = fresh_state_with_starter_graph();
     let dialogs: Arc<dyn FileDialogProvider> = Arc::new(NoFileDialogs);
-    let root = build_app(state, dialogs);
+    let (root, debug) = build_app(state, dialogs, None);
     let app = App::new(root);
 
     GPU.with(|c| {
@@ -181,14 +193,20 @@ async fn init_wgpu() -> Result<(), String> {
     SURFACE.with(|c| *c.borrow_mut() = Some(surface));
     WGPU_CTX.with(|c| *c.borrow_mut() = Some(wgpu_ctx));
     APP.with(|c| *c.borrow_mut() = Some(app));
+    DEBUG.with(|c| *c.borrow_mut() = Some(debug));
 
     Ok(())
 }
 
 /// Render a single frame. JS's animation loop calls this every
 /// requestAnimationFrame tick; until init resolves it's a no-op.
+///
+/// `frame_ms` is the wall-clock interval JS measured between this
+/// callback and the last one; we push it into the shared
+/// `FrameHistory` so the View → Debug → Performance window has live
+/// data even on WASM where we can't easily measure paint cost.
 #[wasm_bindgen]
-pub fn render(width: u32, height: u32, _frame_ms: f64) {
+pub fn render(width: u32, height: u32, frame_ms: f64) {
     let (cur_w, cur_h) = SIZE.with(|s| *s.borrow());
     let resized = cur_w != width || cur_h != height;
     if resized {
@@ -206,16 +224,70 @@ pub fn render(width: u32, height: u32, _frame_ms: f64) {
     let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
     WGPU_CTX.with(|cc| {
         APP.with(|ac| {
-            let mut ctx_borrow = cc.borrow_mut();
-            let mut app_borrow = ac.borrow_mut();
-            if let (Some(ctx), Some(app)) = (ctx_borrow.as_mut(), app_borrow.as_mut()) {
-                ctx.set_surface_texture(frame.texture.clone());
-                ctx.reset(width as f32, height as f32);
-                begin_frame(ctx, view);
-                app.layout(Size::new(width as f64, height as f64));
-                app.paint(ctx);
-                ctx.end_frame();
-            }
+            DEBUG.with(|dc| {
+                let mut ctx_borrow = cc.borrow_mut();
+                let mut app_borrow = ac.borrow_mut();
+                let debug_borrow = dc.borrow();
+                if let (Some(ctx), Some(app), Some(debug)) = (
+                    ctx_borrow.as_mut(),
+                    app_borrow.as_mut(),
+                    debug_borrow.as_ref(),
+                ) {
+                    ctx.set_surface_texture(frame.texture.clone());
+                    ctx.reset(width as f32, height as f32);
+                    begin_frame(ctx, view);
+
+                    // Inspector edit drain + snapshot refresh (same
+                    // dance as `demo-native::paint_frame`).
+                    {
+                        let mut q = debug.base_edits.borrow_mut();
+                        if !q.is_empty() {
+                            for edit in q.drain(..) {
+                                let _ =
+                                    agg_gui::apply_widget_base_edit(app.root_mut(), &edit);
+                            }
+                            INSPECTOR_SNAPSHOT_EPOCH.with(|c| c.set(None));
+                        }
+                    }
+                    {
+                        let mut q = debug.inspector_edits.borrow_mut();
+                        if !q.is_empty() {
+                            for edit in q.drain(..) {
+                                let _ =
+                                    agg_gui::apply_inspector_edit(app.root_mut(), &edit);
+                            }
+                            INSPECTOR_SNAPSHOT_EPOCH.with(|c| c.set(None));
+                        }
+                    }
+                    if debug.inspector_visible.get() {
+                        let epoch = agg_gui::animation::invalidation_epoch();
+                        let nodes_empty = debug.inspector_nodes.borrow().is_empty();
+                        let captured = app.has_captured_pointer();
+                        let should_refresh = nodes_empty
+                            || (!captured
+                                && INSPECTOR_SNAPSHOT_EPOCH
+                                    .with(|c| c.get() != Some(epoch)));
+                        if should_refresh {
+                            *debug.inspector_nodes.borrow_mut() =
+                                app.collect_inspector_nodes();
+                            INSPECTOR_SNAPSHOT_EPOCH.with(|c| c.set(Some(epoch)));
+                        }
+                    } else {
+                        *debug.hovered_bounds.borrow_mut() = None;
+                        INSPECTOR_SNAPSHOT_EPOCH.with(|c| c.set(None));
+                    }
+
+                    app.layout(Size::new(width as f64, height as f64));
+                    app.paint(ctx);
+                    ctx.end_frame();
+
+                    // Use the rAF delta JS provided — it's already
+                    // measuring real wall-clock frame time.
+                    if frame_ms.is_finite() && frame_ms > 0.0 {
+                        debug.frame_history.borrow_mut().push(frame_ms as f32);
+                    }
+                }
+            });
         });
     });
     frame.present();
