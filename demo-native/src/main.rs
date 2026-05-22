@@ -404,9 +404,16 @@ fn main() {
 
     // Screenshot mode: paint a few warmup frames so all GPU state is
     // realised, then capture + save + exit. Frame counting starts at 0.
+    //
+    // `ATOMARTIST_WARMUP_FRAMES` overrides the default 3 — useful for
+    // diagnostic runs where you want enough samples for the periodic
+    // frame-time / scene-time loggers to print.
     let mut frames_painted: u32 = 0;
     let screenshot_path = cli.screenshot_to.clone();
-    let warmup_frames: u32 = 3;
+    let warmup_frames: u32 = std::env::var("ATOMARTIST_WARMUP_FRAMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3);
 
     event_loop
         .run(move |event, elwt| {

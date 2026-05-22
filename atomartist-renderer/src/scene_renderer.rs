@@ -490,8 +490,10 @@ impl Default for WgpuSceneRenderer {
 
 impl WgpuCustomRender for WgpuSceneRenderer {
     fn render(&mut self, ctx: WgpuCustomRenderCtx<'_>) {
-        // Lazy GPU init — runs once.
+        let t_total = web_time::Instant::now();
+        let t_ensure = web_time::Instant::now();
         self.ensure_state(ctx.device, ctx.queue, ctx.surface_format);
+        let ensure_ms = elapsed_ms(t_ensure);
 
         // Pixel size of the viewport widget rect.  The framebuffer matches
         // this exactly (1:1 mapping), so blit_to runs an effectively no-op
@@ -502,8 +504,12 @@ impl WgpuCustomRender for WgpuSceneRenderer {
             return;
         }
 
+        let t_fb = web_time::Instant::now();
         self.ensure_framebuffer(ctx.device, fb_w, fb_h);
+        let fb_ms = elapsed_ms(t_fb);
+        let t_mesh = web_time::Instant::now();
         self.ensure_mesh_buffers(ctx.device);
+        let mesh_ms = elapsed_ms(t_mesh);
 
         // Forward theme inputs to the bed before any pass runs — these
         // are cheap (no-ops when unchanged) and let the bed grid /
@@ -544,6 +550,8 @@ impl WgpuCustomRender for WgpuSceneRenderer {
         // the main pass can sample the freshly-blitted composite
         // texture. Skipped when the bed is hidden — no shadow update
         // needed if the bed isn't being drawn.
+        let t_bed_composite = web_time::Instant::now();
+        let mut bed_ran_chain = false;
         if self.draw_grid {
             let mesh_ref = match (&s.vbuf, &s.ibuf) {
                 (Some(vbuf), Some(ibuf)) if s.index_count > 0 => Some(crate::bed::MeshRef {
@@ -553,7 +561,7 @@ impl WgpuCustomRender for WgpuSceneRenderer {
                 }),
                 _ => None,
             };
-            s.bed.render_to_composite(
+            bed_ran_chain = s.bed.render_to_composite(
                 ctx.device,
                 ctx.queue,
                 ctx.encoder,
@@ -563,6 +571,7 @@ impl WgpuCustomRender for WgpuSceneRenderer {
                 [self.camera.center[0], self.camera.center[1]],
             );
         }
+        let bed_composite_ms = elapsed_ms(t_bed_composite);
 
         // ── Pass 1: render 3-D into the offscreen framebuffer ──────────────
         // With SAMPLE_COUNT = 1 the framebuffer writes directly into the
@@ -662,6 +671,7 @@ impl WgpuCustomRender for WgpuSceneRenderer {
             }
         } // pass dropped — encoder freed for the composite pass.
 
+        let t_blit = web_time::Instant::now();
         // ── Pass 2: composite offscreen colour onto the active 2-D target ──
         // 1:1 size mapping (framebuffer matches widget pixel rect), so
         // the bilinear sampler in the shared `tex_pipeline` is identity-
@@ -677,7 +687,95 @@ impl WgpuCustomRender for WgpuSceneRenderer {
             ctx.parent_clip,
             ctx.pipelines,
         );
+        let blit_ms = elapsed_ms(t_blit);
+        let total_ms = elapsed_ms(t_total);
+        log_scene_timings(SceneTimings {
+            total_ms,
+            ensure_ms,
+            fb_ms,
+            mesh_ms,
+            bed_composite_ms,
+            bed_ran_chain,
+            blit_ms,
+        });
     }
+}
+
+#[inline]
+fn elapsed_ms(t: web_time::Instant) -> f32 {
+    t.elapsed().as_secs_f32() * 1000.0
+}
+
+#[derive(Clone, Copy, Default)]
+struct SceneTimings {
+    total_ms: f32,
+    ensure_ms: f32,
+    fb_ms: f32,
+    mesh_ms: f32,
+    bed_composite_ms: f32,
+    bed_ran_chain: bool,
+    blit_ms: f32,
+}
+
+fn scene_log_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("ATOMARTIST_SCENE_LOG")
+            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "on" | "yes"))
+            .unwrap_or(false)
+    })
+}
+
+thread_local! {
+    static SCENE_TIMING_ACC: std::cell::RefCell<Vec<SceneTimings>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    static SCENE_LOG_LAST: std::cell::Cell<Option<web_time::Instant>> =
+        const { std::cell::Cell::new(None) };
+}
+
+const SCENE_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1000);
+
+fn log_scene_timings(t: SceneTimings) {
+    if !scene_log_enabled() {
+        return;
+    }
+    SCENE_TIMING_ACC.with(|acc| acc.borrow_mut().push(t));
+    let now = web_time::Instant::now();
+    let last = SCENE_LOG_LAST.with(|c| c.get());
+    let should_log = match last {
+        Some(prev) => now.duration_since(prev) >= SCENE_LOG_INTERVAL,
+        None => {
+            SCENE_LOG_LAST.with(|c| c.set(Some(now)));
+            false
+        }
+    };
+    if !should_log {
+        return;
+    }
+    SCENE_LOG_LAST.with(|c| c.set(Some(now)));
+    SCENE_TIMING_ACC.with(|acc| {
+        let buf = acc.borrow();
+        if buf.is_empty() { return; }
+        let n = buf.len() as f32;
+        let avg = |f: fn(&SceneTimings) -> f32| -> f32 { buf.iter().map(f).sum::<f32>() / n };
+        let max_total = buf.iter().map(|t| t.total_ms).fold(0.0_f32, f32::max);
+        let chain_hits = buf.iter().filter(|t| t.bed_ran_chain).count();
+        eprintln!(
+            "[scene {:>3} samples] total avg={:.2} max={:.2} ms | ensure={:.3} fb={:.3} mesh={:.3} bed_comp={:.3} blit={:.3} | chain_runs={}/{}",
+            buf.len(),
+            avg(|t| t.total_ms),
+            max_total,
+            avg(|t| t.ensure_ms),
+            avg(|t| t.fb_ms),
+            avg(|t| t.mesh_ms),
+            avg(|t| t.bed_composite_ms),
+            avg(|t| t.blit_ms),
+            chain_hits,
+            buf.len(),
+        );
+        drop(buf);
+        acc.borrow_mut().clear();
+    });
 }
 
 fn normalize3(v: [f32; 3]) -> [f32; 3] {

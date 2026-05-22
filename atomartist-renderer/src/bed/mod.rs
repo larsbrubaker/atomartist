@@ -265,6 +265,9 @@ impl BedRenderer {
     /// chain is skipped — the composite texture is already correct
     /// and re-running 14 GPU passes would just retrace the same
     /// pixels. This is what keeps the bed cheap on idle frames.
+    /// Returns `true` when the shadow chain actually ran this frame —
+    /// useful for the scene-renderer timing log to attribute frame
+    /// cost between "cache hit" and "real GPU work".
     pub fn render_to_composite(
         &self,
         device: &wgpu::Device,
@@ -274,7 +277,7 @@ impl BedRenderer {
         mesh_id: u64,
         bed_z: f32,
         camera_center_xy: [f32; 2],
-    ) {
+    ) -> bool {
         let key = CompositeKey {
             mesh_id: if mesh.is_some() { mesh_id } else { 0 },
             cam_x_q: (camera_center_xy[0] * 100.0).round() as i32,
@@ -285,7 +288,7 @@ impl BedRenderer {
         let prev = self.last_composite_key.get();
         if prev == Some(key) {
             self.frame_counter.set(self.frame_counter.get().wrapping_add(1));
-            return;
+            return false;
         }
         log_cache_miss(prev, key);
         self.chain.render(
@@ -299,6 +302,7 @@ impl BedRenderer {
         );
         self.last_composite_key.set(Some(key));
         self.frame_counter.set(self.frame_counter.get().wrapping_add(1));
+        true
     }
 
     /// Draw the bed quad into the currently-bound render pass. Caller

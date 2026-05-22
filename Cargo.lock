@@ -358,6 +358,7 @@ dependencies = [
  "glam",
  "manifold-rust",
  "pollster 0.3.0",
+ "web-time",
  "wgpu",
 ]
 

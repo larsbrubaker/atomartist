@@ -20,6 +20,7 @@ manifold-rust  = { path = "../../manifold-rust" }
 wgpu           = { version = "29", default-features = false, features = ["wgsl"] }
 bytemuck       = { version = "1", features = ["derive"] }
 glam           = { workspace = true }
+web-time       = "1"
 
 [dev-dependencies]
 pollster       = "0.3"
