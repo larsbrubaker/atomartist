@@ -134,7 +134,11 @@ fn registry_exposes_all_built_in_node_types() {
         "Rectangle", "Circle", "Ring", "Star",
         "Extrude", "Transform", "Combine", "Boolean",
         "Inflate", "Stroke", "SmoothPaths",
-        "Output", "GraphInput", "GraphOutput",
+        // Unified Output node plays both the viewport-display anchor
+        // role and the subgraph-output declarator role. GraphInput
+        // remains for subgraph inputs; the legacy GraphOutput was
+        // removed.
+        "Output", "GraphInput",
     ] {
         assert!(
             reg.get(ty).is_some(),

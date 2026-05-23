@@ -185,7 +185,7 @@ pub fn fresh_state_with_builtins() -> AppState {
 pub fn fresh_state_with_starter_graph() -> AppState {
     use atomartist_lib::graph::graph::Noodle;
     let state = fresh_state_with_builtins();
-    let extrude_id = {
+    let display_target = {
         let mut g = state.graph.lock().unwrap();
 
         // Y is up in canvas-space and node.position is the node's top-left.
@@ -207,10 +207,21 @@ pub fn fresh_state_with_starter_graph() -> AppState {
             };
         connect_by_name(&mut g, rect, "out", inflate, "input");
         connect_by_name(&mut g, inflate, "out", extrude, "Paths");
-        connect_by_name(&mut g, extrude, "Geometry", output, "in");
+        // The Output node uses the dynamic multi-input model: its first
+        // input is the empty trailing placeholder (name "") that adopts
+        // the source on connect. Resolve its uid directly rather than
+        // looking up the legacy "in" name.
+        {
+            let extrude_uid = g.get(extrude).unwrap().output_by_name("Geometry").unwrap().uid;
+            let output_in_uid = g.get(output).unwrap().inputs[0].uid;
+            let _ = g.connect(
+                Noodle::new(extrude, extrude_uid, output, output_in_uid),
+                &state.registry,
+            );
+        }
         output
     };
-    state.set_display_node(Some(extrude_id));
+    state.set_display_node(Some(display_target));
     state.evaluate_now();
     state
 }

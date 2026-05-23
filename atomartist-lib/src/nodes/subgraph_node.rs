@@ -3,9 +3,12 @@
 //! graph.
 //!
 //! How it works:
-//!   1. Caller scans a template graph for `GraphInput` / `GraphOutput`
-//!      nodes and reads each one's `name` property to enumerate the
-//!      subgraph's input + output sockets.
+//!   1. Caller scans a template graph for input/output ports:
+//!      - **Inputs** come from `GraphInput` nodes (each one's `name`
+//!        property names the subgraph's input socket).
+//!      - **Outputs** come from the unified `Output` node's mirror
+//!        outputs (every output other than the internal `__display__`
+//!        is a publishable subgraph output).
 //!   2. `SubgraphNodeDef::build` snapshots the template + the I/O port
 //!      mapping into a struct ready to register.
 //!   3. On every parent-graph evaluation, `evaluate`:
@@ -14,8 +17,8 @@
 //!        b. injects each parent-supplied input value into the matching
 //!           `GraphInput` node's `_injected` property
 //!        c. marks every node in the clone dirty + runs `evaluate_all`
-//!        d. reads each `GraphOutput`'s cached `out` value (passthrough
-//!           of its `in`) and surfaces it as the matching parent output
+//!        d. reads each `Output` mirror's cached value and surfaces it
+//!           as the matching parent output
 //!
 //! Owned strings: `NodeDef::type_id()` returns `&'static str`. We
 //! satisfy that by leaking the user-supplied subgraph names + socket
@@ -35,17 +38,24 @@ use crate::registry::{
 };
 use crate::socket_types::SocketType;
 
-/// One mapping between a parent-graph socket name and a `GraphInput` /
-/// `GraphOutput` node inside the template.
+/// One mapping between a parent-graph socket name and a port-defining
+/// node inside the template.
+///
+/// For input ports the template node is a `GraphInput` and the value
+/// flows in via its `_injected` property.
+///
+/// For output ports the template node is an `Output` node, and the
+/// `mirror_uid` field names the specific mirror output socket on that
+/// Output node that this subgraph port reads from. (An Output node can
+/// publish many mirror outputs — one per input slot the user wired.)
 #[derive(Clone, Debug)]
 struct PortBinding {
-    /// Static reference the registry stores. Leaked from the
-    /// user-supplied name string at construction time.
     socket_name: Arc<str>,
-    /// Id of the node inside the template that hosts this port.
     template_node_id: NodeId,
-    /// Logical type carried over the port.
     socket_type: SocketType,
+    /// For output ports only: the uid of the specific output socket on
+    /// the template Output node. Unused for input ports.
+    mirror_uid: Option<crate::graph::socket::SocketUid>,
 }
 
 pub struct SubgraphNodeDef {
@@ -57,10 +67,17 @@ pub struct SubgraphNodeDef {
     outputs: Vec<PortBinding>,
 }
 
+/// Internal output-socket name on `Output` carrying the merged display
+/// mesh. Subgraphs skip this socket — it's the viewport's private
+/// channel, not a publishable port.
+const OUTPUT_DISPLAY_NAME: &str = "__display__";
+
 impl SubgraphNodeDef {
     /// Build from a template graph plus the desired type id / display
-    /// name. Scans the template for GraphInput / GraphOutput nodes and
-    /// reads each one's `name` property to determine port mapping.
+    /// name. Scans the template for `GraphInput` nodes (one input port
+    /// each, named by their `name` property) and `Output` nodes (one
+    /// output port per mirror output socket, named by that socket's
+    /// internal name).
     ///
     /// Socket types are read straight from the template instance's
     /// sockets — these were resolved by the template node's
@@ -75,33 +92,47 @@ impl SubgraphNodeDef {
         let mut outputs: HashMap<String, PortBinding> = HashMap::new();
 
         for node in template.nodes() {
-            let port_name = match node.properties.get("name") {
-                Some(PortValue::StringVal(s)) => s.as_str().to_string(),
-                _ => continue,
-            };
-            let socket_type = match node.type_id.as_ref() {
-                // GraphInput exposes data via its `out` socket; that's the
-                // type the subgraph user will see on the parent input.
-                "GraphInput" => node
-                    .output_by_name("out")
-                    .map(|s| s.socket_type)
-                    .unwrap_or(SocketType::Geometry3d),
-                // GraphOutput's input `in` is the type flowing into it.
-                "GraphOutput" => node
-                    .input_by_name("in")
-                    .map(|s| s.socket_type)
-                    .unwrap_or(SocketType::Geometry3d),
-                _ => continue,
-            };
-            let binding = PortBinding {
-                socket_name: Arc::from(port_name.as_str()),
-                template_node_id: node.id,
-                socket_type,
-            };
             match node.type_id.as_ref() {
-                "GraphInput" => { inputs.insert(port_name, binding); }
-                "GraphOutput" => { outputs.insert(port_name, binding); }
-                _ => {}
+                "GraphInput" => {
+                    let port_name = match node.properties.get("name") {
+                        Some(PortValue::StringVal(s)) => s.as_str().to_string(),
+                        _ => continue,
+                    };
+                    let socket_type = node
+                        .output_by_name("out")
+                        .map(|s| s.socket_type)
+                        .unwrap_or(SocketType::Geometry3d);
+                    inputs.insert(
+                        port_name.clone(),
+                        PortBinding {
+                            socket_name: Arc::from(port_name.as_str()),
+                            template_node_id: node.id,
+                            socket_type,
+                            mirror_uid: None,
+                        },
+                    );
+                }
+                "Output" => {
+                    // Each mirror output on the Output node is a
+                    // publishable subgraph port. Skip the private
+                    // `__display__` synthetic socket.
+                    for sock in &node.outputs {
+                        if sock.name.as_ref() == OUTPUT_DISPLAY_NAME {
+                            continue;
+                        }
+                        let port_name = sock.name.to_string();
+                        outputs.insert(
+                            port_name.clone(),
+                            PortBinding {
+                                socket_name: Arc::from(port_name.as_str()),
+                                template_node_id: node.id,
+                                socket_type: sock.socket_type,
+                                mirror_uid: Some(sock.uid),
+                            },
+                        );
+                    }
+                }
+                _ => continue,
             }
         }
 
@@ -167,16 +198,19 @@ impl NodeDef for SubgraphNodeDef {
         evaluate_all(&mut scratch, &local_reg)
             .map_err(|e| NodeError::msg(format!("subgraph eval: {}", e)))?;
 
-        // Pull each GraphOutput's `out` cached value (passthrough of its
-        // `in`) into the parent-facing NodeOutputs.
+        // Pull each Output-mirror's cached value into the parent-facing
+        // NodeOutputs. Each subgraph output port is bound to one mirror
+        // output socket on an `Output` node inside the template; the
+        // mirror's uid was recorded at build time.
         let mut out = NodeOutputs::default();
         for binding in &self.outputs {
+            let mirror_uid = match binding.mirror_uid {
+                Some(uid) => uid,
+                None => continue,
+            };
             let v = scratch
                 .get(binding.template_node_id)
-                .and_then(|n| {
-                    let out_uid = n.output_by_name("out")?.uid;
-                    n.cached_outputs.get(&out_uid).cloned()
-                })
+                .and_then(|n| n.cached_outputs.get(&mirror_uid).cloned())
                 .unwrap_or(PortValue::None);
             out.set(binding.socket_name.clone(), v);
         }

@@ -40,11 +40,20 @@ impl SocketType {
         }
     }
 
-    /// Returns true when a value of `from` may be wired into a socket of `to`.
-    /// Currently exact type match — promotions (e.g. Number → Color) are not
+    /// Returns true when a value of `from` (= `self`) may be wired into a
+    /// socket of type `other`.
+    ///
+    /// Rules:
+    /// - Exact type match: always allowed.
+    /// - Target type `None`: wildcard. `None` is the placeholder for an
+    ///   un-typed input slot — the canonical use is the trailing empty
+    ///   slot on the Output node, which adopts the source's type on
+    ///   connect. Any source type is allowed to land on a `None` input.
+    ///
+    /// Promotions between concrete types (e.g. Number → Color) are not
     /// supported and would belong on dedicated converter nodes.
     pub fn is_compatible_with(self, other: SocketType) -> bool {
-        self == other
+        self == other || other == SocketType::None
     }
 }
 
@@ -57,6 +66,38 @@ mod tests {
         assert!(SocketType::Number.is_compatible_with(SocketType::Number));
         assert!(!SocketType::Number.is_compatible_with(SocketType::Geometry3d));
         assert!(!SocketType::Path2d.is_compatible_with(SocketType::Geometry3d));
+    }
+
+    #[test]
+    fn target_none_accepts_any_source() {
+        // None on the target side is the placeholder type used by the
+        // Output node's trailing empty input slot. Any source must be
+        // allowed; the node's on_input_connected hook retypes the slot
+        // to match the source.
+        for src in [
+            SocketType::Number,
+            SocketType::Bool,
+            SocketType::StringVal,
+            SocketType::Color,
+            SocketType::Matrix4x4,
+            SocketType::Path2d,
+            SocketType::Geometry3d,
+        ] {
+            assert!(
+                src.is_compatible_with(SocketType::None),
+                "{:?} should be allowed into a None placeholder slot",
+                src,
+            );
+        }
+    }
+
+    #[test]
+    fn source_none_does_not_satisfy_concrete_targets() {
+        // The wildcard rule is one-directional: a source of type None
+        // (which shouldn't really exist — outputs are always concrete)
+        // does NOT satisfy a concrete-typed input.
+        assert!(!SocketType::None.is_compatible_with(SocketType::Number));
+        assert!(!SocketType::None.is_compatible_with(SocketType::Geometry3d));
     }
 
     #[test]

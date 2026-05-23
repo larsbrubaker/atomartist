@@ -122,12 +122,15 @@ fn combine_two_boxes_via_executor() {
     let b = g.add_new_node("Box", [0.0, 100.0], &reg).unwrap();
     let c = g.add_new_node("Combine", [200.0, 0.0], &reg).unwrap();
 
+    // Combine uses the dynamic-input model now (first connection lands
+    // on the trailing empty slot; a fresh empty slot follows). The two
+    // wires from Box "out" sockets land in the first then second slot.
     let out_a = g.get(a).unwrap().output_by_name("out").unwrap().uid;
     let out_b = g.get(b).unwrap().output_by_name("out").unwrap().uid;
-    let in_1 = g.get(c).unwrap().input_by_name("input_1").unwrap().uid;
-    let in_2 = g.get(c).unwrap().input_by_name("input_2").unwrap().uid;
-    g.connect(Noodle::new(a, out_a, c, in_1), &reg).unwrap();
-    g.connect(Noodle::new(b, out_b, c, in_2), &reg).unwrap();
+    let slot_1 = g.get(c).unwrap().inputs[0].uid;
+    g.connect(Noodle::new(a, out_a, c, slot_1), &reg).unwrap();
+    let slot_2 = g.get(c).unwrap().inputs.last().unwrap().uid;
+    g.connect(Noodle::new(b, out_b, c, slot_2), &reg).unwrap();
 
     evaluate_all(&mut g, &reg).unwrap();
     let out_c = g.get(c).unwrap().output_by_name("out").unwrap().uid;
