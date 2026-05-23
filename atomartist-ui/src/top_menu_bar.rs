@@ -254,7 +254,7 @@ fn handle_action(
             let existing = state.current_file.lock().unwrap().clone();
             let path = match existing {
                 Some(p) => Some(p),
-                None => dialogs.pick_save_project("untitled.atomartist.json"),
+                None => dialogs.pick_save_project("untitled.atmr"),
             };
             if let Some(p) = path {
                 if let Err(e) = state.save_graph_to_path(&p) {
@@ -269,7 +269,7 @@ fn handle_action(
                 .unwrap()
                 .as_ref()
                 .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()))
-                .unwrap_or_else(|| "untitled.atomartist.json".to_string());
+                .unwrap_or_else(|| "untitled.atmr".to_string());
             if let Some(path) = dialogs.pick_save_project(&suggested) {
                 if let Err(e) = state.save_graph_to_path(&path) {
                     dialogs.show_error(&format!("Save failed: {}", e));

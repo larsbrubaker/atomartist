@@ -36,7 +36,7 @@
 //! default for that field. The intent is that an old or
 //! hand-edited file never blocks app startup.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use atomartist_renderer::RenderStyle;
 
@@ -191,7 +191,7 @@ impl Default for DebugWindowsState {
 
 /// Snapshot of the HUD widget states that should survive across
 /// runs of the app.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct UiSettings {
     /// Whether perspective projection is enabled (vs orthographic).
     pub perspective: bool,
@@ -215,6 +215,12 @@ pub struct UiSettings {
     /// shell composes them in via [`crate::debug_windows::DebugWindowHandles`]
     /// before writing to disk.
     pub debug_windows: DebugWindowsState,
+    /// Absolute path to the last project file the user opened or
+    /// saved (typically `.atmr`, occasionally `.json` for legacy
+    /// saves). The shell auto-reopens this on launch so the user
+    /// resumes where they left off; `None` means there's nothing
+    /// to reopen and the starter graph stays loaded.
+    pub last_project_path: Option<PathBuf>,
 }
 
 impl Default for UiSettings {
@@ -227,6 +233,7 @@ impl Default for UiSettings {
             snap_amount: 1.0,
             main_window: MainWindowState::default(),
             debug_windows: DebugWindowsState::default(),
+            last_project_path: None,
         }
     }
 }
@@ -234,7 +241,7 @@ impl Default for UiSettings {
 impl UiSettings {
     /// Render to the on-disk text format.
     pub fn to_text(&self) -> String {
-        let mut out = String::with_capacity(384);
+        let mut out = String::with_capacity(512);
         out.push_str("# AtomArtist UI settings\n");
         out.push_str(&format!("perspective={}\n", self.perspective));
         out.push_str(&format!("turntable={}\n", self.turntable));
@@ -249,6 +256,15 @@ impl UiSettings {
         write_main_window(&mut out, &self.main_window);
         write_debug_window(&mut out, "inspector", &self.debug_windows.inspector);
         write_debug_window(&mut out, "performance", &self.debug_windows.performance);
+        if let Some(p) = self.last_project_path.as_ref() {
+            // `to_string_lossy` is good enough — projects with
+            // non-UTF-8 paths (rare) round-trip in their lossy form,
+            // which is no worse than the alternative of dropping the
+            // line silently. The auto-reopen path will fall back to
+            // the starter graph if the on-disk file no longer
+            // exists, so a corrupted path here can't break startup.
+            out.push_str(&format!("last_project_path={}\n", p.to_string_lossy()));
+        }
         out
     }
 
@@ -292,6 +308,17 @@ impl UiSettings {
                         // Negative snap amounts are nonsensical;
                         // treat them as 0 (snap off).
                         out.snap_amount = if f.is_finite() && f >= 0.0 { f } else { 0.0 };
+                    }
+                }
+                "last_project_path" => {
+                    // Empty value clears the slot — same as missing
+                    // line. Anything non-empty is taken at face
+                    // value; the shell rechecks existence on
+                    // startup before trying to open it.
+                    if value.is_empty() {
+                        out.last_project_path = None;
+                    } else {
+                        out.last_project_path = Some(PathBuf::from(value));
                     }
                 }
                 _ => {
@@ -500,9 +527,29 @@ mod tests {
                     height: 140.0,
                 },
             },
+            last_project_path: Some(PathBuf::from("C:/users/bob/projects/widget.atmr")),
         };
         let parsed = UiSettings::from_text(&s.to_text());
         assert_eq!(s, parsed);
+    }
+
+    #[test]
+    fn last_project_path_round_trips_when_present_and_absent() {
+        let mut s = UiSettings::default();
+        // Absent: no `last_project_path=` line is emitted.
+        let text = s.to_text();
+        assert!(!text.contains("last_project_path="));
+        let parsed = UiSettings::from_text(&text);
+        assert_eq!(parsed.last_project_path, None);
+
+        // Present: serialized and parsed back through.
+        s.last_project_path = Some(PathBuf::from("/tmp/atomartist/test.atmr"));
+        let parsed = UiSettings::from_text(&s.to_text());
+        assert_eq!(parsed.last_project_path, s.last_project_path);
+
+        // Empty value explicitly clears the slot.
+        let parsed = UiSettings::from_text("last_project_path=\n");
+        assert_eq!(parsed.last_project_path, None);
     }
 
     #[test]

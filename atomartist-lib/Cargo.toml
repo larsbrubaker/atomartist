@@ -18,6 +18,14 @@ manifold-rust = { path = "../../manifold-rust" }
 tess2-rust    = { path = "../../tess2-rust" }
 serde         = { version = "1", features = ["derive"] }
 serde_json    = "1"
+# `zip` is the container format for `.atmr` project files — a regular
+# zip archive whose top-level `graph.json` entry holds the serialized
+# graph. Future revisions will add other entries (baked geometry caches,
+# embedded textures, etc.) without breaking the schema. We only need
+# stored / deflate compression, so opt out of the heavier optional
+# back-ends (aes-crypto, bzip2, lzma, ppmd, xz, zstd) to keep the
+# dependency tree small.
+zip           = { version = "8", default-features = false, features = ["deflate-flate2", "deflate-flate2-zlib-rs"] }
 # `bevy_reflect` powers typed node-field discovery: node property structs
 # derive `Reflect` so we can iterate field names + types at runtime and
 # attach editor hints via `#[reflect(@NodeFieldAttrs { ... })]` custom

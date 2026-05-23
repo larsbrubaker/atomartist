@@ -16,7 +16,7 @@ use atomartist_lib::graph::executor::evaluate_dirty;
 use atomartist_lib::graph::node::{NodeId, PortValue};
 use atomartist_lib::registry::NodeRegistry;
 use atomartist_lib::serialization::{
-    export_stl, graph_from_json_str, graph_to_json_string,
+    export_stl, load_project_from_path, save_project_to_path,
 };
 use atomartist_lib::Graph;
 use atomartist_renderer::{
@@ -279,9 +279,14 @@ impl AppState {
     /// clears undo history, and runs an initial evaluation so the
     /// viewport repopulates. Returns `Err` with a user-readable message
     /// on parse / IO failure.
+    ///
+    /// Dispatches on file extension: `.atmr` loads through the zip
+    /// container, `.json` reads the raw JSON file. Unknown / missing
+    /// extensions try ATMR first — see `serialization::atmr` for
+    /// the full dispatch rules.
     pub fn load_graph_from_path(&self, path: &Path) -> Result<(), String> {
-        let s = std::fs::read_to_string(path).map_err(|e| format!("read {}: {}", path.display(), e))?;
-        let result = graph_from_json_str(&s, &self.registry).map_err(|e| e.to_string())?;
+        let result = load_project_from_path(path, &self.registry)
+            .map_err(|e| format!("open {}: {}", path.display(), e))?;
         *self.graph.lock().unwrap() = result.graph;
         self.undo.lock().unwrap().clear_history();
         *self.current_file.lock().unwrap() = Some(path.to_path_buf());
@@ -293,10 +298,17 @@ impl AppState {
         Ok(())
     }
 
-    /// Save the current graph to `path` (JSON). Updates `current_file`.
+    /// Save the current graph to `path`. Picks the on-disk format
+    /// from the file extension — `.atmr` writes a zip archive
+    /// containing `graph.json`, `.json` writes plain JSON, anything
+    /// else (including no extension at all) defaults to `.atmr`.
+    /// Updates `current_file` on success so subsequent `Save` actions
+    /// reuse the chosen path without re-prompting.
     pub fn save_graph_to_path(&self, path: &Path) -> Result<(), String> {
-        let json = graph_to_json_string(&self.graph.lock().unwrap());
-        std::fs::write(path, json).map_err(|e| format!("write {}: {}", path.display(), e))?;
+        let graph = self.graph.lock().unwrap();
+        save_project_to_path(path, &graph)
+            .map_err(|e| format!("write {}: {}", path.display(), e))?;
+        drop(graph);
         *self.current_file.lock().unwrap() = Some(path.to_path_buf());
         Ok(())
     }
@@ -319,6 +331,11 @@ impl AppState {
             snap_amount: *self.snap_amount.lock().unwrap(),
             main_window: crate::MainWindowState::default(),
             debug_windows: crate::DebugWindowsState::default(),
+            // Forward the path of the currently-open project so the
+            // shell's AutoSave loop persists it on every paint where
+            // it changed. The native shell uses this on next launch
+            // to auto-reopen the same file.
+            last_project_path: self.current_file.lock().unwrap().clone(),
         }
     }
 
@@ -327,7 +344,11 @@ impl AppState {
     /// flags into the shared camera so the very first frame after
     /// startup matches what the user left things as. Used by the
     /// demo-native shell on load.
-    pub fn apply_ui_settings(&self, s: crate::UiSettings) {
+    ///
+    /// Takes the settings by reference so the caller can keep them
+    /// around for the auto-reopen path (which needs `last_project_path`)
+    /// and for `build_app` (which reads `debug_windows`).
+    pub fn apply_ui_settings(&self, s: &crate::UiSettings) {
         use atomartist_renderer::{OrbitMode, Projection};
         *self.perspective.lock().unwrap() = s.perspective;
         *self.turntable.lock().unwrap() = s.turntable;

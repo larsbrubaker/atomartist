@@ -369,8 +369,33 @@ fn main() {
     // render style / snap) that were read from disk at the top of
     // `main`, *before* mounting the widget tree so the first paint
     // reflects what the user left things at.
-    if let Some(loaded) = loaded_settings {
+    if let Some(loaded) = loaded_settings.as_ref() {
         state.apply_ui_settings(loaded);
+    }
+    // Auto-reopen the last project the user worked on so they
+    // resume where they left off. Failure is non-fatal — the
+    // starter graph stays in place and we log the reason. We do
+    // this *before* mounting the widget tree so the very first
+    // paint shows the restored project, not a one-frame flash of
+    // the starter scene.
+    if let Some(last) = loaded_settings
+        .as_ref()
+        .and_then(|s| s.last_project_path.as_ref())
+    {
+        if last.exists() {
+            if let Err(e) = state.load_graph_from_path(last) {
+                eprintln!(
+                    "warning: could not reopen last project {}: {}",
+                    last.display(),
+                    e
+                );
+            }
+        } else {
+            eprintln!(
+                "info: last project {} no longer exists, starting fresh",
+                last.display()
+            );
+        }
     }
     // Clone for the persistence loop — `AppState` is `Arc`-shared
     // internally so this is just an Arc bump per field.
@@ -662,16 +687,23 @@ fn main() {
 /// File-dialog provider for native — backed by `rfd`. Blocking dialogs
 /// are fine: the agg-gui App's render loop is paused while the modal is
 /// up, and the user's response unblocks it.
+///
+/// Filter ordering matters: rfd uses the first filter as the default
+/// "Save as type" so we list `.atmr` first and keep `.json` as a
+/// secondary entry for opening / converting legacy projects.
 struct NativeDialogs;
 impl FileDialogProvider for NativeDialogs {
     fn pick_open_project(&self) -> Option<PathBuf> {
         rfd::FileDialog::new()
-            .add_filter("AtomArtist project", &["json"])
+            .add_filter("AtomArtist project", &["atmr"])
+            .add_filter("AtomArtist project (legacy JSON)", &["json"])
+            .add_filter("All files", &["*"])
             .pick_file()
     }
     fn pick_save_project(&self, default_name: &str) -> Option<PathBuf> {
         rfd::FileDialog::new()
-            .add_filter("AtomArtist project", &["json"])
+            .add_filter("AtomArtist project", &["atmr"])
+            .add_filter("AtomArtist project (legacy JSON)", &["json"])
             .set_file_name(default_name)
             .save_file()
     }
