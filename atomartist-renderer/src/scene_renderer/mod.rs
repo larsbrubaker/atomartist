@@ -53,6 +53,11 @@ pub mod cache;
 pub mod depth_peel;
 pub mod opaque_pass;
 mod opaque_shaders;
+mod timings;
+mod util;
+
+use timings::{elapsed_ms, log_scene_timings, SceneTimings};
+use util::{ensure_scene_depth, normalize3};
 
 use accumulation::{
     apply_jitter_to_proj, jitter_offset, AccumulationPipelines, AccumulationTargets, MAX_SAMPLES,
@@ -770,162 +775,5 @@ impl WgpuCustomRender for WgpuSceneRenderer {
     }
 }
 
-#[inline]
-fn elapsed_ms(t: web_time::Instant) -> f32 {
-    t.elapsed().as_secs_f32() * 1000.0
-}
-
-#[derive(Clone, Copy, Default)]
-struct SceneTimings {
-    total_ms: f32,
-    ensure_ms: f32,
-    fb_ms: f32,
-    mesh_ms: f32,
-    bed_composite_ms: f32,
-    bed_ran_chain: bool,
-    peel_ms: f32,
-    accum_ms: f32,
-    blit_ms: f32,
-}
-
-fn scene_log_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("ATOMARTIST_SCENE_LOG")
-            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "on" | "yes"))
-            .unwrap_or(false)
-    })
-}
-
-thread_local! {
-    static SCENE_TIMING_ACC: std::cell::RefCell<Vec<SceneTimings>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-    static SCENE_LOG_LAST: std::cell::Cell<Option<web_time::Instant>> =
-        const { std::cell::Cell::new(None) };
-}
-
-const SCENE_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1000);
-
-fn log_scene_timings(t: SceneTimings) {
-    if !scene_log_enabled() {
-        return;
-    }
-    SCENE_TIMING_ACC.with(|acc| acc.borrow_mut().push(t));
-    let now = web_time::Instant::now();
-    let last = SCENE_LOG_LAST.with(|c| c.get());
-    let should_log = match last {
-        Some(prev) => now.duration_since(prev) >= SCENE_LOG_INTERVAL,
-        None => {
-            SCENE_LOG_LAST.with(|c| c.set(Some(now)));
-            false
-        }
-    };
-    if !should_log {
-        return;
-    }
-    SCENE_LOG_LAST.with(|c| c.set(Some(now)));
-    SCENE_TIMING_ACC.with(|acc| {
-        let buf = acc.borrow();
-        if buf.is_empty() {
-            return;
-        }
-        let n = buf.len() as f32;
-        let avg = |f: fn(&SceneTimings) -> f32| -> f32 { buf.iter().map(f).sum::<f32>() / n };
-        let max_total = buf.iter().map(|t| t.total_ms).fold(0.0_f32, f32::max);
-        let chain_hits = buf.iter().filter(|t| t.bed_ran_chain).count();
-        eprintln!(
-            "[scene {:>3} samples] total avg={:.2} max={:.2} ms | ensure={:.3} fb={:.3} mesh={:.3} bed_comp={:.3} peel={:.3} accum={:.3} blit={:.3} | chain_runs={}/{}",
-            buf.len(),
-            avg(|t| t.total_ms),
-            max_total,
-            avg(|t| t.ensure_ms),
-            avg(|t| t.fb_ms),
-            avg(|t| t.mesh_ms),
-            avg(|t| t.bed_composite_ms),
-            avg(|t| t.peel_ms),
-            avg(|t| t.accum_ms),
-            avg(|t| t.blit_ms),
-            chain_hits,
-            buf.len(),
-        );
-        drop(buf);
-        acc.borrow_mut().clear();
-    });
-}
-
-fn ensure_scene_depth(
-    device: &wgpu::Device,
-    slot: &mut Option<(wgpu::Texture, wgpu::TextureView)>,
-    w: u32,
-    h: u32,
-) {
-    if let Some((tex, _)) = slot {
-        if tex.width() == w && tex.height() == h {
-            return;
-        }
-    }
-    let tex = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("atomartist scene_depth"),
-        size: wgpu::Extent3d {
-            width: w,
-            height: h,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: SAMPLE_COUNT,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Depth32Float,
-        // `TEXTURE_BINDING` so the dual-peel init / colour shaders can
-        // sample the opaque-pass depth via `texture_depth_2d`.
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-        view_formats: &[],
-    });
-    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-    *slot = Some((tex, view));
-}
-
-fn normalize3(v: [f32; 3]) -> [f32; 3] {
-    let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-12);
-    [v[0] / l, v[1] / l, v[2] / l]
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn renderer_is_constructible() {
-        let r = WgpuSceneRenderer::new();
-        assert!(r.mesh.is_none());
-    }
-
-    /// Bed Z-fight offset nudges the plane toward the camera — when
-    /// the camera is above `grid_z` the result is below `grid_z`, and
-    /// vice versa. Magnitude scales with camera distance so the
-    /// adjustment is invisible at typical zooms but always exceeds
-    /// depth-buffer precision.
-    #[test]
-    fn bed_render_z_nudges_toward_camera() {
-        let mut r = WgpuSceneRenderer::new();
-        r.grid_z = 0.0;
-        // Default camera looks at the origin from radius=300-ish on +Z;
-        // exact value isn't important — only the sign of the nudge.
-        let eye_z = r.camera.eye()[2];
-        let bed_z = r.bed_render_z();
-        assert!(bed_z != r.grid_z);
-        if eye_z > 0.0 {
-            assert!(bed_z < 0.0, "camera above bed -> bed nudged below");
-        } else {
-            assert!(bed_z > 0.0, "camera below bed -> bed nudged above");
-        }
-        // 0.004 × distance scaling — the offset for a 100-unit eye
-        // should be at least 0.3 (much larger than f32 depth noise).
-        assert!(bed_z.abs() > 0.001 * eye_z.abs().max(1.0));
-    }
-
-    #[test]
-    fn bed_toggle_default_is_on() {
-        let r = WgpuSceneRenderer::new();
-        assert!(r.draw_grid);
-    }
-}
+mod tests;
