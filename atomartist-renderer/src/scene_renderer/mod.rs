@@ -335,13 +335,17 @@ impl WgpuSceneRenderer {
     /// camera-distance offset: at typical zoom the offset is a few
     /// thousandths of a world unit — invisible to the eye but well
     /// above depth-buffer precision noise.
+    ///
+    /// The bed's depth contribution is driven by the bed shader's
+    /// `alphaTest = 0.01` discard — fully-transparent texels discard
+    /// (no depth write) while grid-line texels and the soft contact-
+    /// shadow halo both write depth. Translucent geometry above the
+    /// bed therefore peels through the empty grid cells correctly,
+    /// while still being occluded by the bed surface and its shadow.
     fn bed_render_z(&self) -> f32 {
         let eye_z = self.camera.eye()[2];
         let dist = (eye_z - self.grid_z).abs();
         let sign = if eye_z >= self.grid_z { -1.0 } else { 1.0 };
-        // Nudge toward the camera so the bed sits *in front of*
-        // geometry resting at grid_z; the bed's depth-write still
-        // lets the model occlude grid lines behind it.
         self.grid_z + sign * dist * 0.004
     }
 
@@ -730,7 +734,26 @@ impl WgpuCustomRender for WgpuSceneRenderer {
         self.sample_count = sample_count_before + 1;
         self.accum_read = new_read;
         if self.sample_count < MAX_SAMPLES {
-            agg_gui::animation::request_draw();
+            // IMPORTANT: must NOT call `request_draw()` here — that
+            // version advances the global invalidation epoch, which
+            // forces EVERY retained widget cache (the entire 2-D UI
+            // — node editor, panels, menus, etc.) to rebuild every
+            // single frame for the duration of the accumulation. The
+            // node-editor specifically loses drag visibility and
+            // numeric-field edits during that storm, because each
+            // bump dirties parent backbuffers mid-event-dispatch and
+            // overwrites pending visual state.
+            //
+            // Our visual change is confined to this widget's own
+            // direct-to-surface composite (`output_fb.blit_to`) —
+            // there's no retained bitmap of the 3-D output anywhere
+            // upstream that needs invalidating. So
+            // `request_draw_without_invalidation` is the precise
+            // tool: it schedules a frame without touching the epoch.
+            // The 3-D render runs again, the next Halton sample
+            // folds in, the surface gets re-blit, and 2-D widgets
+            // composite their (still-valid) cached bitmaps.
+            agg_gui::animation::request_draw_without_invalidation();
         }
         let total_ms = elapsed_ms(t_total);
         log_scene_timings(SceneTimings {

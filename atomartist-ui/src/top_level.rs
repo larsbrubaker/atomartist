@@ -15,6 +15,7 @@ use crate::app_state::AppState;
 use agg_gui_node_editor::NodeEditor;
 use crate::app_state_model::shared_model_for;
 use crate::debug_windows::{build_debug_windows, DebugWindowHandles};
+use crate::floating_overlay::{FloatingOverlayHandle, FloatingOverlayHost};
 use crate::settings::UiSettings;
 use crate::status_bar::StatusBar;
 use crate::top_menu_bar::{build_menu_bar_sized, FileDialogProvider};
@@ -49,8 +50,21 @@ pub fn build_app(
     // driven by an `AppStateModel` adapter. We keep the widget id "node-canvas"
     // so existing tests (find_widget_by_id("node-canvas")) and external
     // selection mirroring continue to work.
+    //
+    // Floating-overlay handle: shared between the editor (which spawns
+    // the ColorWheelPicker dialog when a color row is clicked) and a
+    // top-level `FloatingOverlayHost` widget further down in this fn.
+    // The handle is the channel that lets the dialog be reparented from
+    // the editor's pane to the entire main window's coordinate space,
+    // so the user can drag the picker anywhere on screen.
+    let overlay_handle = FloatingOverlayHandle::new();
+    let sink_handle = overlay_handle.clone();
     let canvas: Box<dyn Widget> = Box::new(
-        NodeEditor::new(shared_model_for(state.clone())).with_id("node-canvas"),
+        NodeEditor::new(shared_model_for(state.clone()))
+            .with_id("node-canvas")
+            .with_overlay_sink(move |dialog, close_flag| {
+                sink_handle.set(dialog, close_flag);
+            }),
     );
     // Menu bar needs a font; the demo shells install one into
     // font_settings before building the tree, so this fall-through is safe.
@@ -111,9 +125,14 @@ pub fn build_app(
             .add(status),
     );
 
-    // Stack: column behind, debug windows in front. Stack hit-tests
-    // last-child first, so the windows consume input before the main
-    // UI when visible.
+    // Stack: column behind, debug windows in front, floating-overlay
+    // host on top. Stack hit-tests last-child first, so:
+    //   1. the floating color picker (if open) gets input first,
+    //   2. then the debug windows,
+    //   3. then the main column.
+    // The host's `hit_test` returns false when no dialog is active,
+    // so events pass through cleanly to the rest of the UI most of
+    // the time.
     let mut stack = Stack::new()
         .with_h_anchor(HAnchor::STRETCH)
         .with_v_anchor(VAnchor::STRETCH)
@@ -121,6 +140,7 @@ pub fn build_app(
     for w in build_debug_windows(font, &debug) {
         stack = stack.add(w);
     }
+    stack = stack.add(Box::new(FloatingOverlayHost::new(overlay_handle)));
     (Box::new(stack), debug)
 }
 

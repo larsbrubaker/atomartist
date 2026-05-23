@@ -132,6 +132,16 @@ impl BedRenderer {
         let grid_view = bake_grid_texture(device, queue, surface_format, initial_line_color)
             .create_view(&wgpu::TextureViewDescriptor::default());
 
+        // Trilinear filtering (mag + min + mipmap) on the composite
+        // gives clean grid-line edges across the full zoom range —
+        // each mip level was box-downsampled at bake time so the
+        // shader sees a properly band-limited texture. The grid
+        // texture is pixel-aligned at bake time (see
+        // `bed::texture::paint_grid_rgba`), so the on-screen lines
+        // remain crisp without resorting to nearest sampling. The
+        // 16-tap progressive jitter accumulator in
+        // [`crate::scene_renderer::accumulation`] handles any
+        // remaining sub-pixel aliasing at oblique camera angles.
         let bed_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("atomartist bed quad sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,

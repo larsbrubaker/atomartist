@@ -177,6 +177,13 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
     // Bed-texture sample is premultiplied. Discard fully-transparent
     // texels so the bed never overwrites the depth buffer where it has
     // no visible content (matches NodeDesigner's alphaTest = 0.01).
+    //
+    // Keeping the threshold at 0.01 preserves the soft contact-shadow
+    // halo (shadow contribution maxes around 0.35 — well above this
+    // bar). Pixel alignment for the grid lines themselves is handled
+    // at bake time by `bed::texture::paint_grid_rgba`, which snaps
+    // each line to integer texel coordinates so no partial-coverage
+    // edge band leaks into the depth buffer.
     if (c.a < 0.01) {
         discard;
     }
