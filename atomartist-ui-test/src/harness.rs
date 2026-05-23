@@ -230,6 +230,31 @@ impl TestHarness {
         self
     }
 
+    /// Simulate one or more files being dropped onto the window at
+    /// `(x, y)` (screen coords; Y-down to match the other event
+    /// helpers). Mirrors what `WindowEvent::DroppedFile` triggers in
+    /// the native shell. The harness handles the cursor update and
+    /// layout pass so the test can immediately assert against new
+    /// graph state.
+    pub fn drop_files(
+        &mut self,
+        x: f64,
+        y: f64,
+        paths: Vec<std::path::PathBuf>,
+    ) -> &mut Self {
+        self.cursor = (x, y);
+        self.app.on_mouse_move(x, y);
+        self.app.on_file_dropped(x, y, paths);
+        self.app.layout(Size::new(self.size.0, self.size.1));
+        self
+    }
+
+    /// Convenience for the single-file case — the common shape coming
+    /// out of winit (one `DroppedFile` event per file).
+    pub fn drop_file(&mut self, x: f64, y: f64, path: std::path::PathBuf) -> &mut Self {
+        self.drop_files(x, y, vec![path])
+    }
+
     // ── Keyboard helpers ──────────────────────────────────────────────
 
     pub fn key_down(&mut self, key: Key) -> &mut Self {
