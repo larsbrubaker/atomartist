@@ -14,16 +14,41 @@
 //!
 //! # Anti-aliasing policy
 //!
-//! The 3-D scene is moving toward a **depth-peeled** transparency solution
-//! (the same approach NodeDesigner / MatterCAD use). Depth peeling relies on
-//! the stencil buffer and per-pass attachment swaps, so **full-screen
-//! hardware MSAA is disabled** — every offscreen 3-D framebuffer in this
-//! crate is built with `sample_count = 1`.
+//! The main 3-D viewport ([`scene_renderer::WgpuSceneRenderer`]) uses
+//! **dual depth peeling** for order-independent transparency, ported from
+//! MatterCAD's `RenderTransparentLayers` chain (see
+//! [`scene_renderer::depth_peel`]). Despite the name, depth peeling does
+//! NOT use the stencil buffer — both reference implementations
+//! (MatterCAD's dual peeling and NodeDesigner's single-direction
+//! peeling) drive their per-pass discards by sampling the previous
+//! iteration's depth attachment in the fragment shader. Stencil ops
+//! never enter the chain.
 //!
-//! When a specific 3-D object needs anti-aliasing, render it into an
-//! oversized offscreen backbuffer (SSAA) and pick the matching composite
-//! kernel from `demo_wgpu::MsaaFramebuffer`. Choosing the right downsample
-//! kernel for the scale is critical — the wrong one silently throws SSAA
+//! The reason **hardware MSAA is disabled** on every offscreen 3-D
+//! framebuffer in this crate (`sample_count = 1`) is more subtle: the
+//! peeling fragment shader has to ask "what is the opaque-pass depth at
+//! this pixel?" via a `texture_depth_2d` sample. An MSAA depth texture
+//! has a separate depth value per sample-slot, so that question doesn't
+//! have a single answer — the discard test would be incoherent. Single-
+//! sample depth keeps the lookup well-defined.
+//!
+//! Anti-aliasing on the main viewport comes from a **16-sample
+//! progressive jitter accumulator** ([`scene_renderer::accumulation`]),
+//! also ported from NodeDesigner (`accumulation-aa.js`). Each frame
+//! that the scene is static, the renderer adds one more Halton(2,3)
+//! sub-pixel-jittered sample to a `Rgba16Float` ping-pong accumulator;
+//! after 16 samples the running average is a 16x supersampled image.
+//! A [`scene_renderer::cache::SceneFingerprint`] gate ensures the chain
+//! only runs when the scene actually changed — dragging a 2-D node
+//! canvas next to the viewport doesn't invalidate the cache, but
+//! rotating the camera or the tumble cube does.
+//!
+//! Other 3-D widgets that don't need OIT (the tumble cube, bed
+//! composite chain) keep their existing single-shot pipelines and can
+//! choose **SSAA** if they need anti-aliasing: render into an oversized
+//! offscreen backbuffer and pick the matching composite kernel from
+//! `demo_wgpu::MsaaFramebuffer`. Choosing the right downsample kernel
+//! for the scale is critical — the wrong one silently throws SSAA
 //! work away:
 //!
 //! - `2×` linear scaling (4× pixel cost) → `MsaaFramebuffer::blit_to`. A
@@ -34,7 +59,7 @@
 //!   per output pixel and degrades to roughly 2× quality — always pair the
 //!   scale and the kernel.
 //!
-//! Reference implementation: the tumble-cube renderer
+//! Reference SSAA implementation: the tumble-cube renderer
 //! ([`tumble_cube::renderer`]) keeps `SAMPLE_COUNT = 1` and renders into a
 //! `2×` SSAA offscreen framebuffer, compositing at widget size through the
 //! shared bilinear blit pipeline.
@@ -44,7 +69,6 @@ pub mod camera;
 pub mod camera_animations;
 pub mod picking;
 pub mod scene_renderer;
-mod scene_shaders;
 pub mod tumble_cube;
 pub mod viewport_widget;
 

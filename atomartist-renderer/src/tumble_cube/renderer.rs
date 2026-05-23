@@ -7,9 +7,10 @@
 //!
 //! ## Anti-aliasing — SSAA, not MSAA
 //!
-//! Hardware MSAA is disabled across AtomArtist's 3-D paths so the future
-//! depth-peeled scene renderer can rely on the stencil buffer without
-//! per-pass MSAA attachment juggling (see the crate-root
+//! Hardware MSAA is disabled across AtomArtist's 3-D paths so the
+//! main-viewport depth-peel chain can sample per-pixel scene depth via
+//! `texture_depth_2d` (an MSAA depth attachment would expose per-sample
+//! depth values, making that lookup incoherent — see the crate-root
 //! [`crate`] doc → "Anti-aliasing policy"). To still get crisp cube edges
 //! at the small 100 px widget size, the cube renders into an oversized
 //! offscreen backbuffer (`SSAA_SCALE × screen_rect`) and the shared

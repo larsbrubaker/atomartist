@@ -1,10 +1,13 @@
-//! WGSL shader sources for scene_renderer.
+//! WGSL shader sources for the opaque scene pass and the inverted-hull
+//! outline pass.
 //!
-//! Kept separate from render-pass setup so scene_renderer.rs stays
-//! below the repository file-size guardrail while shader text remains
-//! readable and uncompressed.
+//! Kept separate from pipeline setup so [`super::opaque_pass`] stays
+//! focused on resource wiring and so the shader text remains readable
+//! and uncompressed. Depth-peeling shaders live under
+//! `scene_renderer::depth_peel::shaders`; accumulation-blend shaders
+//! live under `scene_renderer::accumulation`.
 
-pub(super) const SHADER: &str = r#"
+pub(super) const SCENE_SHADER: &str = r#"
 struct Uniforms {
     mvp: mat4x4<f32>,
     normal_mat: mat4x4<f32>,
@@ -66,4 +69,3 @@ fn fs(_in: VOut) -> @location(0) vec4<f32> {
     return u.color;
 }
 "#;
-
