@@ -180,6 +180,23 @@ impl NodeDef for CountingConsumer {
     }
 }
 
+/// Node with zero sockets at instantiation. Used by the socket-management
+/// port — JS lets `new MatterGraphNode("Test")` start empty and then
+/// `node.addInputSocket(...)` / `node.addOutputSocket(...)` at will. Rust
+/// nodes get their initial sockets from `NodeDef::instantiate`, so we
+/// register this empty fixture as the canonical "blank" starting point.
+pub struct BareNode;
+impl NodeDef for BareNode {
+    fn type_id(&self) -> &'static str { "test::BareNode" }
+    fn category(&self) -> &'static str { "Test" }
+    fn instantiate(&self, _alloc: &mut SocketUidAlloc) -> InstanceTemplate {
+        InstanceTemplate::builder(_alloc).build()
+    }
+    fn evaluate(&self, _ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
+        Ok(NodeOutputs::default())
+    }
+}
+
 /// Build a registry pre-populated with every test fixture node.
 pub fn registry() -> NodeRegistry {
     let mut r = NodeRegistry::new();
@@ -190,6 +207,7 @@ pub fn registry() -> NodeRegistry {
     r.register(LoopableNumber);
     r.register(BlockingConsumer);
     r.register(CountingConsumer);
+    r.register(BareNode);
     r
 }
 
@@ -199,7 +217,7 @@ pub fn registry() -> NodeRegistry {
 
 use atomartist_lib::graph::graph::{Graph, Noodle, NoodleEndpoint};
 use atomartist_lib::graph::node::NodeId;
-use atomartist_lib::graph::socket::SocketUid;
+use atomartist_lib::graph::socket::{Socket, SocketUid};
 
 /// Resolve a (node, output-name) pair into a [`NoodleEndpoint`].
 pub fn out_ep(g: &Graph, node: NodeId, name: &str) -> NoodleEndpoint {
@@ -227,4 +245,20 @@ pub fn noodle_into(g: &Graph, node: NodeId, socket: SocketUid) -> Option<Noodle>
         .iter()
         .find(|n| n.to.node == node && n.to.socket == socket)
         .copied()
+}
+
+/// Mint + append an input socket on `node`, returning its uid. Mirrors
+/// JS's `node.addInputSocket(name, type)` for the socket-management port.
+pub fn add_input(g: &mut Graph, node: NodeId, name: &str, ty: SocketType) -> SocketUid {
+    let uid = g.allocate_socket_uid();
+    g.append_input_socket(node, Socket::new(uid, name, ty, false))
+        .unwrap()
+}
+
+/// Mint + append an output socket on `node`, returning its uid. Mirrors
+/// JS's `node.addOutputSocket(name, type)`.
+pub fn add_output(g: &mut Graph, node: NodeId, name: &str, ty: SocketType) -> SocketUid {
+    let uid = g.allocate_socket_uid();
+    g.append_output_socket(node, Socket::new(uid, name, ty, false))
+        .unwrap()
 }

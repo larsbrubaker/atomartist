@@ -184,40 +184,14 @@ fn store_outputs(node: &mut NodeInstance, outputs: NodeOutputs) {
     }
 }
 
-/// Kahn's topological sort. Returns nodes in dependency order — every node
-/// appears after all of its upstream producers.
+/// Topological sort. Delegates to [`Graph::execution_order`] and adapts
+/// its [`GraphError`] into [`ExecuteError`] so the executor's surface
+/// stays self-contained.
 fn topo_sort(graph: &Graph) -> Result<Vec<NodeId>, ExecuteError> {
-    let mut in_degree: HashMap<NodeId, usize> = graph.nodes().map(|n| (n.id, 0)).collect();
-    for e in graph.noodles() {
-        if in_degree.contains_key(&e.to.node) && in_degree.contains_key(&e.from.node) {
-            *in_degree.entry(e.to.node).or_insert(0) += 1;
-        }
-    }
-
-    // Stable processing order: sort the initial roots by id so test output
-    // is deterministic.
-    let mut queue: std::collections::VecDeque<NodeId> = {
-        let mut roots: Vec<NodeId> =
-            in_degree.iter().filter(|(_, &d)| d == 0).map(|(id, _)| *id).collect();
-        roots.sort();
-        roots.into()
-    };
-    let mut out: Vec<NodeId> = Vec::with_capacity(graph.node_count());
-    while let Some(id) = queue.pop_front() {
-        out.push(id);
-        for e in graph.noodles().iter().filter(|e| e.from.node == id) {
-            if let Some(d) = in_degree.get_mut(&e.to.node) {
-                *d -= 1;
-                if *d == 0 {
-                    queue.push_back(e.to.node);
-                }
-            }
-        }
-    }
-    if out.len() != graph.node_count() {
-        return Err(ExecuteError::CycleDetected);
-    }
-    Ok(out)
+    graph.execution_order().map_err(|e| match e {
+        GraphError::CycleDetected => ExecuteError::CycleDetected,
+        other => ExecuteError::Graph(other),
+    })
 }
 
 #[cfg(test)]

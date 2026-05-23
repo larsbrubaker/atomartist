@@ -18,7 +18,7 @@
 //! explicitly authorized the break during the Stage 1 engine refactor.
 //! v1 saves can be opened by the previous binary if needed.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -53,8 +53,11 @@ pub struct NodeFile {
     #[serde(default)]
     pub outputs: Vec<SocketFile>,
     /// Property values keyed by name. JSON-friendly representation.
+    /// Stored as a [`BTreeMap`] so the serialized JSON has a deterministic
+    /// key order — the change-detection layer compares stringified output
+    /// and would flag spurious differences from HashMap iteration order.
     #[serde(default)]
-    pub properties: HashMap<String, JsonPortValue>,
+    pub properties: BTreeMap<String, JsonPortValue>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -166,7 +169,7 @@ fn string_to_socket_type(s: &str) -> SocketType {
 pub fn save_graph(graph: &Graph) -> GraphFile {
     let mut nodes = Vec::with_capacity(graph.node_count());
     for n in graph.nodes() {
-        let mut props = HashMap::new();
+        let mut props = BTreeMap::new();
         for (k, v) in &n.properties {
             if let Some(jv) = JsonPortValue::from_port_value(v) {
                 props.insert(k.to_string(), jv);

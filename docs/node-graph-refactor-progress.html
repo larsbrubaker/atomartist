@@ -150,23 +150,24 @@ hr {
 <main>
 
 <h1>Node-graph engine refactor — progress</h1>
-<p class="subtitle">AtomArtist · snapshot taken 2026-05-23 · all green at this checkpoint</p>
+<p class="subtitle">AtomArtist · snapshot updated 2026-05-23 · all green at this checkpoint</p>
 
 <div class="banner">
   <strong>Status:</strong> stable mid-task checkpoint.
   Engine refactor (Stage 1) complete; unified <code>Output</code> node (Stage 2) shipped;
   legacy <code>GraphOutput</code> deleted; <code>Combine</code> rebuilt on the new
-  dynamic-input mechanism (Stage 1i); two NodeDesigner connectivity test suites ported
-  (Tier 1, files 1/4 and 2/4). One bug surfaced + fixed in <code>agg-gui-node-editor</code>
-  along the way. Five more test files queued. Safe to commit; next session can pick up from
-  the queue without re-reading any of this.
+  dynamic-input mechanism (Stage 1i); four NodeDesigner connectivity test suites ported
+  (Tier 1, files 1–4 of 7); engine grew <code>Graph::execution_order</code> and
+  <code>Graph::ancestors</code> to back the port. One bug surfaced + fixed in
+  <code>agg-gui-node-editor</code> along the way. Three more test files queued. Safe to
+  commit; next session can pick up from the queue without re-reading any of this.
 </div>
 
 <div class="grid">
   <div class="card">
     <div class="metric-small">atomartist workspace</div>
-    <div class="metric">363</div>
-    <div class="metric-small">tests passing, 0 failing</div>
+    <div class="metric">403</div>
+    <div class="metric-small">tests passing, 0 failing (was 384)</div>
   </div>
   <div class="card">
     <div class="metric-small">agg-gui-node-editor</div>
@@ -269,15 +270,15 @@ applies only to the noodle concept.</p>
   </tr>
   <tr>
     <td><code>matter-graph-socket-management.test.ts</code></td>
-    <td>—</td>
-    <td><span class="badge next">next</span></td>
-    <td class="num">—</td>
+    <td><code>tests/socket_management.rs</code></td>
+    <td><span class="badge done">done</span></td>
+    <td class="num">21</td>
   </tr>
   <tr>
     <td><code>matter-graph-execution-order.test.ts</code></td>
-    <td>—</td>
-    <td><span class="badge next">next</span></td>
-    <td class="num">—</td>
+    <td><code>tests/execution_order.rs</code></td>
+    <td><span class="badge done">done</span></td>
+    <td class="num">19</td>
   </tr>
   <tr>
     <td><code>change-detection.test.ts</code></td>
@@ -358,7 +359,8 @@ applies only to the noodle concept.</p>
   <li class="path">graph/node.rs — <code>NodeInstance</code>, <code>PortValue</code>, lookup helpers</li>
   <li class="path">graph/graph.rs — <code>Graph</code>, <code>Noodle</code>, <code>NoodleEndpoint</code>, <code>connect</code>/<code>disconnect</code></li>
   <li class="path">graph/socket_mutations.rs — rename/relabel/retype/append/remove + is_free queries</li>
-  <li class="path">graph/executor.rs — uid-keyed evaluation</li>
+  <li class="path">graph/execution_order.rs — <code>Graph::execution_order</code>, <code>Graph::ancestors</code></li>
+  <li class="path">graph/executor.rs — uid-keyed evaluation (topo_sort delegates to <code>execution_order</code>)</li>
   <li class="path">registry.rs — <code>NodeDef</code> trait + ctx types (<code>EvalCtx</code>, <code>ConnectCtx</code>, …)</li>
   <li class="path">nodes/output_node.rs — unified dynamic Output node</li>
   <li class="path">nodes/ops_3d/combine_node.rs — Combine on dynamic-input</li>
@@ -370,7 +372,17 @@ applies only to the noodle concept.</p>
   <li class="path">common/mod.rs — shared NodeDef fixtures + noodle helpers (used by every port)</li>
   <li class="path">node_connections.rs — JS <code>matter-graph-node-connections</code> port (23 tests)</li>
   <li class="path">node_sockets.rs — JS <code>matter-graph-node-sockets</code> port (18 tests)</li>
+  <li class="path">socket_management.rs — JS <code>matter-graph-socket-management</code> port (21 tests)</li>
+  <li class="path">execution_order.rs — JS <code>matter-graph-execution-order</code> port (19 tests)</li>
 </ul>
+
+<p>
+  <code>common/mod.rs</code> grew a <code>BareNode</code> fixture (zero sockets) and
+  <code>add_input</code> / <code>add_output</code> helpers so socket-management
+  tests can append at runtime. No new engine helpers required — every JS scenario
+  mapped onto the existing <code>append_*_socket</code> / <code>remove_*_socket</code>
+  API.
+</p>
 
 <h3>UI (<code>atomartist-ui/src/</code>) &amp; canvas (<code>agg-gui/node-editor/src/</code>)</h3>
 <ul>

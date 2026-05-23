@@ -2,6 +2,7 @@
 
 pub mod asset_store;
 pub mod atmr;
+pub mod change_detection;
 pub mod graph_json;
 pub mod mesh_3mf;
 pub mod mesh_io;
@@ -9,6 +10,7 @@ pub mod mesh_obj;
 pub mod nodedesigner_import;
 
 pub use asset_store::{AssetEntry, AssetRef, AssetStore};
+pub use change_detection::ChangeTracker;
 pub use atmr::{
     load_atmr_from_path, load_atmr_with_assets_from_path, load_project_from_path,
     load_project_with_assets_from_path, save_atmr_to_path, save_atmr_with_assets_to_path,

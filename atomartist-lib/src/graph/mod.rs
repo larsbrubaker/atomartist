@@ -11,6 +11,7 @@ pub mod node;
 #[allow(clippy::module_inception)]
 pub mod graph;
 pub mod socket_mutations;
+pub mod execution_order;
 pub mod executor;
 pub mod undo_commands;
 
