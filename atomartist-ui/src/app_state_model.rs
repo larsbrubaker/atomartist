@@ -16,6 +16,7 @@ use agg_gui_node_editor as ne;
 
 use atomartist_lib::graph::graph::{Edge, GraphError};
 use atomartist_lib::graph::node::{NodeId as DomainNodeId, PortValue, SocketId};
+use atomartist_lib::registry::EditorKind;
 use atomartist_lib::SocketType;
 
 use crate::app_state::AppState;
@@ -67,6 +68,17 @@ impl AppStateModel {
             6 => SocketType::Path2d,
             7 => SocketType::Geometry3d,
             _ => SocketType::None,
+        }
+    }
+
+    /// Map AtomArtist's schema-side `EditorKind` to the canvas's
+    /// `EditorHint`.  The canvas only understands hints it can act on
+    /// (today: colour-wheel popup); other variants forward as `None`
+    /// and the canvas falls back to its default inline behaviour.
+    fn editor_kind_to_ne(k: &EditorKind) -> Option<ne::EditorHint> {
+        match k {
+            EditorKind::ColorPicker => Some(ne::EditorHint::Color),
+            _ => None,
         }
     }
 
@@ -137,6 +149,7 @@ impl ne::NodeGraphModel for AppStateModel {
                             min: p.min,
                             max: p.max,
                             bound_input: p.bound_input.map(Into::into),
+                            editor: Self::editor_kind_to_ne(&p.editor),
                         }
                     })
                     .collect();
