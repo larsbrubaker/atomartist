@@ -52,3 +52,31 @@ fn snapshot_includes_all_three_atomartist_widgets() {
     assert!(types.contains(&"Viewport3dWidget"));
     assert!(types.contains(&"StatusBar"));
 }
+
+#[test]
+fn top_menu_bar_hugs_top_with_no_padding_strip() {
+    // Regression for the wasted-space-above-menu UI report: the top chrome
+    // row used to be 36 px tall while the menu bar inside it was 26 px,
+    // leaving a 10 px gray strip pinned to the top of the window. The
+    // fix locks the row to `MENU_BAR_H` so the menu fills the whole row
+    // — traditional Windows-style placement against the top edge.
+    let h = TestHarness::new();
+    let bar = h.find_by_type("MenuBar").expect("menu bar widget");
+    let bar_h = bar.bounds().height;
+    assert!(
+        (bar_h - agg_gui::widgets::menu::MENU_BAR_H).abs() < 0.5,
+        "menu bar height = {bar_h} (expected MENU_BAR_H = {})",
+        agg_gui::widgets::menu::MENU_BAR_H,
+    );
+
+    // The menu bar is the first child of the top FlexRow; that row sits
+    // at the top of the column. Walk to it through reflection and
+    // assert the row's height matches the menu bar's so there is no
+    // dead chrome strip above the menu items.
+    let row = h.find_by_type("FlexRow").expect("top FlexRow widget");
+    assert!(
+        (row.bounds().height - bar_h).abs() < 0.5,
+        "top row height ({}) should equal menu bar height ({bar_h})",
+        row.bounds().height,
+    );
+}

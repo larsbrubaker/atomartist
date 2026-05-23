@@ -7,8 +7,8 @@
 use std::sync::Arc;
 
 use agg_gui::{
-    font_settings::current_system_font, FlexColumn, FlexRow, HAnchor, Insets, Label,
-    Spacer, Splitter, Stack, VAnchor, Widget,
+    font_settings::current_system_font, widgets::menu::MENU_BAR_H, FlexColumn, FlexRow, HAnchor,
+    Insets, Label, Spacer, Splitter, Stack, VAnchor, Widget,
 };
 
 use crate::app_state::AppState;
@@ -65,18 +65,25 @@ pub fn build_app(
     // Top chrome row: menu bar on the left, spacer pushes the project
     // title to the right. License / About live inside the Help menu —
     // we deliberately keep the main bar uncluttered.
-    // Constrain max height so the row doesn't claim the full column.
+    //
+    // The row is locked to `MENU_BAR_H` (agg-gui's canonical menu-bar
+    // height) so the menu hugs the top of the window like a traditional
+    // Windows menu — no wasted strip of chrome above the items. The
+    // project title is sized + centered to fit inside that same
+    // height so it doesn't force the row taller.
     let project_title: Box<dyn Widget> = Box::new(
         Label::new("Untitled Project", font.clone())
+            .with_font_size(12.0)
             .with_align(agg_gui::widgets::label::LabelAlign::Right)
-            .with_margin(Insets::symmetric(8.0, 6.0)),
+            .with_v_anchor(VAnchor::CENTER)
+            .with_margin(Insets::symmetric(8.0, 0.0)),
     );
 
     let top_row: Box<dyn Widget> = Box::new(
         FlexRow::new()
             .with_h_anchor(HAnchor::STRETCH)
             .with_v_anchor(VAnchor::FIT)
-            .with_max_size(agg_gui::Size::new(f64::INFINITY, 36.0))
+            .with_max_size(agg_gui::Size::new(f64::INFINITY, MENU_BAR_H))
             .add(menu_bar)
             .add_flex(Box::new(Spacer::new().with_h_anchor(HAnchor::STRETCH)), 1.0)
             .add(project_title),
