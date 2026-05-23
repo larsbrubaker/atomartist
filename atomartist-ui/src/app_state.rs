@@ -384,29 +384,27 @@ impl AppState {
 
         let new_id = {
             let mut graph = self.graph.lock().unwrap();
-            let id = graph.allocate_id();
-            let mut node = atomartist_lib::graph::node::NodeInstance::new(
-                id,
-                mesh_node::TYPE_ID,
-                canvas_pos,
-            );
-            // Schema-declared properties first (defaults), then the
-            // freshly-imported asset ref + runtime mesh cache.
-            if let Some(def) = self.registry.get(mesh_node::TYPE_ID) {
-                for prop in def.properties() {
-                    node.properties.insert(prop.name.clone(), prop.default);
-                }
-            }
-            node.properties.insert(
-                Arc::<str>::from("asset"),
-                PortValue::StringVal(Arc::new(asset_ref.as_str().to_string())),
-            );
-            node.properties
-                .insert(Arc::<str>::from("mesh"), PortValue::Geometry3d(Arc::new(mesh)));
-            node.dirty = true;
-            graph
-                .add_node(node)
+            // add_new_node calls `NodeDef::instantiate`, which mints the
+            // input/output sockets and seeds default properties. We then
+            // overwrite the `asset` and `mesh` properties so the runtime
+            // cache is populated before the first eval.
+            let id = graph
+                .add_new_node(mesh_node::TYPE_ID, canvas_pos, &self.registry)
                 .map_err(|e| format!("add MeshNode: {}", e))?;
+            graph
+                .set_property(
+                    id,
+                    Arc::<str>::from("asset"),
+                    PortValue::StringVal(Arc::new(asset_ref.as_str().to_string())),
+                )
+                .ok();
+            graph
+                .set_property(
+                    id,
+                    Arc::<str>::from("mesh"),
+                    PortValue::Geometry3d(Arc::new(mesh)),
+                )
+                .ok();
             id
         };
         self.evaluate_now();

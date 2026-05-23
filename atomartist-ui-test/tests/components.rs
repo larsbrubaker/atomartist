@@ -10,22 +10,16 @@
 
 use std::sync::Arc;
 
-use atomartist_lib::graph::node::{NodeId, NodeInstance, PortValue, SocketId};
+use atomartist_lib::graph::node::{NodeId, PortValue};
 use atomartist_lib::graph::{Edge, Graph};
 use atomartist_lib::nodes::register_subgraph;
 use atomartist_lib::registry::NodeRegistry;
 use atomartist_ui_test::TestHarness;
 
-fn make_node(g: &mut Graph, reg: &NodeRegistry, type_id: &'static str, pos: [f64; 2]) -> NodeId {
-    let id = g.allocate_id();
-    let mut n = NodeInstance::new(id, type_id, pos);
-    if let Some(def) = reg.get(type_id) {
-        for prop in def.properties() {
-            n.properties.insert(prop.name, prop.default);
-        }
-    }
-    g.add_node(n).unwrap();
-    id
+fn connect_by_name(g: &mut Graph, from: NodeId, from_name: &str, to: NodeId, to_name: &str, reg: &NodeRegistry) {
+    let from_uid = g.get(from).unwrap().output_by_name(from_name).unwrap().uid;
+    let to_uid = g.get(to).unwrap().input_by_name(to_name).unwrap().uid;
+    g.connect(Edge::new(from, from_uid, to, to_uid), reg).unwrap();
 }
 
 #[test]
@@ -37,37 +31,29 @@ fn registry_in_appstate_can_register_a_passthrough_subgraph() {
     atomartist_lib::nodes::register_all(&mut reg);
 
     let mut tpl = Graph::new();
-    let gin = make_node(&mut tpl, &reg, "GraphInput", [0.0, 0.0]);
-    let xform = make_node(&mut tpl, &reg, "Transform", [200.0, 0.0]);
-    let gout = make_node(&mut tpl, &reg, "GraphOutput", [400.0, 0.0]);
-    tpl.get_mut(gin).unwrap().properties.insert(
-        "name",
-        PortValue::StringVal(Arc::new("mesh".into())),
-    );
-    tpl.get_mut(gout).unwrap().properties.insert(
-        "name",
-        PortValue::StringVal(Arc::new("out_mesh".into())),
-    );
-    tpl.connect(
-        Edge { from: SocketId { node: gin, name: "out" }, to: SocketId { node: xform, name: "input" } },
-        &reg,
-    ).unwrap();
-    tpl.connect(
-        Edge { from: SocketId { node: xform, name: "out" }, to: SocketId { node: gout, name: "in" } },
-        &reg,
-    ).unwrap();
+    let gin = tpl.add_new_node("GraphInput", [0.0, 0.0], &reg).unwrap();
+    let xform = tpl.add_new_node("Transform", [200.0, 0.0], &reg).unwrap();
+    let gout = tpl.add_new_node("GraphOutput", [400.0, 0.0], &reg).unwrap();
+    tpl.set_property(gin, "name", PortValue::StringVal(Arc::new("mesh".into()))).unwrap();
+    tpl.set_property(gout, "name", PortValue::StringVal(Arc::new("out_mesh".into()))).unwrap();
+    connect_by_name(&mut tpl, gin, "out", xform, "input", &reg);
+    connect_by_name(&mut tpl, xform, "out", gout, "in", &reg);
 
     let id = register_subgraph(&mut reg, "Passthrough", "Passthrough", tpl);
     assert!(reg.get(id).is_some());
     let def = reg.get(id).unwrap();
     assert_eq!(def.category(), "Components");
-    assert_eq!(def.input_sockets().len(), 1);
-    assert_eq!(def.output_sockets().len(), 1);
+    // Sockets surface through a freshly-instantiated instance — that's
+    // how the engine sees a node's socket list now.
+    let mut probe = Graph::new();
+    let probe_id = probe.add_new_node("Passthrough", [0.0, 0.0], &reg).unwrap();
+    let probe_inst = probe.get(probe_id).unwrap();
+    assert_eq!(probe_inst.inputs.len(), 1);
+    assert_eq!(probe_inst.outputs.len(), 1);
 }
 
 #[test]
 fn graph_input_and_graph_output_node_types_exist_for_subgraph_authoring() {
-    // Authoring a subgraph requires GraphInput + GraphOutput nodes.
     let h = TestHarness::new();
     assert!(h.state().registry.get("GraphInput").is_some());
     assert!(h.state().registry.get("GraphOutput").is_some());
@@ -75,9 +61,6 @@ fn graph_input_and_graph_output_node_types_exist_for_subgraph_authoring() {
 
 #[test]
 fn allocated_node_ids_are_unique_per_graph() {
-    // Sanity: NodeIds allocated through `Graph::allocate_id` are unique
-    // within a graph — required for both subgraph authoring and clipboard
-    // paste paths.
     let h = TestHarness::new();
     let mut g = h.state().graph.lock().unwrap();
     let a = g.allocate_id();

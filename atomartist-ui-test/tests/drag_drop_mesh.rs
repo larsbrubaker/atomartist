@@ -50,7 +50,7 @@ fn dropping_an_stl_on_the_canvas_adds_a_mesh_node() {
     let graph = h.state().graph.lock().unwrap();
     let mesh_node_instance = graph
         .nodes()
-        .find(|n| n.type_id == mesh_node::TYPE_ID)
+        .find(|n| n.type_id.as_ref() == mesh_node::TYPE_ID)
         .expect("graph should contain a MeshNode after the drop");
     let asset_ref = match mesh_node_instance.properties.get("asset") {
         Some(PortValue::StringVal(s)) => s.as_str().to_string(),
@@ -90,7 +90,7 @@ fn dropped_mesh_lands_at_canvas_space_drop_position() {
     let graph = h.state().graph.lock().unwrap();
     let mesh_node = graph
         .nodes()
-        .find(|n| n.type_id == mesh_node::TYPE_ID)
+        .find(|n| n.type_id.as_ref() == mesh_node::TYPE_ID)
         .expect("MeshNode added");
     let [px, py] = mesh_node.position;
     assert!(
@@ -120,7 +120,7 @@ fn dropped_mesh_propagates_through_evaluate_now() {
         let graph = h.state().graph.lock().unwrap();
         let id = graph
             .nodes()
-            .find(|n| n.type_id == mesh_node::TYPE_ID)
+            .find(|n| n.type_id.as_ref() == mesh_node::TYPE_ID)
             .expect("MeshNode exists")
             .id;
         id
