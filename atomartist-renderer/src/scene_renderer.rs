@@ -568,7 +568,6 @@ impl WgpuCustomRender for WgpuSceneRenderer {
                 mesh_ref,
                 s.mesh_ptr as u64,
                 self.grid_z,
-                [self.camera.center[0], self.camera.center[1]],
             );
         }
         let bed_composite_ms = elapsed_ms(t_bed_composite);
@@ -615,13 +614,7 @@ impl WgpuCustomRender for WgpuSceneRenderer {
             // distance-scaled offset).
             if self.draw_grid {
                 let bed_z = self.bed_render_z();
-                s.bed.draw_bed(
-                    ctx.queue,
-                    &mut pass,
-                    mvp,
-                    bed_z,
-                    [self.camera.center[0], self.camera.center[1]],
-                );
+                s.bed.draw_bed(ctx.queue, &mut pass, mvp, bed_z);
             }
 
             // Mesh — only when both a vertex buffer and index buffer are

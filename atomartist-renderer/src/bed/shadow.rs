@@ -333,9 +333,10 @@ impl ShadowChain {
     /// `encoder`. When `mesh` is `None`, the silhouette pass just
     /// clears its target so the composite is grid-only.
     ///
-    /// `camera_center_xy` is the world-space pivot the main camera
-    /// orbits around — the shadow ortho is anchored to its XY so the
-    /// silhouette stays centred under the model as the user pans.
+    /// The shadow ortho is anchored to the world origin — the bed
+    /// itself is fixed at `(0, 0)` like the build plate in MatterCAD
+    /// and NodeDesigner, so the silhouette stays aligned with the
+    /// (unmoving) bed grid regardless of how the user pans the camera.
     pub(super) fn render(
         &self,
         device: &wgpu::Device,
@@ -344,9 +345,8 @@ impl ShadowChain {
         mesh: Option<MeshRef<'_>>,
         grid_view: &wgpu::TextureView,
         bed_z: f32,
-        camera_center_xy: [f32; 2],
     ) {
-        self.run_shadow_pass(queue, encoder, mesh, bed_z, camera_center_xy);
+        self.run_shadow_pass(queue, encoder, mesh, bed_z);
         self.run_blur_h(queue, encoder);
         self.run_blur_v(queue, encoder);
         self.run_composite_pass(device, queue, encoder, grid_view);
@@ -359,15 +359,15 @@ impl ShadowChain {
         encoder: &mut wgpu::CommandEncoder,
         mesh: Option<MeshRef<'_>>,
         bed_z: f32,
-        camera_center_xy: [f32; 2],
     ) {
         // Top-down ortho looking from +Z toward -Z in our Z-up world,
-        // centered on the camera target. wgpu/glam ortho convention
-        // (NDC z in [0, 1]) — matches the rest of the renderer.
+        // centered on the world origin (the bed is fixed there). wgpu/glam
+        // ortho convention (NDC z in [0, 1]) — matches the rest of the
+        // renderer.
         let half = BED_HALF_EXTENT;
         let proj = Mat4::orthographic_rh(-half, half, -half, half, 0.1, 400.0);
-        let eye = Vec3::new(camera_center_xy[0], camera_center_xy[1], bed_z + 200.0);
-        let target = Vec3::new(camera_center_xy[0], camera_center_xy[1], bed_z);
+        let eye = Vec3::new(0.0, 0.0, bed_z + 200.0);
+        let target = Vec3::new(0.0, 0.0, bed_z);
         let view = Mat4::look_at_rh(eye, target, Vec3::Y);
         let mvp = (proj * view).to_cols_array();
 

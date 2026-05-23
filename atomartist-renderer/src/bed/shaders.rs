@@ -143,9 +143,6 @@ struct U {
     /// xy half-extents of the quad in world units; z = world-Z of the
     /// plane (matches the legacy GridUniforms.cell.z). w = pad.
     plane: vec4<f32>,
-    /// xy world-space pan offset — must match the shadow ortho centre
-    /// for this frame. zw = pad.
-    bed_offset: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: U;
@@ -161,11 +158,12 @@ struct VOut {
 fn vs(@location(0) pos: vec2<f32>, @location(1) uv: vec2<f32>) -> VOut {
     var o: VOut;
     // The vertex buffer is a unit quad on XY in [-1, 1]; splat it out
-    // to plane.xy half-extents in world coords, then shift by the
-    // pan offset so the bed follows the shadow ortho's pivot.
+    // to plane.xy half-extents in world coords. The bed is fixed at
+    // the world origin (matching MatterCAD / NodeDesigner) so no pan
+    // offset is applied here.
     let world = vec3<f32>(
-        pos.x * u.plane.x + u.bed_offset.x,
-        pos.y * u.plane.y + u.bed_offset.y,
+        pos.x * u.plane.x,
+        pos.y * u.plane.y,
         u.plane.z,
     );
     o.clip = u.mvp * vec4<f32>(world, 1.0);

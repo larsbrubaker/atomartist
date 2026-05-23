@@ -36,6 +36,10 @@ pub use shadow::MeshRef;
 /// matches the value used to populate the texture, the entire
 /// silhouette → blur → composite → mip chain can be skipped — saves
 /// ~14 render passes per idle frame. See `BedRenderer::render_to_composite`.
+///
+/// Note: the bed is fixed at the world origin (matching MatterCAD and
+/// NodeDesigner), so the camera position is *not* an input to the
+/// composite — panning never invalidates the cached texture.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 struct CompositeKey {
     /// Stable identity for the mesh's vertex/index buffers. `0` ⇒ no
@@ -43,12 +47,6 @@ struct CompositeKey {
     /// already tracks mesh upload identity via its `mesh_ptr` field,
     /// so we forward that value here unchanged.
     mesh_id: u64,
-    /// Camera centre, quantised to 0.01 world units. The shadow ortho
-    /// is anchored to this XY so the silhouette stays under the
-    /// model as the user pans; sub-pixel jitter shouldn't churn the
-    /// cache.
-    cam_x_q: i32,
-    cam_y_q: i32,
     /// `1` ⇒ dark-mode shadow inversion enabled.
     invert_flag: u8,
     /// Grid-line colour packed as RGBA8. Re-baking the grid texture
@@ -65,12 +63,6 @@ struct BedUniforms {
     /// xy = half-extents of the bed quad in world units,
     /// z = world-Z height of the plane, w = pad.
     plane: [f32; 4],
-    /// xy = world-space XY offset added to every quad vertex so the
-    /// bed follows the camera-pan pivot. The contact-shadow ortho is
-    /// also anchored to this XY, so keeping the quad in lockstep
-    /// means the UV-to-world mapping is identity regardless of pan.
-    /// zw = pad.
-    bed_offset: [f32; 4],
 }
 
 #[repr(C)]
@@ -276,12 +268,9 @@ impl BedRenderer {
         mesh: Option<MeshRef<'_>>,
         mesh_id: u64,
         bed_z: f32,
-        camera_center_xy: [f32; 2],
     ) -> bool {
         let key = CompositeKey {
             mesh_id: if mesh.is_some() { mesh_id } else { 0 },
-            cam_x_q: (camera_center_xy[0] * 100.0).round() as i32,
-            cam_y_q: (camera_center_xy[1] * 100.0).round() as i32,
             invert_flag: u8::from(self.is_dark),
             color_key: pack_rgba8(self.grid_line_color),
         };
@@ -291,15 +280,8 @@ impl BedRenderer {
             return false;
         }
         log_cache_miss(prev, key);
-        self.chain.render(
-            device,
-            queue,
-            encoder,
-            mesh,
-            &self.grid_view,
-            bed_z,
-            camera_center_xy,
-        );
+        self.chain
+            .render(device, queue, encoder, mesh, &self.grid_view, bed_z);
         self.last_composite_key.set(Some(key));
         self.frame_counter.set(self.frame_counter.get().wrapping_add(1));
         true
@@ -309,23 +291,19 @@ impl BedRenderer {
     /// is responsible for having set the correct viewport / scissor;
     /// this just configures pipeline + bind group + draw.
     ///
-    /// `camera_center_xy` must match the value passed to
-    /// [`Self::render_to_composite`] this frame — the quad is
-    /// translated to that XY so the composite texture's UVs line up
-    /// with world coords. Without this the shadow drifts off the
-    /// model as the user pans.
+    /// The bed is fixed at the world origin (matching MatterCAD and
+    /// NodeDesigner), so the quad's XY span is `[-BED_HALF_EXTENT,
+    /// BED_HALF_EXTENT]` regardless of where the camera is pointing.
     pub fn draw_bed<'rpass>(
         &'rpass self,
         queue: &wgpu::Queue,
         pass: &mut wgpu::RenderPass<'rpass>,
         mvp: [f32; 16],
         bed_z: f32,
-        camera_center_xy: [f32; 2],
     ) {
         let uniforms = BedUniforms {
             mvp,
             plane: [BED_HALF_EXTENT, BED_HALF_EXTENT, bed_z, 0.0],
-            bed_offset: [camera_center_xy[0], camera_center_xy[1], 0.0, 0.0],
         };
         queue.write_buffer(&self.bed_ub, 0, bytemuck::bytes_of(&uniforms));
         pass.set_pipeline(&self.bed_pipeline);
@@ -342,8 +320,8 @@ fn pack_rgba8(c: [f32; 4]) -> u32 {
 
 /// Print a single human-readable line on every shadow-chain cache miss
 /// when `ATOMARTIST_BED_LOG=1` is set. Helps identify which input is
-/// churning when frame time spikes (mesh upload, panning, theme flip,
-/// or a real first-frame populate).
+/// churning when frame time spikes (mesh upload, theme flip, or a real
+/// first-frame populate).
 fn log_cache_miss(prev: Option<CompositeKey>, now: CompositeKey) {
     if !bed_log_enabled() {
         return;
@@ -353,8 +331,6 @@ fn log_cache_miss(prev: Option<CompositeKey>, now: CompositeKey) {
         Some(p) => {
             let mut diffs: Vec<&'static str> = Vec::new();
             if p.mesh_id != now.mesh_id { diffs.push("mesh_id"); }
-            if p.cam_x_q != now.cam_x_q { diffs.push("cam_x"); }
-            if p.cam_y_q != now.cam_y_q { diffs.push("cam_y"); }
             if p.invert_flag != now.invert_flag { diffs.push("invert"); }
             if p.color_key != now.color_key { diffs.push("color"); }
             eprintln!("[bed] cache miss — changed: {diffs:?}; prev={p:?} now={now:?}");
@@ -375,8 +351,8 @@ impl std::fmt::Debug for CompositeKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{{mesh=0x{:x} cam=({}, {}) inv={} col=0x{:08x}}}",
-            self.mesh_id, self.cam_x_q, self.cam_y_q, self.invert_flag, self.color_key
+            "{{mesh=0x{:x} inv={} col=0x{:08x}}}",
+            self.mesh_id, self.invert_flag, self.color_key
         )
     }
 }
