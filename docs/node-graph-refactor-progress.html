@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Node-graph engine refactor — progress</title>
+<style>
+:root {
+  --bg: #fafaf7;
+  --panel: #ffffff;
+  --ink: #1a1a1a;
+  --muted: #6a6a6a;
+  --rule: #e3e3df;
+  --accent: #b3522c;        /* same orange as Geometry3d sockets */
+  --accent-soft: #fff1e8;
+  --good: #2f7a3b;
+  --warn: #a86b00;
+  --code-bg: #f3f1ec;
+  --noodle: #b3522c;
+  --kbd: #4f4f4f;
+}
+html { background: var(--bg); }
+body {
+  font: 15px/1.55 -apple-system, "Segoe UI", Roboto, Inter, sans-serif;
+  color: var(--ink);
+  margin: 0;
+  padding: 0;
+}
+main {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 32px 28px 64px;
+}
+h1 {
+  font-size: 28px;
+  margin: 0 0 6px;
+  letter-spacing: -0.01em;
+}
+.subtitle {
+  color: var(--muted);
+  margin: 0 0 28px;
+  font-size: 14px;
+}
+h2 {
+  font-size: 19px;
+  margin: 36px 0 10px;
+  border-bottom: 1px solid var(--rule);
+  padding-bottom: 6px;
+}
+h3 { font-size: 15.5px; margin: 22px 0 6px; color: var(--ink); }
+p, ul, ol { margin: 8px 0; }
+ul, ol { padding-left: 22px; }
+li { margin: 3px 0; }
+code, kbd {
+  font: 13px/1.45 ui-monospace, "JetBrains Mono", Consolas, monospace;
+  background: var(--code-bg);
+  border-radius: 3px;
+  padding: 1px 5px;
+  color: var(--kbd);
+}
+kbd { border: 1px solid var(--rule); }
+pre {
+  background: var(--code-bg);
+  padding: 12px 14px;
+  border-radius: 5px;
+  overflow-x: auto;
+  font: 13px/1.5 ui-monospace, Consolas, monospace;
+  color: var(--ink);
+}
+.banner {
+  background: var(--accent-soft);
+  border-left: 4px solid var(--accent);
+  padding: 14px 18px;
+  border-radius: 0 6px 6px 0;
+  margin: 18px 0;
+}
+.banner strong { color: var(--accent); }
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+.card {
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 14px 16px;
+}
+.card h3 { margin-top: 0; }
+.metric {
+  font-size: 32px;
+  font-weight: 600;
+  color: var(--accent);
+  line-height: 1;
+  margin: 2px 0 4px;
+}
+.metric-small { font-size: 14px; color: var(--muted); }
+.badge {
+  display: inline-block;
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 10px;
+  vertical-align: middle;
+  margin-left: 4px;
+}
+.badge.done   { background: #e3f1e3; color: var(--good); }
+.badge.flight { background: var(--accent-soft); color: var(--accent); }
+.badge.next   { background: #f0eef9; color: #5a4ea3; }
+.badge.gap    { background: #f7eedd; color: var(--warn); }
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 6px 0 12px;
+  font-size: 14px;
+}
+th, td {
+  text-align: left;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--rule);
+  vertical-align: top;
+}
+th { background: #f5f4ef; font-weight: 600; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+td code { font-size: 12.5px; }
+.vocab {
+  display: grid;
+  grid-template-columns: 130px 1fr;
+  gap: 4px 16px;
+  margin: 8px 0;
+  font-size: 14px;
+}
+.vocab dt { font-weight: 600; color: var(--accent); }
+.vocab dd { margin: 0 0 6px; }
+.path {
+  font: 12.5px/1.5 ui-monospace, Consolas, monospace;
+  color: #555;
+}
+.section-hint {
+  color: var(--muted);
+  font-size: 13px;
+  margin-top: -4px;
+}
+hr {
+  border: 0;
+  border-top: 1px dashed var(--rule);
+  margin: 32px 0 20px;
+}
+</style>
+</head>
+<body>
+<main>
+
+<h1>Node-graph engine refactor — progress</h1>
+<p class="subtitle">AtomArtist · snapshot taken 2026-05-23 · all green at this checkpoint</p>
+
+<div class="banner">
+  <strong>Status:</strong> stable mid-task checkpoint.
+  Engine refactor (Stage 1) complete; unified <code>Output</code> node (Stage 2) shipped;
+  legacy <code>GraphOutput</code> deleted; <code>Combine</code> rebuilt on the new
+  dynamic-input mechanism (Stage 1i); two NodeDesigner connectivity test suites ported
+  (Tier 1, files 1/4 and 2/4). One bug surfaced + fixed in <code>agg-gui-node-editor</code>
+  along the way. Five more test files queued. Safe to commit; next session can pick up from
+  the queue without re-reading any of this.
+</div>
+
+<div class="grid">
+  <div class="card">
+    <div class="metric-small">atomartist workspace</div>
+    <div class="metric">363</div>
+    <div class="metric-small">tests passing, 0 failing</div>
+  </div>
+  <div class="card">
+    <div class="metric-small">agg-gui-node-editor</div>
+    <div class="metric">28</div>
+    <div class="metric-small">tests passing, 0 failing (was 26)</div>
+  </div>
+</div>
+
+<h2>The big change in one paragraph</h2>
+<p>
+  The node-graph engine used to pin sockets to the <code>NodeDef</code> trait
+  via <code>&'static str</code> keys, with edges identified by
+  <code>(NodeId, &'static str)</code>. That meant per-instance dynamic sockets,
+  rename-without-edge-churn, and reorder were all blocked. We pivoted to
+  <em>instance-owned sockets with stable UIDs</em>: every node now carries a
+  <code>Vec&lt;Socket&gt;</code> for its inputs and outputs, each socket has a
+  graph-unique <code>SocketUid(u64)</code>, and noodles reference those uids
+  exclusively. Names are display-only and can change freely without touching
+  noodles. This unlocked the Blender-style dynamic-input <code>Output</code>
+  node (one empty trailing slot, adopts source name+type on connect, appends a
+  new empty slot, removes on disconnect, duplicate-source rejection) and the
+  same shape now powers <code>Combine</code>.
+</p>
+
+<h2>Vocabulary — get the names right</h2>
+<p class="section-hint">
+  Stored in <code>~/.claude/projects/&hellip;/memory/atomartist_vocabulary.md</code> so
+  future sessions stay consistent. The user is sensitive to inconsistency here.
+</p>
+<dl class="vocab">
+  <dt>Node</dt>           <dd>A box in the graph. Types: <code>NodeId</code>, <code>NodeInstance</code>, <code>NodeDef</code>, <code>NodeRegistry</code>.</dd>
+  <dt>Graph</dt>          <dd>The whole DAG (the document).</dd>
+  <dt>Socket</dt>          <dd>Input/output connector — the dot/pin on a node row. Carries <code>SocketUid</code>, <code>name</code>, <code>display_label</code>, <code>socket_type</code>, <code>optional</code>.</dd>
+  <dt>input / output</dt> <dd>Direction is implied by which list a socket lives in: <code>NodeInstance.inputs</code> vs <code>.outputs</code>.</dd>
+  <dt>Noodle</dt>         <dd>The ribbon between two sockets. Types: <code>Noodle</code>, <code>NoodleEndpoint</code>. <strong>Never</strong> "edge", "wire", "link", or "connection" for this concept.</dd>
+  <dt>Property</dt>       <dd>An editable scalar on a node row. <code>PropDef</code>, <code>NodeProperties</code>, <code>node.properties</code>.</dd>
+</dl>
+<p>Mesh-side "edge" (triangle edges in geometry code) stays "edge". The rule
+applies only to the noodle concept.</p>
+
+<h2>What landed (Stages 1 &amp; 2)</h2>
+
+<h3>Stage 1 — engine refactor</h3>
+<ul>
+  <li><strong>New socket primitives</strong>: <code>SocketUid(u64)</code>, <code>Socket { uid, name, display_label, socket_type, optional }</code>, <code>SocketUidAlloc</code> (in <code>atomartist-lib/src/graph/socket.rs</code>).</li>
+  <li><strong>NodeInstance owns sockets</strong>: <code>inputs: Vec&lt;Socket&gt;</code>, <code>outputs: Vec&lt;Socket&gt;</code>, <code>cached_outputs: HashMap&lt;SocketUid, PortValue&gt;</code>. Properties keyed by <code>Arc&lt;str&gt;</code> for runtime-allocated names.</li>
+  <li><strong>Noodles use uids</strong>: <code>Noodle { from: NoodleEndpoint, to: NoodleEndpoint }</code> where endpoint is <code>(NodeId, SocketUid)</code>.</li>
+  <li><strong>NodeDef trait</strong> shrank to factory + behavior: <code>instantiate(alloc) -&gt; InstanceTemplate</code>, <code>evaluate(ctx) -&gt; NodeOutputs</code>, plus optional hooks <code>validate_input_connection</code>, <code>on_input_connected</code>, <code>on_input_disconnected</code>.</li>
+  <li><strong>Granular socket-mutation API</strong> on <code>Graph</code>: <code>rename_socket</code>, <code>relabel_socket</code>, <code>retype_socket</code>, <code>append_input_socket</code>, <code>append_output_socket</code>, <code>remove_input_socket</code>, <code>remove_output_socket</code>, <code>reorder_input_sockets</code>, <code>noodles_touching</code>. (Lives in <code>graph/socket_mutations.rs</code> to keep <code>graph.rs</code> under the 800-line cap.)</li>
+  <li><strong>Serialization v2</strong> (<code>graph_json.rs</code>): per-node socket lists, noodles by uid, <code>next_socket_uid</code> for allocator resume. v1 saves no longer load (sanctioned break).</li>
+  <li><strong>~25 existing nodes</strong> ported to <code>instantiate()</code> + uid-keyed <code>EvalCtx</code>.</li>
+</ul>
+
+<h3>Stage 1i — cleanup</h3>
+<ul>
+  <li>Deleted <code>nodes/io/graph_output_node.rs</code>. The unified <code>Output</code> node plays both viewport-anchor and subgraph-output-declarator roles.</li>
+  <li>Rebuilt <code>SubgraphNodeDef</code> to scan templates for <code>Output</code>'s mirror outputs (skipping the internal <code>__display__</code>) as the published subgraph ports.</li>
+  <li>Rebuilt <code>CombineNode</code> on the dynamic-input mechanism (second consumer that validates the design). Placeholder type is <code>Geometry3d</code> (constrained), not <code>None</code> (wildcard) — proves the design generalizes.</li>
+</ul>
+
+<h3>Stage 2 — unified Output node</h3>
+<p>
+  <code>atomartist-lib/src/nodes/output_node.rs</code> — Blender-style dynamic
+  multi-input. Trailing empty slot type <code>None</code> (wildcard, accepts any
+  source). On connect: adopts source name + type, formats display label as
+  "<em>{NodeTitle} - {socket_name}</em>", mints a mirror output socket, appends a
+  fresh empty. <code>validate_input_connection</code> rejects duplicate-source.
+  <code>on_input_disconnected</code> collapses the slot + removes the mirror.
+  <code>evaluate</code> mirrors each named input to its named output, plus merges
+  every <code>Geometry3d</code> input into a synthetic <code>__display__</code>
+  output the viewport reads.
+</p>
+<p>
+  Engine support: <code>SocketType::None</code> is now a <em>wildcard target
+  type</em> (any source can land on it). Symmetric direction not allowed —
+  outputs always carry a concrete type.
+</p>
+
+<h2>NodeDesigner test ports <span class="badge flight">in flight</span></h2>
+<p class="section-hint">
+  Strategy: port the JS suite test-by-test under <code>atomartist-lib/tests/</code>,
+  citing the JS source path at the top of each file. Shared fixtures live in
+  <code>atomartist-lib/tests/common/mod.rs</code>.
+</p>
+
+<table>
+<thead><tr><th>JS source</th><th>Rust port</th><th>Status</th><th class="num">Tests</th></tr></thead>
+<tbody>
+  <tr>
+    <td><code>matter-graph-node-connections.test.ts</code></td>
+    <td><code>tests/node_connections.rs</code></td>
+    <td><span class="badge done">done</span></td>
+    <td class="num">23</td>
+  </tr>
+  <tr>
+    <td><code>matter-graph-node-sockets.test.ts</code></td>
+    <td><code>tests/node_sockets.rs</code></td>
+    <td><span class="badge done">done</span></td>
+    <td class="num">18</td>
+  </tr>
+  <tr>
+    <td><code>matter-graph-socket-management.test.ts</code></td>
+    <td>—</td>
+    <td><span class="badge next">next</span></td>
+    <td class="num">—</td>
+  </tr>
+  <tr>
+    <td><code>matter-graph-execution-order.test.ts</code></td>
+    <td>—</td>
+    <td><span class="badge next">next</span></td>
+    <td class="num">—</td>
+  </tr>
+  <tr>
+    <td><code>change-detection.test.ts</code></td>
+    <td>—</td>
+    <td><span class="badge next">next</span></td>
+    <td class="num">—</td>
+  </tr>
+  <tr>
+    <td><code>graph-io-nodes.test.ts</code> + <code>graph-io-slot-rearrangement.test.ts</code></td>
+    <td>—</td>
+    <td><span class="badge next">next</span></td>
+    <td class="num">—</td>
+  </tr>
+  <tr>
+    <td><code>socket-rename-persistence.test.ts</code></td>
+    <td>—</td>
+    <td><span class="badge next">next</span></td>
+    <td class="num">—</td>
+  </tr>
+</tbody>
+</table>
+
+<p>
+  Additional engine helpers added to make the sockets port pass:
+  <code>NodeInstance::input_by_type</code>/<code>output_by_type</code>,
+  <code>Graph::input_is_free</code>/<code>output_is_free</code>/<code>first_free_input</code>/<code>first_free_output</code>.
+</p>
+
+<h2>Bug fixed during the port</h2>
+<div class="banner">
+  <strong>Symptom:</strong> screenshot showed an Extrude→Output noodle ending in the
+  middle/right of the Output node, not at the left-side <code>Extrude - Geometry</code>
+  input.
+  <br><strong>Root cause:</strong> <code>agg-gui-node-editor</code>'s noodle paint
+  resolved endpoints by name only. The Output node has both an input named
+  <code>Geometry</code> (adopted slot) and an output named <code>Geometry</code>
+  (mirror). <code>layout_node_with_connections</code> emits output rows first, so
+  <code>.find(|s| s.name == &hellip;)</code> hit the output side.
+  <br><strong>Fix:</strong> extracted <code>resolve_noodle_endpoints</code> in
+  <code>agg-gui/node-editor/src/widget/mod.rs</code>; <code>from</code> filters by
+  <code>SocketSide::Output</code>, <code>to</code> by <code>SocketSide::Input</code>.
+  Two regression tests in <code>widget/tests.rs</code> — one demonstrates the bug,
+  the other guards stale-noodle paint.
+</div>
+
+<h2>Open threads / known gaps <span class="badge gap">deferred</span></h2>
+<ul>
+  <li><strong>Source-side hooks.</strong> No <code>on_output_connected</code>,
+    <code>on_output_disconnected</code>, or <code>validate_output_connection</code>
+    yet. Symmetric to the input-side hooks. Add when a node needs to react to its
+    consumers (e.g. JS-style <code>onConnectionsChange(OUTPUT)</code>).</li>
+  <li><strong>Source-side wildcards.</strong> JS treats output type <code>*</code> as
+    "match any input". atomartist only supports <em>target-side</em>
+    <code>SocketType::None</code> wildcard (used by Output's trailing slot). Outputs
+    always carry concrete types.</li>
+  <li><strong>Drag-reorder UI.</strong> Engine support is done
+    (<code>Graph::reorder_input_sockets</code>, edges unaffected since they're
+    uid-keyed). Canvas-side row drag handler is not built.</li>
+  <li><strong>Rename UI for mirror outputs.</strong> Currently subgraph publish names
+    match source-socket names (e.g. an Output node fed from <code>Extrude.Geometry</code>
+    publishes a port named <code>Geometry</code>). If users want friendlier names
+    like <code>result</code>, we need a rename UI. <code>Graph::rename_socket</code>
+    already exists.</li>
+  <li><strong>connectByType / connectByTypeOutput.</strong> JS convenience helpers.
+    Not in our API; flagged inline in <code>node_connections.rs</code>. Add when a
+    UI flow demands them.</li>
+  <li><strong>Multi-mesh viewport.</strong> Stage 2's Output node merges all
+    geometry inputs into one mesh on <code>__display__</code>. If we ever need
+    per-input materials/picking, extend <code>last_mesh_output</code> to
+    <code>Vec&lt;Arc&lt;MeshGL&gt;&gt;</code>.</li>
+</ul>
+
+<h2>Critical file paths</h2>
+
+<h3>Engine (<code>atomartist-lib/src/</code>)</h3>
+<ul>
+  <li class="path">graph/socket.rs — <code>SocketUid</code>, <code>Socket</code>, <code>SocketUidAlloc</code></li>
+  <li class="path">graph/node.rs — <code>NodeInstance</code>, <code>PortValue</code>, lookup helpers</li>
+  <li class="path">graph/graph.rs — <code>Graph</code>, <code>Noodle</code>, <code>NoodleEndpoint</code>, <code>connect</code>/<code>disconnect</code></li>
+  <li class="path">graph/socket_mutations.rs — rename/relabel/retype/append/remove + is_free queries</li>
+  <li class="path">graph/executor.rs — uid-keyed evaluation</li>
+  <li class="path">registry.rs — <code>NodeDef</code> trait + ctx types (<code>EvalCtx</code>, <code>ConnectCtx</code>, …)</li>
+  <li class="path">nodes/output_node.rs — unified dynamic Output node</li>
+  <li class="path">nodes/ops_3d/combine_node.rs — Combine on dynamic-input</li>
+  <li class="path">serialization/graph_json.rs — format v2 (uid-keyed)</li>
+</ul>
+
+<h3>Tests (<code>atomartist-lib/tests/</code>)</h3>
+<ul>
+  <li class="path">common/mod.rs — shared NodeDef fixtures + noodle helpers (used by every port)</li>
+  <li class="path">node_connections.rs — JS <code>matter-graph-node-connections</code> port (23 tests)</li>
+  <li class="path">node_sockets.rs — JS <code>matter-graph-node-sockets</code> port (18 tests)</li>
+</ul>
+
+<h3>UI (<code>atomartist-ui/src/</code>) &amp; canvas (<code>agg-gui/node-editor/src/</code>)</h3>
+<ul>
+  <li class="path">atomartist-ui/src/app_state_model.rs — bridges Graph ↔ agg-gui node-editor; resolves names↔uids</li>
+  <li class="path">agg-gui/node-editor/src/widget/mod.rs — <code>resolve_noodle_endpoints</code> (the bug fix)</li>
+  <li class="path">agg-gui/node-editor/src/draw.rs — <code>SocketLayout</code>, <code>SocketSide</code>, <code>NodeLayoutInfo</code></li>
+</ul>
+
+<h2>JS → Rust API cheatsheet</h2>
+<table>
+<thead><tr><th>NodeDesigner (JS)</th><th>atomartist (Rust)</th></tr></thead>
+<tbody>
+<tr><td><code>new MatterGraph()</code></td><td><code>Graph::new()</code></td></tr>
+<tr><td><code>new MatterGraphNode(name)</code> &amp; <code>graph.add(node)</code></td>
+    <td><code>Graph::add_new_node(type_id, pos, &amp;registry)</code></td></tr>
+<tr><td><code>node.addInputSocket("in", "number")</code></td>
+    <td>declared in <code>NodeDef::instantiate</code> at registration time</td></tr>
+<tr><td><code>node.connect(0, other, 0)</code> (by index)</td>
+    <td><code>Graph::connect(Noodle::new(from, from_uid, to, to_uid), &amp;reg)</code></td></tr>
+<tr><td><code>node.connect("name", other, "name")</code></td>
+    <td>resolve via <code>node.input_by_name(...)</code> / <code>output_by_name(...)</code> → uid → <code>connect</code></td></tr>
+<tr><td><code>node.disconnectInput(slot)</code></td>
+    <td><code>Graph::disconnect(&amp;noodle, &amp;reg)</code></td></tr>
+<tr><td><code>node.onConnectionsChange = (type) =&gt; { ... }</code></td>
+    <td>target side: <code>NodeDef::on_input_connected</code> / <code>on_input_disconnected</code>; source side: not yet</td></tr>
+<tr><td><code>node.onConnectInput = () =&gt; false</code></td>
+    <td><code>NodeDef::validate_input_connection</code> → <code>Err(reason)</code></td></tr>
+<tr><td><code>node.findInputSocketFree()</code></td>
+    <td><code>Graph::first_free_input(node)</code></td></tr>
+<tr><td><code>graph.removeLink(id)</code></td>
+    <td><code>Graph::disconnect(&amp;noodle, &amp;reg)</code> — noodles have no per-noodle id; identity is the (from,to) pair</td></tr>
+<tr><td><code>graph.noodles[id]</code></td>
+    <td><code>Graph::noodles()</code> returns <code>&amp;[Noodle]</code></td></tr>
+<tr><td><code>node.setOutputSocketData(0, v)</code></td>
+    <td>flows through <code>NodeDef::evaluate(ctx)</code> → <code>cached_outputs</code> via <code>evaluate_all</code></td></tr>
+</tbody>
+</table>
+
+<h2>How to pick this back up</h2>
+<ol>
+  <li><code>cd C:\Development\rust-apps\atomartist</code></li>
+  <li><code>cargo test --workspace --exclude demo-native</code> — should be 363/363 green.</li>
+  <li><code>cargo test -p agg-gui-node-editor</code> (run from <code>C:\Development\rust-apps\agg-gui</code>) — 28/28 green.</li>
+  <li>Pick the next test file off the "in flight" table. Pattern is fixed: read the JS file, port test-by-test using the shared fixtures in <code>tests/common/mod.rs</code>, cite the JS test name in each Rust <code>#[test]</code>'s doc comment.</li>
+  <li>If a port reveals a missing helper (like <code>first_free_input</code> did), add the helper to the engine in a small surgical commit, then continue the port.</li>
+  <li>If a port reveals a bug (like the noodle side-ambiguity), write the reproducing test in the relevant crate first per the project's "Test-First Bug Fixing" rule, then fix.</li>
+</ol>
+
+<hr>
+
+<p class="path">
+  This file lives at <code>docs/node-graph-refactor-progress.html</code>. Update it
+  (or delete and regenerate) at the end of each session that touches the
+  node-graph engine.
+</p>
+
+</main>
+</body>
+</html>

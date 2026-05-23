@@ -215,6 +215,64 @@ impl Graph {
         Ok(())
     }
 
+    /// True when no noodle lands on the given input socket. The
+    /// "free input" concept comes from NodeDesigner's
+    /// `findInputSocketFree` — a UI-side scan for the next drop target
+    /// when the user picks "connect from here" via right-click.
+    /// Returns `false` when the socket doesn't exist (defensive).
+    pub fn input_is_free(&self, node: NodeId, socket: SocketUid) -> bool {
+        if self
+            .nodes
+            .get(&node)
+            .and_then(|n| n.input_by_uid(socket))
+            .is_none()
+        {
+            return false;
+        }
+        !self
+            .noodles()
+            .iter()
+            .any(|n| n.to.node == node && n.to.socket == socket)
+    }
+
+    /// True when no noodle leaves the given output socket. Outputs have
+    /// no exclusivity rule (one output can feed many inputs), so "free"
+    /// here means "currently driving zero consumers".
+    pub fn output_is_free(&self, node: NodeId, socket: SocketUid) -> bool {
+        if self
+            .nodes
+            .get(&node)
+            .and_then(|n| n.output_by_uid(socket))
+            .is_none()
+        {
+            return false;
+        }
+        !self
+            .noodles()
+            .iter()
+            .any(|n| n.from.node == node && n.from.socket == socket)
+    }
+
+    /// First input socket on `node` with no incoming noodle, in
+    /// declaration order. Returns `None` if every input is wired (or
+    /// the node has no inputs).
+    pub fn first_free_input(&self, node: NodeId) -> Option<SocketUid> {
+        let n = self.nodes.get(&node)?;
+        n.inputs
+            .iter()
+            .find(|s| self.input_is_free(node, s.uid))
+            .map(|s| s.uid)
+    }
+
+    /// First output socket on `node` with no outgoing noodles.
+    pub fn first_free_output(&self, node: NodeId) -> Option<SocketUid> {
+        let n = self.nodes.get(&node)?;
+        n.outputs
+            .iter()
+            .find(|s| self.output_is_free(node, s.uid))
+            .map(|s| s.uid)
+    }
+
     /// Every noodle touching the given (node, socket) — either as source or
     /// target. Convenience for hooks that need to look up "is this source
     /// already wired?" or "what's connected to this input?".

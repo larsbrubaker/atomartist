@@ -175,6 +175,17 @@ impl NodeInstance {
     pub fn output_index_by_uid(&self, uid: SocketUid) -> Option<usize> {
         self.outputs.iter().position(|s| s.uid == uid)
     }
+
+    /// First input socket whose `socket_type` matches `ty` exactly. The
+    /// ordering matches the canvas display (which is `inputs` order).
+    pub fn input_by_type(&self, ty: SocketType) -> Option<&Socket> {
+        self.inputs.iter().find(|s| s.socket_type == ty)
+    }
+
+    /// First output socket whose `socket_type` matches `ty` exactly.
+    pub fn output_by_type(&self, ty: SocketType) -> Option<&Socket> {
+        self.outputs.iter().find(|s| s.socket_type == ty)
+    }
 }
 
 #[cfg(test)]
