@@ -558,6 +558,14 @@ fn main() {
                     }
                 }
                 Event::WindowEvent {
+                    event: WindowEvent::DroppedFile(path), ..
+                } => {
+                    // winit emits one DroppedFile per file in a multi-file
+                    // drop. Forward each separately at the current cursor
+                    // position; the app's node canvas handles them.
+                    app.on_file_dropped(cursor_x, cursor_y, vec![path]);
+                }
+                Event::WindowEvent {
                     event: WindowEvent::MouseWheel { delta, .. }, ..
                 } => {
                     let dy = match delta {

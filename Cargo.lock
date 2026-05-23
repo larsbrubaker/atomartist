@@ -342,6 +342,7 @@ dependencies = [
  "agg-gui",
  "bevy_reflect",
  "manifold-rust",
+ "quick-xml",
  "serde",
  "serde_json",
  "tess2-rust 1.1.0",

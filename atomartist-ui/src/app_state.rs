@@ -15,8 +15,10 @@ use agg_gui::undo::UndoBuffer;
 use atomartist_lib::graph::executor::evaluate_dirty;
 use atomartist_lib::graph::node::{NodeId, PortValue};
 use atomartist_lib::registry::NodeRegistry;
+use atomartist_lib::nodes::mesh::mesh_node;
 use atomartist_lib::serialization::{
-    export_stl, load_project_from_path, save_project_to_path,
+    export_3mf, export_stl, load_project_with_assets_from_path,
+    save_project_with_assets_to_path,
 };
 use atomartist_lib::Graph;
 use atomartist_renderer::{
@@ -87,6 +89,12 @@ pub struct AppState {
     /// `projection` ease over ~0.25 s instead of snapping. Mirrors
     /// MatterCAD's `TrackballTumbleWidgetExtended.DoSwitchToProjectionMode`.
     pub projection_animation: Arc<Mutex<Option<ProjectionAnimation>>>,
+    /// Bytes for every asset embedded in the project (`MeshNode` assets,
+    /// future images, etc.). Saved alongside `graph.json` inside the
+    /// `.atmr` zip. Cloned via `Arc` so background threads can read
+    /// without locking the main app, but writes go through the
+    /// `Mutex` to keep insert-and-spawn-node atomic.
+    pub assets: Arc<Mutex<atomartist_lib::serialization::AssetStore>>,
 }
 
 impl AppState {
@@ -110,6 +118,9 @@ impl AppState {
             snap_amount: Arc::new(Mutex::new(1.0)),
             camera_animation: Arc::new(Mutex::new(None)),
             projection_animation: Arc::new(Mutex::new(None)),
+            assets: Arc::new(Mutex::new(
+                atomartist_lib::serialization::AssetStore::new(),
+            )),
         }
     }
 
@@ -254,6 +265,7 @@ impl Clone for AppState {
             snap_amount: self.snap_amount.clone(),
             camera_animation: self.camera_animation.clone(),
             projection_animation: self.projection_animation.clone(),
+            assets: self.assets.clone(),
         }
     }
 }
@@ -285,9 +297,18 @@ impl AppState {
     /// extensions try ATMR first — see `serialization::atmr` for
     /// the full dispatch rules.
     pub fn load_graph_from_path(&self, path: &Path) -> Result<(), String> {
-        let result = load_project_from_path(path, &self.registry)
+        let (result, assets) = load_project_with_assets_from_path(path, &self.registry)
             .map_err(|e| format!("open {}: {}", path.display(), e))?;
-        *self.graph.lock().unwrap() = result.graph;
+        let mut graph = result.graph;
+        // Resolve every MeshNode's asset reference into a live MeshGL
+        // before swapping the graph in — once the executor sees the new
+        // graph it'll be eligible for evaluation.
+        let warnings = mesh_node::resolve_mesh_assets(&mut graph, &assets);
+        for w in &warnings {
+            eprintln!("project load: {}", w);
+        }
+        *self.graph.lock().unwrap() = graph;
+        *self.assets.lock().unwrap() = assets;
         self.undo.lock().unwrap().clear_history();
         *self.current_file.lock().unwrap() = Some(path.to_path_buf());
         // Pick a default display node — the highest-id node with a
@@ -306,11 +327,90 @@ impl AppState {
     /// reuse the chosen path without re-prompting.
     pub fn save_graph_to_path(&self, path: &Path) -> Result<(), String> {
         let graph = self.graph.lock().unwrap();
-        save_project_to_path(path, &graph)
+        let assets = self.assets.lock().unwrap();
+        save_project_with_assets_to_path(path, &graph, &assets)
             .map_err(|e| format!("write {}: {}", path.display(), e))?;
         drop(graph);
+        drop(assets);
         *self.current_file.lock().unwrap() = Some(path.to_path_buf());
         Ok(())
+    }
+
+    /// Import a mesh file (`.stl`, `.obj`, or `.3mf`) and spawn a
+    /// `MeshNode` at the supplied canvas-space position.
+    ///
+    /// 1. Reads the file bytes off disk.
+    /// 2. Decodes into a `MeshGL` via the format-detecting
+    ///    [`mesh_node::decode_mesh`].
+    /// 3. Re-encodes the mesh as `.3mf` so the project always persists
+    ///    in one canonical format (matches the project rule "meshes
+    ///    are stored as .3mf").
+    /// 4. Inserts the bytes into [`AppState::assets`] (deduplicating
+    ///    on content hash).
+    /// 5. Creates a fresh `MeshNode` instance with the asset reference
+    ///    set and the runtime mesh cache pre-populated, so the
+    ///    viewport sees geometry immediately without waiting for a
+    ///    re-resolve pass.
+    /// 6. Triggers `evaluate_now` to push the new mesh into the
+    ///    `last_mesh_output` channel the viewport reads.
+    ///
+    /// Returns the new `NodeId` on success.
+    pub fn import_mesh_file(
+        &self,
+        path: &Path,
+        canvas_pos: [f64; 2],
+    ) -> Result<NodeId, String> {
+        let bytes = std::fs::read(path)
+            .map_err(|e| format!("read {}: {}", path.display(), e))?;
+        let original_filename = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "mesh".to_string());
+        let extension = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let mesh =
+            mesh_node::decode_mesh(&bytes, &extension).map_err(|e| format!("import: {}", e))?;
+        // Always persist as .3mf — the project rule.
+        let three_mf_bytes = export_3mf(&mesh)
+            .map_err(|e| format!("re-encode as 3MF: {}", e))?;
+
+        let asset_ref = {
+            let mut assets = self.assets.lock().unwrap();
+            assets.insert(three_mf_bytes, original_filename, None, Some("3mf".into()))
+        };
+
+        let new_id = {
+            let mut graph = self.graph.lock().unwrap();
+            let id = graph.allocate_id();
+            let mut node = atomartist_lib::graph::node::NodeInstance::new(
+                id,
+                mesh_node::TYPE_ID,
+                canvas_pos,
+            );
+            // Schema-declared properties first (defaults), then the
+            // freshly-imported asset ref + runtime mesh cache.
+            if let Some(def) = self.registry.get(mesh_node::TYPE_ID) {
+                for prop in def.properties() {
+                    node.properties.insert(prop.name, prop.default);
+                }
+            }
+            node.properties.insert(
+                "asset",
+                PortValue::StringVal(Arc::new(asset_ref.as_str().to_string())),
+            );
+            node.properties
+                .insert("mesh", PortValue::Geometry3d(Arc::new(mesh)));
+            node.dirty = true;
+            graph
+                .add_node(node)
+                .map_err(|e| format!("add MeshNode: {}", e))?;
+            id
+        };
+        self.evaluate_now();
+        Ok(new_id)
     }
 
     /// Snapshot the HUD-button state into a [`crate::UiSettings`]

@@ -32,6 +32,10 @@ zip           = { version = "8", default-features = false, features = ["deflate-
 # attributes. We turn off the heavy `auto_register_inventory` default so
 # this stays a quiet dependency — we only need the derive + TypeInfo APIs.
 bevy_reflect  = { version = "0.18", default-features = false, features = ["std"] }
+# `quick-xml` parses + writes 3MF model XML. 3MF is a ZIP wrapping a small
+# OPC-style XML payload; quick-xml is already in our transitive tree via
+# usvg, so depending on it directly costs no extra compile.
+quick-xml     = "0.39"
 
 [features]
 # Enables tests that include scene fixtures from a sibling `MatterHackers/FDS`

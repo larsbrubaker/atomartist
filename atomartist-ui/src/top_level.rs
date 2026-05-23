@@ -59,11 +59,35 @@ pub fn build_app(
     // so the user can drag the picker anywhere on screen.
     let overlay_handle = FloatingOverlayHandle::new();
     let sink_handle = overlay_handle.clone();
+    let drop_state = state.clone();
     let canvas: Box<dyn Widget> = Box::new(
         NodeEditor::new(shared_model_for(state.clone()))
             .with_id("node-canvas")
             .with_overlay_sink(move |dialog, close_flag| {
                 sink_handle.set(dialog, close_flag);
+            })
+            // File-drop hook: when the user drags `.stl` / `.obj` /
+            // `.3mf` onto the canvas, import the file as a project
+            // asset and spawn a MeshNode at the drop position.
+            // Non-mesh extensions are ignored silently for now —
+            // future asset-backed nodes (image, vector, …) can be
+            // routed here once they exist.
+            .with_file_drop_handler(move |paths, canvas_pos| {
+                for path in paths {
+                    let ext = path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .map(|s| s.to_ascii_lowercase())
+                        .unwrap_or_default();
+                    if !matches!(ext.as_str(), "stl" | "obj" | "3mf") {
+                        continue;
+                    }
+                    if let Err(e) =
+                        drop_state.import_mesh_file(path.as_path(), canvas_pos)
+                    {
+                        eprintln!("drop import failed: {}", e);
+                    }
+                }
             }),
     );
     // Menu bar needs a font; the demo shells install one into

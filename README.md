@@ -1,5 +1,7 @@
 # AtomArtist
 
+[![AtomArtist](readme_hero.png)](https://larsbrubaker.github.io/atomartist/)
+
 A visual node-based 3D design tool. Wire together typed nodes — primitives, transforms,
 boolean operations, extrusions, imported meshes — and watch the resulting 3D geometry
 update live in the viewport.
@@ -95,3 +97,7 @@ cargo test --workspace
 ## License
 
 MIT — see [LICENSE](./LICENSE).
+
+---
+
+Part of the [rust-apps](https://github.com/larsbrubaker/rust-apps) suite — a collection of Rust graphics and geometry libraries by Lars Brubaker.
