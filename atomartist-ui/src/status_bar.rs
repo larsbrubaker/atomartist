@@ -99,7 +99,7 @@ impl Widget for StatusBar {
         // Right: node count + "Saved" indicator.
         let g = self.state.graph.lock().unwrap();
         let node_count = g.node_count();
-        let edge_count = g.edge_count();
+        let noodle_count = g.noodle_count();
         drop(g);
         let saved_label = if self.state.current_file.lock().unwrap().is_some() {
             "Saved".to_string()
@@ -107,7 +107,7 @@ impl Widget for StatusBar {
             "Unsaved".to_string()
         };
         // Right-align estimate.
-        let right_text = format!("Nodes: {}    Edges: {}    {}", node_count, edge_count, saved_label);
+        let right_text = format!("Nodes: {}    Noodles: {}    {}", node_count, noodle_count, saved_label);
         let est_w = (right_text.chars().count() as f64) * 6.5;
         ctx.fill_text(&right_text, w - est_w - 12.0, y);
 

@@ -9,7 +9,7 @@
 //! identity across renames. Outputs are returned by name and resolved
 //! against the producing node instance's output sockets to find the
 //! corresponding uid for storage in `cached_outputs`. This keeps node
-//! `evaluate` bodies name-keyed (ergonomic) while edges remain uid-keyed
+//! `evaluate` bodies name-keyed (ergonomic) while noodles remain uid-keyed
 //! (robust).
 //!
 //! Two modes:
@@ -76,7 +76,7 @@ pub fn evaluate_dirty(graph: &mut Graph, registry: &NodeRegistry) -> Result<Vec<
     // of a dirty node is also stale.
     for id in &order {
         if to_eval.contains(id) {
-            for e in graph.edges().iter().filter(|e| e.from.node == *id) {
+            for e in graph.noodles().iter().filter(|e| e.from.node == *id) {
                 to_eval.insert(e.to.node);
             }
         }
@@ -122,7 +122,7 @@ fn evaluate_one(
             .get(id)
             .ok_or(ExecuteError::Graph(GraphError::NodeNotFound(id)))?;
         let mut inputs = NodeInputs::default();
-        for e in graph.edges() {
+        for e in graph.noodles() {
             if e.to.node != id {
                 continue;
             }
@@ -188,7 +188,7 @@ fn store_outputs(node: &mut NodeInstance, outputs: NodeOutputs) {
 /// appears after all of its upstream producers.
 fn topo_sort(graph: &Graph) -> Result<Vec<NodeId>, ExecuteError> {
     let mut in_degree: HashMap<NodeId, usize> = graph.nodes().map(|n| (n.id, 0)).collect();
-    for e in graph.edges() {
+    for e in graph.noodles() {
         if in_degree.contains_key(&e.to.node) && in_degree.contains_key(&e.from.node) {
             *in_degree.entry(e.to.node).or_insert(0) += 1;
         }
@@ -205,7 +205,7 @@ fn topo_sort(graph: &Graph) -> Result<Vec<NodeId>, ExecuteError> {
     let mut out: Vec<NodeId> = Vec::with_capacity(graph.node_count());
     while let Some(id) = queue.pop_front() {
         out.push(id);
-        for e in graph.edges().iter().filter(|e| e.from.node == id) {
+        for e in graph.noodles().iter().filter(|e| e.from.node == id) {
             if let Some(d) = in_degree.get_mut(&e.to.node) {
                 *d -= 1;
                 if *d == 0 {
@@ -223,7 +223,7 @@ fn topo_sort(graph: &Graph) -> Result<Vec<NodeId>, ExecuteError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::graph::Edge;
+    use crate::graph::graph::Noodle;
     use crate::graph::socket::SocketUidAlloc;
     use crate::registry::{InstanceTemplate, NodeDef, NodeOutputs};
     use crate::socket_types::SocketType;
@@ -284,8 +284,8 @@ mod tests {
         let out_b = g.get(b).unwrap().output_by_name("out").unwrap().uid;
         let in_a = g.get(c).unwrap().input_by_name("a").unwrap().uid;
         let in_b = g.get(c).unwrap().input_by_name("b").unwrap().uid;
-        g.connect(Edge::new(a, out_a, c, in_a), &reg).unwrap();
-        g.connect(Edge::new(b, out_b, c, in_b), &reg).unwrap();
+        g.connect(Noodle::new(a, out_a, c, in_a), &reg).unwrap();
+        g.connect(Noodle::new(b, out_b, c, in_b), &reg).unwrap();
         (g, a, b, c)
     }
 

@@ -3,7 +3,7 @@
 //! NodeDesigner used a different graph schema:
 //!   * Type ids are `"geometry/box"` etc. — we map to AtomArtist's
 //!     short names (`"Box"`).
-//!   * Edges (`"noodles"`) reference sockets by UUID. We resolve those
+//!   * Noodles (`"noodles"`) reference sockets by UUID. We resolve those
 //!     against each node's `inputSockets` / `outputSockets` arrays to
 //!     recover the socket name.
 //!   * Property names are usually 1:1 (`width`, `height`, `depth`, ...).
@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
-use crate::graph::graph::{Edge, Graph};
+use crate::graph::graph::{Noodle, Graph};
 use crate::graph::node::PortValue;
 use crate::registry::NodeRegistry;
 use crate::serialization::graph_json::{JsonPortValue, LoadResult};
@@ -370,7 +370,7 @@ fn import_scene(scene: NdScene, registry: &NodeRegistry) -> LoadResult {
             Some(s) => s,
             None => {
                 warnings.push(format!(
-                    "edge source socket '{}.{}' has no AtomArtist analogue",
+                    "noodle source socket '{}.{}' has no AtomArtist analogue",
                     src_type, src_socket_nd
                 ));
                 continue;
@@ -380,7 +380,7 @@ fn import_scene(scene: NdScene, registry: &NodeRegistry) -> LoadResult {
             Some(s) => s,
             None => {
                 warnings.push(format!(
-                    "edge target socket '{}.{}' has no AtomArtist analogue",
+                    "noodle target socket '{}.{}' has no AtomArtist analogue",
                     dst_type, dst_socket_nd
                 ));
                 continue;
@@ -408,8 +408,8 @@ fn import_scene(scene: NdScene, registry: &NodeRegistry) -> LoadResult {
             }
         };
 
-        if let Err(e) = graph.connect(Edge::new(src_id, src_uid, dst_id, dst_uid), registry) {
-            warnings.push(format!("edge {}→{}: {}", src_type, dst_type, e));
+        if let Err(e) = graph.connect(Noodle::new(src_id, src_uid, dst_id, dst_uid), registry) {
+            warnings.push(format!("noodle {}→{}: {}", src_type, dst_type, e));
         }
     }
 
@@ -443,7 +443,7 @@ mod tests {
         let result = import_nodedesigner_scene_str(json, &reg).unwrap();
         // Expect: a Box and an Output, connected.
         assert_eq!(result.graph.node_count(), 2, "warnings: {:?}", result.warnings);
-        assert_eq!(result.graph.edge_count(), 1, "warnings: {:?}", result.warnings);
+        assert_eq!(result.graph.noodle_count(), 1, "warnings: {:?}", result.warnings);
 
         // Evaluate the imported graph and verify the Output sees a Box mesh.
         let mut g = result.graph;

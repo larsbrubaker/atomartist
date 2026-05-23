@@ -2,9 +2,9 @@
 //!
 //! ## Format
 //!
-//! Schema v2: per-node socket layouts and uid-keyed edges. Every socket
+//! Schema v2: per-node socket layouts and uid-keyed noodles. Every socket
 //! carries a stable [`SocketUid`](crate::graph::socket::SocketUid) that
-//! survives renames and reorder; edges reference uids, not names.
+//! survives renames and reorder; noodles reference uids, not names.
 //!
 //! `PortValue` variants that wrap heap geometry (`Path2d`, `Geometry3d`)
 //! are skipped — they're computed outputs that don't survive a round trip
@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::graph::graph::{Edge, EdgeEndpoint, Graph};
+use crate::graph::graph::{Noodle, NoodleEndpoint, Graph};
 use crate::graph::node::{NodeId, NodeInstance, PortValue};
 use crate::graph::socket::{Socket, SocketUid};
 use crate::registry::NodeRegistry;
@@ -38,7 +38,7 @@ pub struct GraphFile {
     #[serde(default)]
     pub next_socket_uid: u64,
     pub nodes: Vec<NodeFile>,
-    pub edges: Vec<EdgeFile>,
+    pub noodles: Vec<NoodleFile>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -69,7 +69,7 @@ pub struct SocketFile {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct EdgeFile {
+pub struct NoodleFile {
     pub from_node: u64,
     pub from_uid: u64,
     pub to_node: u64,
@@ -183,27 +183,27 @@ pub fn save_graph(graph: &Graph) -> GraphFile {
     }
     nodes.sort_by_key(|n| n.id);
 
-    let mut edges = Vec::with_capacity(graph.edge_count());
-    for e in graph.edges() {
-        edges.push(EdgeFile {
+    let mut noodles = Vec::with_capacity(graph.noodle_count());
+    for e in graph.noodles() {
+        noodles.push(NoodleFile {
             from_node: e.from.node.0,
             from_uid: e.from.socket.0,
             to_node: e.to.node.0,
             to_uid: e.to.socket.0,
         });
     }
-    edges.sort_by_key(|e| (e.from_node, e.to_node, e.from_uid, e.to_uid));
+    noodles.sort_by_key(|n| (n.from_node, n.to_node, n.from_uid, n.to_uid));
 
     GraphFile {
         version: SCHEMA_VERSION,
         next_socket_uid: graph.peek_next_socket_uid(),
         nodes,
-        edges,
+        noodles,
     }
 }
 
 /// Outcome of loading a graph file. Warnings collect non-fatal issues
-/// (unknown node types, missing edges) so callers can surface them
+/// (unknown node types, missing noodles) so callers can surface them
 /// to the user.
 pub struct LoadResult {
     pub graph: Graph,
@@ -211,7 +211,7 @@ pub struct LoadResult {
 }
 
 /// Reconstruct a `Graph` from a `GraphFile`. Unknown nodes are skipped
-/// with a warning. Edges referencing skipped nodes or unknown sockets are
+/// with a warning. Noodles referencing skipped nodes or unknown sockets are
 /// silently dropped.
 pub fn load_graph(file: GraphFile, registry: &NodeRegistry) -> LoadResult {
     let mut graph = Graph::new();
@@ -270,21 +270,21 @@ pub fn load_graph(file: GraphFile, registry: &NodeRegistry) -> LoadResult {
         id_map.insert(nf.id, new_id);
     }
 
-    for ef in file.edges {
-        let from_node = match id_map.get(&ef.from_node) {
+    for nf in file.noodles {
+        let from_node = match id_map.get(&nf.from_node) {
             Some(n) => *n,
             None => continue,
         };
-        let to_node = match id_map.get(&ef.to_node) {
+        let to_node = match id_map.get(&nf.to_node) {
             Some(n) => *n,
             None => continue,
         };
-        let from_uid = SocketUid(ef.from_uid);
-        let to_uid = SocketUid(ef.to_uid);
+        let from_uid = SocketUid(nf.from_uid);
+        let to_uid = SocketUid(nf.to_uid);
 
         // Validate the sockets still exist on the restored instances.
         // If the file's sockets were lost (e.g. a node type evolved its
-        // socket layout between saves), drop the edge with a warning
+        // socket layout between saves), drop the noodle with a warning
         // rather than refusing to load the whole project.
         let from_ok = graph
             .get(from_node)
@@ -296,15 +296,15 @@ pub fn load_graph(file: GraphFile, registry: &NodeRegistry) -> LoadResult {
             .unwrap_or(false);
         if !from_ok || !to_ok {
             warnings.push(format!(
-                "edge {}:{} → {}:{} dropped — socket uid no longer present",
-                ef.from_node, ef.from_uid, ef.to_node, ef.to_uid
+                "noodle {}:{} → {}:{} dropped — socket uid no longer present",
+                nf.from_node, nf.from_uid, nf.to_node, nf.to_uid
             ));
             continue;
         }
 
-        graph.edges_mut().push(Edge {
-            from: EdgeEndpoint { node: from_node, socket: from_uid },
-            to: EdgeEndpoint { node: to_node, socket: to_uid },
+        graph.noodles_mut().push(Noodle {
+            from: NoodleEndpoint { node: from_node, socket: from_uid },
+            to: NoodleEndpoint { node: to_node, socket: to_uid },
         });
     }
 
@@ -325,7 +325,7 @@ pub fn graph_from_json_str(s: &str, registry: &NodeRegistry) -> Result<LoadResul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::graph::Edge;
+    use crate::graph::graph::Noodle;
     use crate::nodes;
 
     fn registry() -> NodeRegistry {
@@ -347,13 +347,13 @@ mod tests {
 
         let out_a = g.get(a).unwrap().output_by_name("out").unwrap().uid;
         let in_b = g.get(b).unwrap().input_by_name("input").unwrap().uid;
-        g.connect(Edge::new(a, out_a, b, in_b), &reg).unwrap();
+        g.connect(Noodle::new(a, out_a, b, in_b), &reg).unwrap();
 
         let json = graph_to_json_string(&g);
         let LoadResult { graph: g2, warnings } = graph_from_json_str(&json, &reg).unwrap();
         assert!(warnings.is_empty(), "warnings: {:?}", warnings);
         assert_eq!(g2.node_count(), 2);
-        assert_eq!(g2.edge_count(), 1);
+        assert_eq!(g2.noodle_count(), 1);
 
         let box_node = g2
             .nodes()
@@ -363,9 +363,9 @@ mod tests {
             PortValue::Number(w) => assert!((*w - 7.5).abs() < 1e-9),
             _ => panic!(),
         }
-        // Edge UID stable across round-trip.
-        assert_eq!(g2.edges()[0].from.socket, out_a);
-        assert_eq!(g2.edges()[0].to.socket, in_b);
+        // Noodle UID stable across round-trip.
+        assert_eq!(g2.noodles()[0].from.socket, out_a);
+        assert_eq!(g2.noodles()[0].to.socket, in_b);
     }
 
     #[test]
@@ -410,7 +410,7 @@ mod tests {
                 {"id": 0, "type_id": "WidgetFromTheFuture", "position": [0,0], "inputs": [], "outputs": [], "properties": {}},
                 {"id": 1, "type_id": "Box", "position": [10,10], "inputs": [], "outputs": [], "properties": {}}
             ],
-            "edges": []
+            "noodles": []
         }"#;
         let result = graph_from_json_str(json, &reg).unwrap();
         assert_eq!(result.graph.node_count(), 1);

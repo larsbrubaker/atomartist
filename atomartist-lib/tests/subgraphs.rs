@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use atomartist_lib::graph::executor::evaluate_all;
 use atomartist_lib::graph::node::PortValue;
-use atomartist_lib::graph::{Edge, Graph, NodeId};
+use atomartist_lib::graph::{Noodle, Graph, NodeId};
 use atomartist_lib::nodes::{self, register_subgraph};
 use atomartist_lib::registry::NodeRegistry;
 
@@ -26,15 +26,15 @@ fn build_translate_subgraph_template(reg: &NodeRegistry) -> Graph {
     let in_xform = g.get(xform).unwrap().input_by_name("input").unwrap().uid;
     let out_xform = g.get(xform).unwrap().output_by_name("out").unwrap().uid;
     let in_gout = g.get(gout).unwrap().input_by_name("in").unwrap().uid;
-    g.connect(Edge::new(gin, out_gin, xform, in_xform), reg).unwrap();
-    g.connect(Edge::new(xform, out_xform, gout, in_gout), reg).unwrap();
+    g.connect(Noodle::new(gin, out_gin, xform, in_xform), reg).unwrap();
+    g.connect(Noodle::new(xform, out_xform, gout, in_gout), reg).unwrap();
     g
 }
 
 fn connect_by_name(g: &mut Graph, from: NodeId, from_name: &str, to: NodeId, to_name: &str, reg: &NodeRegistry) {
     let from_uid = g.get(from).unwrap().output_by_name(from_name).unwrap().uid;
     let to_uid = g.get(to).unwrap().input_by_name(to_name).unwrap().uid;
-    g.connect(Edge::new(from, from_uid, to, to_uid), reg).unwrap();
+    g.connect(Noodle::new(from, from_uid, to, to_uid), reg).unwrap();
 }
 
 #[test]

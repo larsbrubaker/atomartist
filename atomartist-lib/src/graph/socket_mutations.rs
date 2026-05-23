@@ -11,14 +11,14 @@
 
 use std::sync::Arc;
 
-use crate::graph::graph::{Edge, Graph, GraphError};
+use crate::graph::graph::{Noodle, Graph, GraphError};
 use crate::graph::node::NodeId;
 use crate::graph::socket::{Socket, SocketUid};
 use crate::socket_types::SocketType;
 
 impl Graph {
-    /// Rename a socket's internal name. Edges reference uids, not names,
-    /// so this is purely a label change — no edge mutation needed.
+    /// Rename a socket's internal name. Noodles reference uids, not names,
+    /// so this is purely a label change — no noodle mutation needed.
     pub fn rename_socket(
         &mut self,
         node: NodeId,
@@ -118,13 +118,13 @@ impl Graph {
         Ok(uid)
     }
 
-    /// Remove an input socket and GC every edge touching it. Returns the
-    /// removed socket and the detached edges so undo can restore them.
+    /// Remove an input socket and GC every noodle touching it. Returns the
+    /// removed socket and the detached noodles so undo can restore them.
     pub fn remove_input_socket(
         &mut self,
         node: NodeId,
         socket: SocketUid,
-    ) -> Result<(Socket, Vec<Edge>), GraphError> {
+    ) -> Result<(Socket, Vec<Noodle>), GraphError> {
         let removed = {
             let n = self
                 .nodes
@@ -137,24 +137,24 @@ impl Graph {
                 .ok_or(GraphError::SocketNotFound { node, socket })?;
             n.inputs.remove(idx)
         };
-        let detached: Vec<Edge> = self
-            .edges()
+        let detached: Vec<Noodle> = self
+            .noodles()
             .iter()
             .filter(|e| e.to.node == node && e.to.socket == socket)
             .copied()
             .collect();
-        self.edges_mut()
+        self.noodles_mut()
             .retain(|e| !(e.to.node == node && e.to.socket == socket));
         self.mark_dirty_subtree(node);
         Ok((removed, detached))
     }
 
-    /// Remove an output socket and GC every edge touching it.
+    /// Remove an output socket and GC every noodle touching it.
     pub fn remove_output_socket(
         &mut self,
         node: NodeId,
         socket: SocketUid,
-    ) -> Result<(Socket, Vec<Edge>), GraphError> {
+    ) -> Result<(Socket, Vec<Noodle>), GraphError> {
         let removed = {
             let n = self
                 .nodes
@@ -170,13 +170,13 @@ impl Graph {
             n.cached_outputs.remove(&socket);
             removed
         };
-        let detached: Vec<Edge> = self
-            .edges()
+        let detached: Vec<Noodle> = self
+            .noodles()
             .iter()
             .filter(|e| e.from.node == node && e.from.socket == socket)
             .copied()
             .collect();
-        self.edges_mut()
+        self.noodles_mut()
             .retain(|e| !(e.from.node == node && e.from.socket == socket));
         for e in &detached {
             self.mark_dirty_subtree(e.to.node);
@@ -186,7 +186,7 @@ impl Graph {
 
     /// Permute a node's input sockets. `permutation[i] = j` means the
     /// new slot at position `i` is the previous slot at position `j`.
-    /// Edges are unaffected — they reference uids, which travel with the
+    /// Noodles are unaffected — they reference uids, which travel with the
     /// socket.
     pub fn reorder_input_sockets(
         &mut self,
@@ -215,15 +215,15 @@ impl Graph {
         Ok(())
     }
 
-    /// Every edge touching the given (node, socket) — either as source or
+    /// Every noodle touching the given (node, socket) — either as source or
     /// target. Convenience for hooks that need to look up "is this source
     /// already wired?" or "what's connected to this input?".
-    pub fn edges_touching(
+    pub fn noodles_touching(
         &self,
         node: NodeId,
         socket: SocketUid,
-    ) -> impl Iterator<Item = &Edge> {
-        self.edges().iter().filter(move |e| {
+    ) -> impl Iterator<Item = &Noodle> {
+        self.noodles().iter().filter(move |e| {
             (e.from.node == node && e.from.socket == socket)
                 || (e.to.node == node && e.to.socket == socket)
         })

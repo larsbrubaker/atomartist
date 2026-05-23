@@ -1,6 +1,6 @@
-//! Graph data structure — nodes, edges, mutation API.
+//! Graph data structure — nodes, noodles, mutation API.
 //!
-//! `Graph` owns a `HashMap<NodeId, NodeInstance>`, a `Vec<Edge>`, and the
+//! `Graph` owns a `HashMap<NodeId, NodeInstance>`, a `Vec<Noodle>`, and the
 //! shared [`SocketUidAlloc`] that hands out stable socket identifiers.
 //! It is the source-of-truth for a project; the executor reads it, undo
 //! commands mutate it, and the UI displays it.
@@ -20,18 +20,18 @@ use crate::graph::socket::{SocketUid, SocketUidAlloc};
 use crate::registry::{ConnectCtx, DisconnectCtx, NodeRegistry, ValidateCtx};
 use crate::socket_types::SocketType;
 
-/// Identifier for one socket endpoint on an edge.
+/// Identifier for one socket endpoint on a noodle.
 ///
 /// `(node, socket)` — where `socket` is the stable [`SocketUid`] allocated
 /// when the socket was created. Names and types may change; this pair does
 /// not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct EdgeEndpoint {
+pub struct NoodleEndpoint {
     pub node: NodeId,
     pub socket: SocketUid,
 }
 
-impl EdgeEndpoint {
+impl NoodleEndpoint {
     pub fn new(node: NodeId, socket: SocketUid) -> Self {
         Self { node, socket }
     }
@@ -39,12 +39,12 @@ impl EdgeEndpoint {
 
 /// One directed connection from an output socket to an input socket.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Edge {
-    pub from: EdgeEndpoint,
-    pub to: EdgeEndpoint,
+pub struct Noodle {
+    pub from: NoodleEndpoint,
+    pub to: NoodleEndpoint,
 }
 
-impl Edge {
+impl Noodle {
     pub fn new(
         from_node: NodeId,
         from_socket: SocketUid,
@@ -52,8 +52,8 @@ impl Edge {
         to_socket: SocketUid,
     ) -> Self {
         Self {
-            from: EdgeEndpoint::new(from_node, from_socket),
-            to: EdgeEndpoint::new(to_node, to_socket),
+            from: NoodleEndpoint::new(from_node, from_socket),
+            to: NoodleEndpoint::new(to_node, to_socket),
         }
     }
 }
@@ -65,13 +65,13 @@ pub enum GraphError {
     SocketNotFound { node: NodeId, socket: SocketUid },
     UnknownNodeType { type_id: String },
     TypeMismatch { expected: SocketType, actual: SocketType },
-    /// The edge would create a cycle in the DAG.
+    /// The noodle would create a cycle in the DAG.
     CycleDetected,
-    /// Connecting would leave the input with two incoming edges; the caller
+    /// Connecting would leave the input with two incoming noodles; the caller
     /// must explicitly disconnect the existing one first.
     InputAlreadyConnected,
     /// The target node's `validate_input_connection` hook rejected the
-    /// edge. The wrapped string is the human-readable reason from the hook.
+    /// noodle. The wrapped string is the human-readable reason from the hook.
     ConnectionRejected(String),
 }
 
@@ -101,7 +101,7 @@ impl std::error::Error for GraphError {}
 #[derive(Default)]
 pub struct Graph {
     pub(crate) nodes: HashMap<NodeId, NodeInstance>,
-    edges: Vec<Edge>,
+    noodles: Vec<Noodle>,
     next_id: AtomicU64,
     socket_alloc: SocketUidAlloc,
 }
@@ -149,19 +149,19 @@ impl Graph {
         self.nodes.len()
     }
 
-    pub fn edge_count(&self) -> usize {
-        self.edges.len()
+    pub fn noodle_count(&self) -> usize {
+        self.noodles.len()
     }
 
-    pub fn edges(&self) -> &[Edge] {
-        &self.edges
+    pub fn noodles(&self) -> &[Noodle] {
+        &self.noodles
     }
 
-    /// Direct mutable access to the edge list. Used by undo commands that
-    /// need to restore exact edges without re-validating (the edge was
+    /// Direct mutable access to the noodle list. Used by undo commands that
+    /// need to restore exact noodles without re-validating (the noodle was
     /// known-valid when the command was originally created).
-    pub fn edges_mut(&mut self) -> &mut Vec<Edge> {
-        &mut self.edges
+    pub fn noodles_mut(&mut self) -> &mut Vec<Noodle> {
+        &mut self.noodles
     }
 
     pub fn get(&self, id: NodeId) -> Option<&NodeInstance> {
@@ -233,12 +233,12 @@ impl Graph {
         Ok(())
     }
 
-    /// Remove a node and any edges referencing it. Returns the removed node
-    /// instance plus the removed edges so undo can restore them.
-    pub fn remove_node(&mut self, id: NodeId) -> Result<(NodeInstance, Vec<Edge>), GraphError> {
+    /// Remove a node and any noodles referencing it. Returns the removed node
+    /// instance plus the removed noodles so undo can restore them.
+    pub fn remove_node(&mut self, id: NodeId) -> Result<(NodeInstance, Vec<Noodle>), GraphError> {
         let node = self.nodes.remove(&id).ok_or(GraphError::NodeNotFound(id))?;
         let mut detached = Vec::new();
-        self.edges.retain(|e| {
+        self.noodles.retain(|e| {
             if e.from.node == id || e.to.node == id {
                 detached.push(*e);
                 false
@@ -262,16 +262,16 @@ impl Graph {
     ///   - both sockets are present on their node instances (by uid)
     ///   - socket types are compatible
     ///   - the target node's `validate_input_connection` hook allows it
-    ///   - the input has no existing incoming edge
+    ///   - the input has no existing incoming noodle
     ///   - the resulting graph is acyclic
     ///
-    /// On success, inserts the edge, marks the destination subtree dirty,
+    /// On success, inserts the noodle, marks the destination subtree dirty,
     /// and invokes the target type's `on_input_connected` hook (which may
     /// further mutate sockets via the granular helpers below).
-    pub fn connect(&mut self, edge: Edge, registry: &NodeRegistry) -> Result<(), GraphError> {
+    pub fn connect(&mut self, noodle: Noodle, registry: &NodeRegistry) -> Result<(), GraphError> {
         // Existence + socket validation via uid lookup.
-        let from_type = self.lookup_output_socket_type(&edge.from)?;
-        let to_type = self.lookup_input_socket_type(&edge.to)?;
+        let from_type = self.lookup_output_socket_type(&noodle.from)?;
+        let to_type = self.lookup_input_socket_type(&noodle.to)?;
         if !from_type.is_compatible_with(to_type) {
             return Err(GraphError::TypeMismatch {
                 expected: to_type,
@@ -279,21 +279,21 @@ impl Graph {
             });
         }
 
-        // Single-incoming-edge invariant on the destination input.
-        if self.edges.iter().any(|e| e.to == edge.to) {
+        // Single-incoming-noodle invariant on the destination input.
+        if self.noodles.iter().any(|e| e.to == noodle.to) {
             return Err(GraphError::InputAlreadyConnected);
         }
 
-        // Cycle check — a path from edge.to.node back to edge.from.node would
-        // close a loop once this edge is added.
-        if self.has_path(edge.to.node, edge.from.node) {
+        // Cycle check — a path from noodle.to.node back to noodle.from.node would
+        // close a loop once this noodle is added.
+        if self.has_path(noodle.to.node, noodle.from.node) {
             return Err(GraphError::CycleDetected);
         }
 
         // Pre-connect veto hook on the target type.
         let target_type_id = self
-            .get(edge.to.node)
-            .ok_or(GraphError::NodeNotFound(edge.to.node))?
+            .get(noodle.to.node)
+            .ok_or(GraphError::NodeNotFound(noodle.to.node))?
             .type_id
             .clone();
         let target_def = registry
@@ -303,51 +303,51 @@ impl Graph {
         {
             let validate = ValidateCtx {
                 graph: self,
-                this_node: edge.to.node,
-                target_socket: edge.to.socket,
-                source_node: edge.from.node,
-                source_socket: edge.from.socket,
+                this_node: noodle.to.node,
+                target_socket: noodle.to.socket,
+                source_node: noodle.from.node,
+                source_socket: noodle.from.socket,
             };
             if let Err(why) = target_def.validate_input_connection(&validate) {
                 return Err(GraphError::ConnectionRejected(why));
             }
         }
 
-        self.mark_dirty_subtree(edge.to.node);
-        self.edges.push(edge);
+        self.mark_dirty_subtree(noodle.to.node);
+        self.noodles.push(noodle);
 
-        // Post-connect behavior hook. Runs after the edge is in place so
-        // the hook can inspect the live graph (`graph.edges()` already
-        // includes the new edge).
+        // Post-connect behavior hook. Runs after the noodle is in place so
+        // the hook can inspect the live graph (`graph.noodles()` already
+        // includes the new noodle).
         let mut ctx = ConnectCtx {
             graph: self,
-            this_node: edge.to.node,
-            target_socket: edge.to.socket,
-            source_node: edge.from.node,
-            source_socket: edge.from.socket,
+            this_node: noodle.to.node,
+            target_socket: noodle.to.socket,
+            source_node: noodle.from.node,
+            source_socket: noodle.from.socket,
         };
         target_def.on_input_connected(&mut ctx);
 
         Ok(())
     }
 
-    /// Remove an existing edge by exact match. No-op + `Ok(false)` if not
+    /// Remove an existing noodle by exact match. No-op + `Ok(false)` if not
     /// present. Invokes `on_input_disconnected` on the target type after
-    /// the edge is gone, so the hook can collapse the now-orphan slot.
+    /// the noodle is gone, so the hook can collapse the now-orphan slot.
     pub fn disconnect(
         &mut self,
-        edge: &Edge,
+        noodle: &Noodle,
         registry: &NodeRegistry,
     ) -> Result<bool, GraphError> {
-        let len_before = self.edges.len();
-        self.edges.retain(|e| e != edge);
-        let removed = self.edges.len() < len_before;
+        let len_before = self.noodles.len();
+        self.noodles.retain(|n| n != noodle);
+        let removed = self.noodles.len() < len_before;
         if !removed {
             return Ok(false);
         }
-        self.mark_dirty_subtree(edge.to.node);
+        self.mark_dirty_subtree(noodle.to.node);
 
-        let target_type_id = match self.get(edge.to.node) {
+        let target_type_id = match self.get(noodle.to.node) {
             Some(n) => n.type_id.clone(),
             // Node already gone — nothing to hook into.
             None => return Ok(true),
@@ -358,14 +358,14 @@ impl Graph {
         };
         let mut ctx = DisconnectCtx {
             graph: self,
-            this_node: edge.to.node,
-            target_socket: edge.to.socket,
+            this_node: noodle.to.node,
+            target_socket: noodle.to.socket,
         };
         target_def.on_input_disconnected(&mut ctx);
         Ok(true)
     }
 
-    /// Returns true if there is a directed path of edges from `start` to
+    /// Returns true if there is a directed path of noodles from `start` to
     /// `target` (used for cycle detection in `connect`).
     pub fn has_path(&self, start: NodeId, target: NodeId) -> bool {
         if start == target {
@@ -375,7 +375,7 @@ impl Graph {
         let mut visited = std::collections::HashSet::new();
         visited.insert(start);
         while let Some(cur) = stack.pop() {
-            for e in self.edges.iter().filter(|e| e.from.node == cur) {
+            for e in self.noodles.iter().filter(|e| e.from.node == cur) {
                 if e.to.node == target {
                     return true;
                 }
@@ -399,10 +399,10 @@ impl Graph {
                 n.dirty = true;
             }
             let downstream: Vec<NodeId> = self
-                .edges
+                .noodles
                 .iter()
-                .filter(|e| e.from.node == cur)
-                .map(|e| e.to.node)
+                .filter(|n| n.from.node == cur)
+                .map(|n| n.to.node)
                 .collect();
             stack.extend(downstream);
         }
@@ -434,13 +434,13 @@ impl Graph {
     }
 
     // Granular socket-level mutations (rename_socket, relabel_socket,
-    // retype_socket, append/remove/reorder, edges_touching) live in
+    // retype_socket, append/remove/reorder, noodles_touching) live in
     // sibling module `socket_mutations` to keep this file under the
     // project-wide 800-line cap.
 
     fn lookup_output_socket_type(
         &self,
-        endpoint: &EdgeEndpoint,
+        endpoint: &NoodleEndpoint,
     ) -> Result<SocketType, GraphError> {
         let node = self
             .nodes
@@ -456,7 +456,7 @@ impl Graph {
 
     fn lookup_input_socket_type(
         &self,
-        endpoint: &EdgeEndpoint,
+        endpoint: &NoodleEndpoint,
     ) -> Result<SocketType, GraphError> {
         let node = self
             .nodes
@@ -536,9 +536,9 @@ mod tests {
         let id = g.allocate_id();
         g.add_node(NodeInstance::new(id, "Const", [0.0, 0.0])).unwrap();
         assert_eq!(g.node_count(), 1);
-        let (removed, edges) = g.remove_node(id).unwrap();
+        let (removed, noodles) = g.remove_node(id).unwrap();
         assert_eq!(removed.id, id);
-        assert!(edges.is_empty());
+        assert!(noodles.is_empty());
         assert_eq!(g.node_count(), 0);
     }
 
@@ -552,13 +552,13 @@ mod tests {
         let in_a = uid_of_input(&g, b, "a");
 
         // Wrong uid → SocketNotFound
-        let e = Edge::new(a, SocketUid(999), b, in_a);
+        let e = Noodle::new(a, SocketUid(999), b, in_a);
         assert!(matches!(g.connect(e, &reg), Err(GraphError::SocketNotFound { .. })));
 
         // Right wiring works
-        let ok = Edge::new(a, out_a, b, in_a);
+        let ok = Noodle::new(a, out_a, b, in_a);
         g.connect(ok, &reg).unwrap();
-        assert_eq!(g.edge_count(), 1);
+        assert_eq!(g.noodle_count(), 1);
 
         // Duplicate input connection rejected
         assert_eq!(
@@ -577,10 +577,10 @@ mod tests {
         let out_b = uid_of_output(&g, b, "out");
         let in_a_b = uid_of_input(&g, b, "a");
         let in_a_a = uid_of_input(&g, a, "a");
-        g.connect(Edge::new(a, out_a, b, in_a_b), &reg).unwrap();
+        g.connect(Noodle::new(a, out_a, b, in_a_b), &reg).unwrap();
         // b → a would close a cycle
         assert_eq!(
-            g.connect(Edge::new(b, out_b, a, in_a_a), &reg),
+            g.connect(Noodle::new(b, out_b, a, in_a_a), &reg),
             Err(GraphError::CycleDetected),
         );
     }
@@ -593,10 +593,10 @@ mod tests {
         let b = g.add_new_node("Add", [0.0, 0.0], &reg).unwrap();
         let out_a = uid_of_output(&g, a, "out");
         let in_a_b = uid_of_input(&g, b, "a");
-        g.connect(Edge::new(a, out_a, b, in_a_b), &reg).unwrap();
-        let (_, edges) = g.remove_node(a).unwrap();
-        assert_eq!(edges.len(), 1);
-        assert_eq!(g.edge_count(), 0);
+        g.connect(Noodle::new(a, out_a, b, in_a_b), &reg).unwrap();
+        let (_, noodles) = g.remove_node(a).unwrap();
+        assert_eq!(noodles.len(), 1);
+        assert_eq!(g.noodle_count(), 0);
     }
 
     #[test]
@@ -610,13 +610,13 @@ mod tests {
 
         let out_a = uid_of_output(&g, a, "out");
         let in_a_b = uid_of_input(&g, b, "a");
-        g.connect(Edge::new(a, out_a, b, in_a_b), &reg).unwrap();
-        assert!(g.get(b).unwrap().dirty, "destination of new edge must be dirty");
+        g.connect(Noodle::new(a, out_a, b, in_a_b), &reg).unwrap();
+        assert!(g.get(b).unwrap().dirty, "destination of new noodle must be dirty");
         assert!(!g.get(c).unwrap().dirty);
 
         let out_b = uid_of_output(&g, b, "out");
         let in_a_c = uid_of_input(&g, c, "a");
-        g.connect(Edge::new(b, out_b, c, in_a_c), &reg).unwrap();
+        g.connect(Noodle::new(b, out_b, c, in_a_c), &reg).unwrap();
         assert!(g.get(c).unwrap().dirty);
     }
 
@@ -628,12 +628,12 @@ mod tests {
         let b = g.add_new_node("Add", [0.0, 0.0], &reg).unwrap();
         let out_a = uid_of_output(&g, a, "out");
         let in_a_b = uid_of_input(&g, b, "a");
-        g.connect(Edge::new(a, out_a, b, in_a_b), &reg).unwrap();
+        g.connect(Noodle::new(a, out_a, b, in_a_b), &reg).unwrap();
         g.rename_socket(b, in_a_b, "renamed_a").unwrap();
-        // Edge still resolves — uid hasn't changed.
+        // Noodle still resolves — uid hasn't changed.
         let resolved = g.get(b).unwrap().input_by_name("renamed_a").unwrap();
         assert_eq!(resolved.uid, in_a_b);
-        assert_eq!(g.edges().len(), 1);
+        assert_eq!(g.noodles().len(), 1);
     }
 
     #[test]
@@ -644,11 +644,11 @@ mod tests {
         let b = g.add_new_node("Add", [0.0, 0.0], &reg).unwrap();
         let out_a = uid_of_output(&g, a, "out");
         let in_a_b = uid_of_input(&g, b, "a");
-        g.connect(Edge::new(a, out_a, b, in_a_b), &reg).unwrap();
+        g.connect(Noodle::new(a, out_a, b, in_a_b), &reg).unwrap();
         let (removed, detached) = g.remove_input_socket(b, in_a_b).unwrap();
         assert_eq!(removed.uid, in_a_b);
         assert_eq!(detached.len(), 1);
-        assert_eq!(g.edge_count(), 0);
+        assert_eq!(g.noodle_count(), 0);
     }
 
     #[test]
@@ -660,14 +660,14 @@ mod tests {
         let out_a = uid_of_output(&g, a, "out");
         let in_a_b = uid_of_input(&g, b, "a");
         let in_b_b = uid_of_input(&g, b, "b");
-        g.connect(Edge::new(a, out_a, b, in_a_b), &reg).unwrap();
+        g.connect(Noodle::new(a, out_a, b, in_a_b), &reg).unwrap();
 
         // Swap inputs 0 and 1 on b.
         g.reorder_input_sockets(b, &[1, 0]).unwrap();
         let nb = g.get(b).unwrap();
         assert_eq!(nb.inputs[0].uid, in_b_b);
         assert_eq!(nb.inputs[1].uid, in_a_b);
-        // Edge still references in_a_b — unaffected by reorder.
-        assert_eq!(g.edges()[0].to.socket, in_a_b);
+        // Noodle still references in_a_b — unaffected by reorder.
+        assert_eq!(g.noodles()[0].to.socket, in_a_b);
     }
 }

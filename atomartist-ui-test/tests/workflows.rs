@@ -20,11 +20,11 @@ fn save_then_load_round_trips_starter_graph_topology() {
     };
     let result = graph_from_json_str(&json, &h.state().registry).expect("parse");
     let nodes_before = h.state().graph.lock().unwrap().nodes().count();
-    let edges_before = h.state().graph.lock().unwrap().edges().len();
+    let noodles_before = h.state().graph.lock().unwrap().noodles().len();
     let nodes_after = result.graph.nodes().count();
-    let edges_after = result.graph.edges().len();
+    let noodles_after = result.graph.noodles().len();
     assert_eq!(nodes_before, nodes_after);
-    assert_eq!(edges_before, edges_after);
+    assert_eq!(noodles_before, noodles_after);
 }
 
 #[test]
@@ -36,7 +36,7 @@ fn save_then_load_atmr_round_trips_through_app_state() {
     // preserves node + edge counts.
     let h = TestHarness::with_starter_graph();
     let nodes_before = h.state().graph.lock().unwrap().nodes().count();
-    let edges_before = h.state().graph.lock().unwrap().edges().len();
+    let noodles_before = h.state().graph.lock().unwrap().noodles().len();
 
     // Unique name avoids cross-test interference when run in parallel.
     let path = std::env::temp_dir().join(format!(
@@ -66,9 +66,9 @@ fn save_then_load_atmr_round_trips_through_app_state() {
         .load_graph_from_path(&path)
         .expect("load_graph_from_path");
     let nodes_after = h.state().graph.lock().unwrap().nodes().count();
-    let edges_after = h.state().graph.lock().unwrap().edges().len();
+    let noodles_after = h.state().graph.lock().unwrap().noodles().len();
     assert_eq!(nodes_before, nodes_after);
-    assert_eq!(edges_before, edges_after);
+    assert_eq!(noodles_before, noodles_after);
 
     let _ = std::fs::remove_file(path);
 }

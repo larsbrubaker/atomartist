@@ -15,7 +15,7 @@
 //! socket layout (`n.inputs`, `n.outputs`). The adapter reads sockets
 //! from the instance — not from `NodeDef::instantiate` — so dynamic
 //! nodes (Output, eventually Combine) project their per-instance
-//! configuration into the canvas correctly. Edges are referenced by
+//! configuration into the canvas correctly. Noodles are referenced by
 //! [`SocketUid`] in the graph, but the editor speaks names; the
 //! adapter resolves names ↔ uids on each crossing.
 
@@ -24,7 +24,7 @@ use std::sync::Arc;
 use agg_gui::Color;
 use agg_gui_node_editor as ne;
 
-use atomartist_lib::graph::graph::{Edge, GraphError};
+use atomartist_lib::graph::graph::{Noodle, GraphError};
 use atomartist_lib::graph::node::{NodeId as DomainNodeId, PortValue};
 use atomartist_lib::graph::socket::SocketUid;
 use atomartist_lib::registry::EditorKind;
@@ -177,27 +177,27 @@ impl ne::NodeGraphModel for AppStateModel {
             .collect()
     }
 
-    fn edges(&self) -> Vec<ne::EdgeView> {
+    fn noodles(&self) -> Vec<ne::NoodleView> {
         let g = self.state.graph.lock().unwrap();
-        g.edges()
+        g.noodles()
             .iter()
-            .filter_map(|e| {
+            .filter_map(|noodle| {
                 // Resolve uids back to socket names so the editor sees
-                // edges in name form (matching its SocketView output).
+                // noodles in name form (matching its SocketView output).
                 let from_name = g
-                    .get(e.from.node)
-                    .and_then(|n| n.output_by_uid(e.from.socket))?
+                    .get(noodle.from.node)
+                    .and_then(|n| n.output_by_uid(noodle.from.socket))?
                     .name
                     .to_string();
                 let to_name = g
-                    .get(e.to.node)
-                    .and_then(|n| n.input_by_uid(e.to.socket))?
+                    .get(noodle.to.node)
+                    .and_then(|n| n.input_by_uid(noodle.to.socket))?
                     .name
                     .to_string();
-                Some(ne::EdgeView {
-                    from_node: Self::to_ne(e.from.node),
+                Some(ne::NoodleView {
+                    from_node: Self::to_ne(noodle.from.node),
                     from_socket: from_name,
-                    to_node: Self::to_ne(e.to.node),
+                    to_node: Self::to_ne(noodle.to.node),
                     to_socket: to_name,
                 })
             })
@@ -277,13 +277,13 @@ impl ne::NodeGraphModel for AppStateModel {
         self.state.schedule_evaluate();
     }
 
-    fn try_add_edge(
+    fn try_add_noodle(
         &mut self,
         from_node: ne::NodeId,
         from_socket: &str,
         to_node: ne::NodeId,
         to_socket: &str,
-    ) -> ne::EdgeResult {
+    ) -> ne::NoodleResult {
         // Resolve name → uid on the live instance. Names may be dynamic
         // (Output's slot names follow source-output names) so we always
         // walk the instance's own socket list.
@@ -291,34 +291,34 @@ impl ne::NodeGraphModel for AppStateModel {
         let to_uid = self.lookup_input_uid(Self::from_ne(to_node), to_socket);
         let (from_uid, to_uid) = match (from_uid, to_uid) {
             (Some(a), Some(b)) => (a, b),
-            _ => return ne::EdgeResult::Rejected,
+            _ => return ne::NoodleResult::Rejected,
         };
-        let edge = Edge::new(Self::from_ne(from_node), from_uid, Self::from_ne(to_node), to_uid);
+        let noodle = Noodle::new(Self::from_ne(from_node), from_uid, Self::from_ne(to_node), to_uid);
         let mut g = self.state.graph.lock().unwrap();
-        let result = match g.connect(edge, &self.state.registry) {
-            Ok(()) => ne::EdgeResult::Connected,
+        let result = match g.connect(noodle, &self.state.registry) {
+            Ok(()) => ne::NoodleResult::Connected,
             Err(GraphError::InputAlreadyConnected) => {
-                // Replacement semantics: drop the existing edge to the
+                // Replacement semantics: drop the existing noodle to the
                 // input, then retry.
-                let to_remove: Vec<Edge> = g
-                    .edges()
+                let to_remove: Vec<Noodle> = g
+                    .noodles()
                     .iter()
-                    .filter(|e| e.to == edge.to)
+                    .filter(|n| n.to == noodle.to)
                     .copied()
                     .collect();
-                for e in to_remove {
-                    let _ = g.disconnect(&e, &self.state.registry);
+                for n in to_remove {
+                    let _ = g.disconnect(&n, &self.state.registry);
                 }
-                if g.connect(edge, &self.state.registry).is_ok() {
-                    ne::EdgeResult::Replaced
+                if g.connect(noodle, &self.state.registry).is_ok() {
+                    ne::NoodleResult::Replaced
                 } else {
-                    ne::EdgeResult::Rejected
+                    ne::NoodleResult::Rejected
                 }
             }
-            Err(_) => ne::EdgeResult::Rejected,
+            Err(_) => ne::NoodleResult::Rejected,
         };
         drop(g);
-        if matches!(result, ne::EdgeResult::Connected | ne::EdgeResult::Replaced) {
+        if matches!(result, ne::NoodleResult::Connected | ne::NoodleResult::Replaced) {
             self.state.schedule_evaluate();
         }
         result

@@ -3,7 +3,7 @@
 //! Sockets live on the [`NodeInstance`](super::node::NodeInstance), not on
 //! the type definition. Each socket carries a [`SocketUid`] — a stable,
 //! graph-unique identifier that survives renames, type changes, and
-//! reorderings. Edges reference sockets exclusively by `(NodeId, SocketUid)`,
+//! reorderings. Noodles reference sockets exclusively by `(NodeId, SocketUid)`,
 //! so user-visible mutations (renaming a slot, dragging the row order,
 //! adopting a source's type on connect) leave noodles intact.
 //!
@@ -19,9 +19,9 @@ use crate::socket_types::SocketType;
 ///
 /// Allocated monotonically by the graph. Two sockets that share a `name`
 /// never share a `SocketUid`; conversely, a socket's uid is preserved
-/// across renames, type changes, and reorder. Edges reference uids, so
+/// across renames, type changes, and reorder. Noodles reference uids, so
 /// renames don't invalidate connections — the lesson from NodeDesigner
-/// where name-keyed edges forced socket churn to walk every link.
+/// where name-keyed noodles forced socket churn to walk every link.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SocketUid(pub u64);
 
@@ -46,7 +46,7 @@ pub struct Socket {
     pub socket_type: SocketType,
     /// True when this socket is allowed to be unconnected. The executor
     /// passes `PortValue::None` if an optional input has no incoming
-    /// edge.
+    /// noodle.
     pub optional: bool,
 }
 

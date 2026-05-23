@@ -1,12 +1,12 @@
 //! Node-level data: identifiers, port values, node instances.
 //!
-//! A `Graph` is composed of `NodeInstance`s wired together by edges. Each
+//! A `Graph` is composed of `NodeInstance`s wired together by noodles. Each
 //! node owns its socket layout (`inputs`, `outputs`) and its property
 //! values; the type's `NodeDef` is the factory that mints the initial
 //! socket list and exposes connection-time behavior, but it does not
 //! answer "what sockets do I have?" once the instance exists.
 //!
-//! The `PortValue` enum is the lingua franca of the graph — every edge
+//! The `PortValue` enum is the lingua franca of the graph — every noodle
 //! carries one, and every property is one. Variants that wrap heap data
 //! (`Path2d`, `Geometry3d`, `StringVal`) use `Arc` so downstream nodes share
 //! upstream outputs without copying.
@@ -23,12 +23,12 @@ use crate::socket_types::SocketType;
 /// Stable identifier for a node within a single `Graph`.
 ///
 /// Allocated monotonically; never reused even after a node is removed (so
-/// undo commands can re-add a removed node and existing edges referencing
+/// undo commands can re-add a removed node and existing noodles referencing
 /// the old id remain valid for re-connection).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NodeId(pub u64);
 
-/// Value flowing along an edge or held in a property.
+/// Value flowing along a noodle or held in a property.
 ///
 /// Heap-backed variants are `Arc`-wrapped so cloning a `PortValue` is cheap
 /// and downstream nodes share the producer's allocation. `PartialEq` on
@@ -109,7 +109,7 @@ pub struct NodeInstance {
     /// Position in canvas-space (Y-up — agg-gui convention).
     pub position: [f64; 2],
     /// Input sockets, in display order. Order is meaningful (drag-reorder
-    /// is a Vec permutation). Edges reference these by `Socket::uid`.
+    /// is a Vec permutation). Noodles reference these by `Socket::uid`.
     pub inputs: Vec<Socket>,
     /// Output sockets, in display order. Same ordering rules as `inputs`.
     pub outputs: Vec<Socket>,

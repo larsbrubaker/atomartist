@@ -183,7 +183,7 @@ pub fn fresh_state_with_builtins() -> AppState {
 /// NodeDesigner reference scene) and runs the first evaluation so the
 /// 3D viewport shows a rounded extruded plate on app start.
 pub fn fresh_state_with_starter_graph() -> AppState {
-    use atomartist_lib::graph::graph::Edge;
+    use atomartist_lib::graph::graph::Noodle;
     let state = fresh_state_with_builtins();
     let extrude_id = {
         let mut g = state.graph.lock().unwrap();
@@ -203,7 +203,7 @@ pub fn fresh_state_with_starter_graph() -> AppState {
              to_name: &str| {
                 let from_uid = g.get(from).unwrap().output_by_name(from_name).unwrap().uid;
                 let to_uid = g.get(to).unwrap().input_by_name(to_name).unwrap().uid;
-                let _ = g.connect(Edge::new(from, from_uid, to, to_uid), &state.registry);
+                let _ = g.connect(Noodle::new(from, from_uid, to, to_uid), &state.registry);
             };
         connect_by_name(&mut g, rect, "out", inflate, "input");
         connect_by_name(&mut g, inflate, "out", extrude, "Paths");

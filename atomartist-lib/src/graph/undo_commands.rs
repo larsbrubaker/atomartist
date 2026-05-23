@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use agg_gui::undo::UndoRedoCommand;
 
-use crate::graph::graph::{Edge, Graph};
+use crate::graph::graph::{Noodle, Graph};
 use crate::graph::node::{NodeId, NodeInstance, PortValue};
 use crate::registry::NodeRegistry;
 
@@ -49,12 +49,12 @@ impl UndoRedoCommand for AddNodeCmd {
     }
 }
 
-/// Remove a node, capturing the node + any incident edges so undo can
+/// Remove a node, capturing the node + any incident noodles so undo can
 /// restore them exactly.
 pub struct RemoveNodeCmd {
     graph: Arc<Mutex<Graph>>,
     id: NodeId,
-    snapshot: Option<(NodeInstance, Vec<Edge>)>,
+    snapshot: Option<(NodeInstance, Vec<Noodle>)>,
 }
 
 impl RemoveNodeCmd {
@@ -72,27 +72,27 @@ impl UndoRedoCommand for RemoveNodeCmd {
         }
     }
     fn undo_it(&mut self) {
-        if let Some((node, edges)) = self.snapshot.take() {
+        if let Some((node, noodles)) = self.snapshot.take() {
             let mut g = self.graph.lock().unwrap();
             let _ = g.add_node(node);
-            for e in edges {
-                g.edges_mut().push(e);
+            for n in noodles {
+                g.noodles_mut().push(n);
             }
         }
     }
 }
 
-/// Connect two sockets. Stores the edge so undo can disconnect it precisely.
+/// Connect two sockets. Stores the noodle so undo can disconnect it precisely.
 pub struct ConnectCmd {
     graph: Arc<Mutex<Graph>>,
     registry: Arc<NodeRegistry>,
-    edge: Edge,
+    noodle: Noodle,
     succeeded: bool,
 }
 
 impl ConnectCmd {
-    pub fn new(graph: Arc<Mutex<Graph>>, registry: Arc<NodeRegistry>, edge: Edge) -> Self {
-        Self { graph, registry, edge, succeeded: false }
+    pub fn new(graph: Arc<Mutex<Graph>>, registry: Arc<NodeRegistry>, noodle: Noodle) -> Self {
+        Self { graph, registry, noodle, succeeded: false }
     }
 }
 
@@ -100,12 +100,12 @@ impl UndoRedoCommand for ConnectCmd {
     fn name(&self) -> &str { "Connect" }
     fn do_it(&mut self) {
         let mut g = self.graph.lock().unwrap();
-        self.succeeded = g.connect(self.edge, &self.registry).is_ok();
+        self.succeeded = g.connect(self.noodle, &self.registry).is_ok();
     }
     fn undo_it(&mut self) {
         if self.succeeded {
             let mut g = self.graph.lock().unwrap();
-            let _ = g.disconnect(&self.edge, &self.registry);
+            let _ = g.disconnect(&self.noodle, &self.registry);
         }
     }
 }
@@ -113,13 +113,13 @@ impl UndoRedoCommand for ConnectCmd {
 pub struct DisconnectCmd {
     graph: Arc<Mutex<Graph>>,
     registry: Arc<NodeRegistry>,
-    edge: Edge,
+    noodle: Noodle,
     succeeded: bool,
 }
 
 impl DisconnectCmd {
-    pub fn new(graph: Arc<Mutex<Graph>>, registry: Arc<NodeRegistry>, edge: Edge) -> Self {
-        Self { graph, registry, edge, succeeded: false }
+    pub fn new(graph: Arc<Mutex<Graph>>, registry: Arc<NodeRegistry>, noodle: Noodle) -> Self {
+        Self { graph, registry, noodle, succeeded: false }
     }
 }
 
@@ -127,15 +127,15 @@ impl UndoRedoCommand for DisconnectCmd {
     fn name(&self) -> &str { "Disconnect" }
     fn do_it(&mut self) {
         let mut g = self.graph.lock().unwrap();
-        self.succeeded = g.disconnect(&self.edge, &self.registry).unwrap_or(false);
+        self.succeeded = g.disconnect(&self.noodle, &self.registry).unwrap_or(false);
     }
     fn undo_it(&mut self) {
         if self.succeeded {
             let mut g = self.graph.lock().unwrap();
-            // Re-insert directly; bypasses validation since the edge was
+            // Re-insert directly; bypasses validation since the noodle was
             // valid at original-do time.
-            g.edges_mut().push(self.edge);
-            g.mark_dirty_subtree(self.edge.to.node);
+            g.noodles_mut().push(self.noodle);
+            g.mark_dirty_subtree(self.noodle.to.node);
         }
     }
 }
@@ -243,7 +243,7 @@ impl UndoRedoCommand for BatchCmd {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::graph::Edge;
+    use crate::graph::graph::Noodle;
     use crate::graph::socket::SocketUidAlloc;
     use crate::registry::{
         EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs,
@@ -324,16 +324,16 @@ mod tests {
         buf.add_and_do(Box::new(ConnectCmd::new(
             g.clone(),
             reg.clone(),
-            Edge::new(a, out_a, b, in_a_b),
+            Noodle::new(a, out_a, b, in_a_b),
         )));
 
         assert_eq!(g.lock().unwrap().node_count(), 2);
-        assert_eq!(g.lock().unwrap().edge_count(), 1);
+        assert_eq!(g.lock().unwrap().noodle_count(), 1);
 
         buf.undo();
-        assert_eq!(g.lock().unwrap().edge_count(), 0);
+        assert_eq!(g.lock().unwrap().noodle_count(), 0);
         buf.redo();
-        assert_eq!(g.lock().unwrap().edge_count(), 1);
+        assert_eq!(g.lock().unwrap().noodle_count(), 1);
     }
 
     #[test]

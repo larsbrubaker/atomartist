@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use atomartist_lib::graph::node::{NodeId, PortValue};
-use atomartist_lib::graph::{Edge, Graph};
+use atomartist_lib::graph::{Noodle, Graph};
 use atomartist_lib::nodes::register_subgraph;
 use atomartist_lib::registry::NodeRegistry;
 use atomartist_ui_test::TestHarness;
@@ -19,7 +19,7 @@ use atomartist_ui_test::TestHarness;
 fn connect_by_name(g: &mut Graph, from: NodeId, from_name: &str, to: NodeId, to_name: &str, reg: &NodeRegistry) {
     let from_uid = g.get(from).unwrap().output_by_name(from_name).unwrap().uid;
     let to_uid = g.get(to).unwrap().input_by_name(to_name).unwrap().uid;
-    g.connect(Edge::new(from, from_uid, to, to_uid), reg).unwrap();
+    g.connect(Noodle::new(from, from_uid, to, to_uid), reg).unwrap();
 }
 
 #[test]

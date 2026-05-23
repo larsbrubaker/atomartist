@@ -206,8 +206,8 @@ fn clone_graph(src: &Graph) -> Graph {
     for n in src.nodes() {
         let _ = out.add_node(n.clone());
     }
-    for e in src.edges() {
-        out.edges_mut().push(*e);
+    for n in src.noodles() {
+        out.noodles_mut().push(*n);
     }
     out
 }

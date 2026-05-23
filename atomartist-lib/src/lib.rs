@@ -14,7 +14,7 @@ pub mod serialization;
 pub mod socket_types;
 
 pub use graph::{
-    Edge, EdgeEndpoint, Graph, GraphError, NodeId, NodeInstance, PortValue, Socket, SocketUid,
+    Noodle, NoodleEndpoint, Graph, GraphError, NodeId, NodeInstance, PortValue, Socket, SocketUid,
     SocketUidAlloc,
 };
 pub use registry::{

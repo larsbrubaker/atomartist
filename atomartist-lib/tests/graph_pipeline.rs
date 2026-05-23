@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use atomartist_lib::{
-    graph::{executor::evaluate_all, Edge, Graph, NodeId, PortValue},
+    graph::{executor::evaluate_all, Noodle, Graph, NodeId, PortValue},
     nodes,
     registry::NodeRegistry,
 };
@@ -28,7 +28,7 @@ fn box_transform_graph() -> (Graph, NodeRegistry, NodeId) {
 
     let out_box = g.get(box_id).unwrap().output_by_name("out").unwrap().uid;
     let in_xform = g.get(xform_id).unwrap().input_by_name("input").unwrap().uid;
-    g.connect(Edge::new(box_id, out_box, xform_id, in_xform), &reg).unwrap();
+    g.connect(Noodle::new(box_id, out_box, xform_id, in_xform), &reg).unwrap();
 
     (g, reg, xform_id)
 }
@@ -89,7 +89,7 @@ fn rectangle_through_extrude_produces_solid() {
     g.set_property(e, "height", PortValue::Number(3.0)).unwrap();
     let out_r = g.get(r).unwrap().output_by_name("out").unwrap().uid;
     let in_e = g.get(e).unwrap().input_by_name("Paths").unwrap().uid;
-    g.connect(Edge::new(r, out_r, e, in_e), &reg).unwrap();
+    g.connect(Noodle::new(r, out_r, e, in_e), &reg).unwrap();
 
     atomartist_lib::graph::executor::evaluate_all(&mut g, &reg).unwrap();
     let geo_uid = g.get(e).unwrap().output_by_name("Geometry").unwrap().uid;
@@ -126,8 +126,8 @@ fn combine_two_boxes_via_executor() {
     let out_b = g.get(b).unwrap().output_by_name("out").unwrap().uid;
     let in_1 = g.get(c).unwrap().input_by_name("input_1").unwrap().uid;
     let in_2 = g.get(c).unwrap().input_by_name("input_2").unwrap().uid;
-    g.connect(Edge::new(a, out_a, c, in_1), &reg).unwrap();
-    g.connect(Edge::new(b, out_b, c, in_2), &reg).unwrap();
+    g.connect(Noodle::new(a, out_a, c, in_1), &reg).unwrap();
+    g.connect(Noodle::new(b, out_b, c, in_2), &reg).unwrap();
 
     evaluate_all(&mut g, &reg).unwrap();
     let out_c = g.get(c).unwrap().output_by_name("out").unwrap().uid;
