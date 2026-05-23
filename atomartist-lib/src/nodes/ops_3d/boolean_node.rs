@@ -14,8 +14,9 @@ use manifold_rust::types::{MeshGL, OpType};
 
 use crate::geometry::mesh3d::{compute_flat_normals, NUM_PROP};
 use crate::graph::node::PortValue;
+use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    NodeDef, NodeError, NodeInputs, NodeOutputs, NodeProperties, NodeRegistry, PropDef, SocketDef,
+    EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeRegistry, PropDef,
 };
 use crate::socket_types::SocketType;
 
@@ -26,41 +27,37 @@ impl NodeDef for BooleanNode {
     fn display_name(&self) -> &'static str { "Boolean" }
     fn category(&self) -> &'static str { "Operations 3D" }
 
-    fn input_sockets(&self) -> Vec<SocketDef> {
-        vec![
-            SocketDef::required("a", SocketType::Geometry3d),
-            SocketDef::required("b", SocketType::Geometry3d),
-        ]
-    }
-    fn output_sockets(&self) -> Vec<SocketDef> {
-        vec![SocketDef::required("out", SocketType::Geometry3d)]
+    fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
+        InstanceTemplate::builder(alloc)
+            .input("a", SocketType::Geometry3d)
+            .input("b", SocketType::Geometry3d)
+            .output("out", SocketType::Geometry3d)
+            .build()
     }
 
     fn properties(&self) -> Vec<PropDef> {
         vec![
             // Operation: 0 = Union, 1 = Difference, 2 = Intersection.
-            // Modeled as a Number property until Phase 9 lands an enum
-            // / combo-box property type.
             PropDef::new("operation", PortValue::Number(0.0)).with_range(0.0, 2.0),
         ]
     }
 
-    fn evaluate(&self, inputs: &NodeInputs, props: &NodeProperties) -> Result<NodeOutputs, NodeError> {
-        let mesh_a = match inputs.get("a") {
+    fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
+        let mesh_a = match ctx.input_named("a") {
             PortValue::Geometry3d(m) => m.clone(),
             PortValue::None => return Ok(NodeOutputs::default()),
             other => return Err(NodeError::msg(format!(
                 "Boolean: input 'a' must be Geometry3d, got {:?}", other.socket_type()
             ))),
         };
-        let mesh_b = match inputs.get("b") {
+        let mesh_b = match ctx.input_named("b") {
             PortValue::Geometry3d(m) => m.clone(),
             PortValue::None => return Ok(NodeOutputs::default()),
             other => return Err(NodeError::msg(format!(
                 "Boolean: input 'b' must be Geometry3d, got {:?}", other.socket_type()
             ))),
         };
-        let op_idx = props.number("operation", 0.0).round() as i32;
+        let op_idx = ctx.properties.number("operation", 0.0).round() as i32;
         let op = match op_idx {
             0 => OpType::Add,         // Union
             1 => OpType::Subtract,    // Difference (a - b)
@@ -74,9 +71,6 @@ impl NodeDef for BooleanNode {
         let mb = Manifold::from_mesh_gl(&stripped_b);
         let result = ma.boolean(&mb, op);
         let mut out_mesh = result.get_mesh_gl(-1);
-        // Manifold's get_mesh_gl returns num_prop = 3 (positions only) when
-        // the input has no extra props. Promote to num_prop=6 with computed
-        // flat normals so the renderer's vertex layout matches.
         promote_to_num_prop6(&mut out_mesh);
         compute_flat_normals(&mut out_mesh);
 
@@ -104,8 +98,7 @@ fn strip_normals(mesh: &MeshGL) -> MeshGL {
         };
     }
 
-    // Bucket vertices by quantized position.
-    let scale = 1e5; // 5-decimal-place tolerance
+    let scale = 1e5;
     let mut bucket: std::collections::HashMap<(i64, i64, i64), u32> =
         std::collections::HashMap::new();
     let mut out_pos: Vec<f32> = Vec::new();
@@ -128,8 +121,6 @@ fn strip_normals(mesh: &MeshGL) -> MeshGL {
         remap.push(new_id);
     }
     let new_tris: Vec<u32> = mesh.tri_verts.iter().map(|i| remap[*i as usize]).collect();
-    // Drop degenerate triangles (any triangle whose 3 indices aren't
-    // distinct after merging — these can arise on duplicate-vertex inputs).
     let mut filtered: Vec<u32> = Vec::with_capacity(new_tris.len());
     for tri in new_tris.chunks_exact(3) {
         if tri[0] != tri[1] && tri[1] != tri[2] && tri[0] != tri[2] {
@@ -144,8 +135,6 @@ fn strip_normals(mesh: &MeshGL) -> MeshGL {
     }
 }
 
-/// Promote a num_prop=3 mesh to num_prop=6 with zero-filled normal slots.
-/// `compute_flat_normals` then writes correct values.
 fn promote_to_num_prop6(mesh: &mut MeshGL) {
     if mesh.num_prop == NUM_PROP {
         return;
@@ -169,22 +158,28 @@ fn promote_to_num_prop6(mesh: &mut MeshGL) {
 mod tests {
     use super::*;
     use crate::geometry::generate_box;
+    use crate::graph::node::{NodeId, NodeInstance};
+    use crate::registry::{NodeInputs, NodeProperties};
 
     #[test]
     fn union_of_overlapping_boxes_yields_single_solid() {
         let n = BooleanNode;
         let a = Arc::new(generate_box(2.0, 2.0, 2.0));
         let b = Arc::new(generate_box(2.0, 2.0, 2.0));
+        let mut alloc = SocketUidAlloc::new();
+        let tpl = n.instantiate(&mut alloc);
+        let mut inst = NodeInstance::new(NodeId(1), "Boolean", [0.0, 0.0]);
+        inst.inputs = tpl.inputs;
+        inst.outputs = tpl.outputs;
         let mut inputs = NodeInputs::default();
-        inputs.insert("a", PortValue::Geometry3d(a));
-        inputs.insert("b", PortValue::Geometry3d(b));
+        inputs.insert(inst.input_by_name("a").unwrap().uid, PortValue::Geometry3d(a));
+        inputs.insert(inst.input_by_name("b").unwrap().uid, PortValue::Geometry3d(b));
         let mut props = NodeProperties::default();
         props.insert("operation", PortValue::Number(0.0));
-        let outs = n.evaluate(&inputs, &props).unwrap();
+        let ctx = EvalCtx { instance: &inst, properties: &props, inputs: &inputs };
+        let outs = n.evaluate(&ctx).unwrap();
         match outs.by_name.get("out").unwrap() {
             PortValue::Geometry3d(m) => {
-                // Two overlapping unit cubes union to roughly one cube
-                // (smaller than two but more than one).
                 assert!(!m.vert_properties.is_empty());
                 assert!(m.tri_verts.len() / 3 >= 12);
             }

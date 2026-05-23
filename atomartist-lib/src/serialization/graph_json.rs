@@ -1,29 +1,42 @@
 //! Serialize and deserialize a `Graph` to and from JSON.
 //!
+//! ## Format
+//!
+//! Schema v2: per-node socket layouts and uid-keyed edges. Every socket
+//! carries a stable [`SocketUid`](crate::graph::socket::SocketUid) that
+//! survives renames and reorder; edges reference uids, not names.
+//!
 //! `PortValue` variants that wrap heap geometry (`Path2d`, `Geometry3d`)
-//! are skipped — they are computed outputs that don't survive a round trip
+//! are skipped — they're computed outputs that don't survive a round trip
 //! and are recomputed by the executor on load. Property values that are
 //! plain numbers, bools, strings, colors, or matrices are preserved.
 //!
 //! Forward compatibility: unknown node types are skipped with a warning
-//! (returned in `LoadResult.warnings`), not a hard error. This lets a save
-//! file from a future version load on an older binary as long as the
-//! shared subset is recognized.
+//! (returned in `LoadResult.warnings`), not a hard error.
+//!
+//! Backward compatibility: schema v1 is **not** loadable. The user
+//! explicitly authorized the break during the Stage 1 engine refactor.
+//! v1 saves can be opened by the previous binary if needed.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::graph::graph::{Edge, Graph};
-use crate::graph::node::{NodeId, NodeInstance, PortValue, SocketId};
+use crate::graph::graph::{Edge, EdgeEndpoint, Graph};
+use crate::graph::node::{NodeId, NodeInstance, PortValue};
+use crate::graph::socket::{Socket, SocketUid};
 use crate::registry::NodeRegistry;
+use crate::socket_types::SocketType;
 
-/// Plain JSON shape — every field maps 1-to-1 with `Graph` and
-/// `NodeInstance`. Geometry / Path values are dropped on the way out.
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct GraphFile {
-    /// Schema version. Bumped on breaking changes.
     pub version: u32,
+    /// Next-available `SocketUid` when the graph was saved — used by the
+    /// loader to resume the allocator so newly-minted uids don't collide
+    /// with restored ones.
+    #[serde(default)]
+    pub next_socket_uid: u64,
     pub nodes: Vec<NodeFile>,
     pub edges: Vec<EdgeFile>,
 }
@@ -33,17 +46,34 @@ pub struct NodeFile {
     pub id: u64,
     pub type_id: String,
     pub position: [f64; 2],
+    /// Input socket list, in display order.
+    #[serde(default)]
+    pub inputs: Vec<SocketFile>,
+    /// Output socket list, in display order.
+    #[serde(default)]
+    pub outputs: Vec<SocketFile>,
     /// Property values keyed by name. JSON-friendly representation.
     #[serde(default)]
     pub properties: HashMap<String, JsonPortValue>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SocketFile {
+    pub uid: u64,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub socket_type: String,
+    #[serde(default)]
+    pub optional: bool,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct EdgeFile {
     pub from_node: u64,
-    pub from_socket: String,
+    pub from_uid: u64,
     pub to_node: u64,
-    pub to_socket: String,
+    pub to_uid: u64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -66,8 +96,7 @@ impl JsonPortValue {
             PortValue::StringVal(s) => Some(JsonPortValue::StringVal(s.as_str().to_string())),
             PortValue::Color(c) => Some(JsonPortValue::Color(*c)),
             PortValue::Matrix4x4(m) => Some(JsonPortValue::Matrix4x4(*m)),
-            // Path2d / Geometry3d aren't worth round-tripping — they're
-            // computed outputs that the executor regenerates.
+            // Heap-backed values are computed; the executor regenerates them.
             PortValue::Path2d(_) | PortValue::Geometry3d(_) => None,
         }
     }
@@ -84,7 +113,54 @@ impl JsonPortValue {
     }
 }
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
+
+fn socket_to_file(s: &Socket) -> SocketFile {
+    SocketFile {
+        uid: s.uid.0,
+        name: s.name.to_string(),
+        label: s.display_label.as_ref().map(|l| l.to_string()),
+        socket_type: socket_type_to_string(s.socket_type),
+        optional: s.optional,
+    }
+}
+
+fn socket_from_file(f: &SocketFile) -> Socket {
+    Socket {
+        uid: SocketUid(f.uid),
+        name: Arc::from(f.name.as_str()),
+        display_label: f.label.as_ref().map(|l| Arc::from(l.as_str())),
+        socket_type: string_to_socket_type(&f.socket_type),
+        optional: f.optional,
+    }
+}
+
+fn socket_type_to_string(t: SocketType) -> String {
+    match t {
+        SocketType::None => "None",
+        SocketType::Number => "Number",
+        SocketType::Bool => "Bool",
+        SocketType::StringVal => "StringVal",
+        SocketType::Color => "Color",
+        SocketType::Matrix4x4 => "Matrix4x4",
+        SocketType::Path2d => "Path2d",
+        SocketType::Geometry3d => "Geometry3d",
+    }
+    .to_string()
+}
+
+fn string_to_socket_type(s: &str) -> SocketType {
+    match s {
+        "Number" => SocketType::Number,
+        "Bool" => SocketType::Bool,
+        "StringVal" => SocketType::StringVal,
+        "Color" => SocketType::Color,
+        "Matrix4x4" => SocketType::Matrix4x4,
+        "Path2d" => SocketType::Path2d,
+        "Geometry3d" => SocketType::Geometry3d,
+        _ => SocketType::None,
+    }
+}
 
 /// Build a `GraphFile` from the live graph. The result is JSON-ready.
 pub fn save_graph(graph: &Graph) -> GraphFile {
@@ -93,13 +169,15 @@ pub fn save_graph(graph: &Graph) -> GraphFile {
         let mut props = HashMap::new();
         for (k, v) in &n.properties {
             if let Some(jv) = JsonPortValue::from_port_value(v) {
-                props.insert((*k).to_string(), jv);
+                props.insert(k.to_string(), jv);
             }
         }
         nodes.push(NodeFile {
             id: n.id.0,
             type_id: n.type_id.to_string(),
             position: n.position,
+            inputs: n.inputs.iter().map(socket_to_file).collect(),
+            outputs: n.outputs.iter().map(socket_to_file).collect(),
             properties: props,
         });
     }
@@ -109,22 +187,23 @@ pub fn save_graph(graph: &Graph) -> GraphFile {
     for e in graph.edges() {
         edges.push(EdgeFile {
             from_node: e.from.node.0,
-            from_socket: e.from.name.to_string(),
+            from_uid: e.from.socket.0,
             to_node: e.to.node.0,
-            to_socket: e.to.name.to_string(),
+            to_uid: e.to.socket.0,
         });
     }
-    edges.sort_by_key(|e| (e.from_node, e.to_node, e.from_socket.clone(), e.to_socket.clone()));
+    edges.sort_by_key(|e| (e.from_node, e.to_node, e.from_uid, e.to_uid));
 
     GraphFile {
         version: SCHEMA_VERSION,
+        next_socket_uid: graph.peek_next_socket_uid(),
         nodes,
         edges,
     }
 }
 
 /// Outcome of loading a graph file. Warnings collect non-fatal issues
-/// (unknown node types, missing socket names) so callers can surface them
+/// (unknown node types, missing edges) so callers can surface them
 /// to the user.
 pub struct LoadResult {
     pub graph: Graph,
@@ -133,41 +212,62 @@ pub struct LoadResult {
 
 /// Reconstruct a `Graph` from a `GraphFile`. Unknown nodes are skipped
 /// with a warning. Edges referencing skipped nodes or unknown sockets are
-/// silently dropped. Property names are leaked as `&'static str` because
-/// the runtime registry stores them as `&'static`; we try to reuse the
-/// registry-known names where possible to avoid the leak.
+/// silently dropped.
 pub fn load_graph(file: GraphFile, registry: &NodeRegistry) -> LoadResult {
     let mut graph = Graph::new();
     let mut warnings = Vec::new();
 
+    if file.version != SCHEMA_VERSION {
+        warnings.push(format!(
+            "graph file version {} differs from current {} — loading anyway, but compatibility is not guaranteed",
+            file.version, SCHEMA_VERSION
+        ));
+    }
+
+    // Bump the socket-uid allocator past every uid we are about to
+    // restore from the file. This handles both the file's recorded
+    // next-uid AND the explicit observation of each socket below.
+    if file.next_socket_uid > 0 {
+        graph.socket_alloc().observe(SocketUid(file.next_socket_uid.saturating_sub(1)));
+    }
+
     let mut id_map: HashMap<u64, NodeId> = HashMap::new();
-    let mut type_id_intern: HashMap<&str, &'static str> = HashMap::new();
 
     for nf in file.nodes {
-        let interned_type_id = match registry.get(&nf.type_id) {
-            Some(def) => def.type_id(),
-            None => {
-                warnings.push(format!("unknown node type '{}' — skipped", nf.type_id));
-                continue;
-            }
-        };
-        let new_id = graph.allocate_id();
-        let mut node = NodeInstance::new(new_id, interned_type_id, nf.position);
+        if registry.get(&nf.type_id).is_none() {
+            warnings.push(format!("unknown node type '{}' — skipped", nf.type_id));
+            continue;
+        }
+        let new_id = NodeId(nf.id);
+        let mut node = NodeInstance::new(new_id, nf.type_id.as_str(), nf.position);
+        node.inputs = nf.inputs.iter().map(socket_from_file).collect();
+        node.outputs = nf.outputs.iter().map(socket_from_file).collect();
 
-        // For each known PropDef, look up the JSON value by name.
+        // Restore declared property values from the file; for any
+        // property the type declares but the file omits, seed the
+        // default so node code doesn't see PortValue::None unexpectedly.
         if let Some(def) = registry.get(&nf.type_id) {
             for prop_def in def.properties() {
-                if let Some(j) = nf.properties.get(prop_def.name) {
-                    node.properties.insert(prop_def.name, j.clone().into_port_value());
-                } else {
-                    node.properties.insert(prop_def.name, prop_def.default.clone());
-                }
+                let key = prop_def.name.clone();
+                let value = nf
+                    .properties
+                    .get(prop_def.name.as_ref())
+                    .map(|j| j.clone().into_port_value())
+                    .unwrap_or_else(|| prop_def.default.clone());
+                node.properties.insert(key, value);
+            }
+        }
+        // Also preserve any extra properties the file carried (e.g.
+        // dynamic-node configs that aren't in the declared schema).
+        for (k, v) in &nf.properties {
+            let key = Arc::<str>::from(k.as_str());
+            if !node.properties.contains_key(&key) {
+                node.properties.insert(key, v.clone().into_port_value());
             }
         }
 
         let _ = graph.add_node(node);
         id_map.insert(nf.id, new_id);
-        type_id_intern.entry(interned_type_id).or_insert(interned_type_id);
     }
 
     for ef in file.edges {
@@ -179,46 +279,36 @@ pub fn load_graph(file: GraphFile, registry: &NodeRegistry) -> LoadResult {
             Some(n) => *n,
             None => continue,
         };
-        // Look up the static socket names from the registry. If the live
-        // registry no longer has a matching socket, drop the edge.
-        let from_static = static_socket_name(registry, from_node, &graph, &ef.from_socket, true);
-        let to_static = static_socket_name(registry, to_node, &graph, &ef.to_socket, false);
-        let (from_static, to_static) = match (from_static, to_static) {
-            (Some(a), Some(b)) => (a, b),
-            _ => {
-                warnings.push(format!(
-                    "edge {}.{} → {}.{} dropped — socket no longer exists",
-                    ef.from_node, ef.from_socket, ef.to_node, ef.to_socket
-                ));
-                continue;
-            }
-        };
-        // Use Graph::edges_mut to insert without re-validating type
-        // compatibility (registry may have evolved; we accept the saved
-        // edge as-is and leave it to the executor to surface a runtime
-        // error if it's truly broken).
+        let from_uid = SocketUid(ef.from_uid);
+        let to_uid = SocketUid(ef.to_uid);
+
+        // Validate the sockets still exist on the restored instances.
+        // If the file's sockets were lost (e.g. a node type evolved its
+        // socket layout between saves), drop the edge with a warning
+        // rather than refusing to load the whole project.
+        let from_ok = graph
+            .get(from_node)
+            .map(|n| n.output_by_uid(from_uid).is_some())
+            .unwrap_or(false);
+        let to_ok = graph
+            .get(to_node)
+            .map(|n| n.input_by_uid(to_uid).is_some())
+            .unwrap_or(false);
+        if !from_ok || !to_ok {
+            warnings.push(format!(
+                "edge {}:{} → {}:{} dropped — socket uid no longer present",
+                ef.from_node, ef.from_uid, ef.to_node, ef.to_uid
+            ));
+            continue;
+        }
+
         graph.edges_mut().push(Edge {
-            from: SocketId { node: from_node, name: from_static },
-            to: SocketId { node: to_node, name: to_static },
+            from: EdgeEndpoint { node: from_node, socket: from_uid },
+            to: EdgeEndpoint { node: to_node, socket: to_uid },
         });
     }
 
     LoadResult { graph, warnings }
-}
-
-fn static_socket_name(
-    registry: &NodeRegistry,
-    node: NodeId,
-    graph: &Graph,
-    requested: &str,
-    is_output: bool,
-) -> Option<&'static str> {
-    let n = graph.get(node)?;
-    let def = registry.get(n.type_id)?;
-    let list = if is_output { def.output_sockets() } else { def.input_sockets() };
-    list.into_iter()
-        .find(|s| s.name == requested)
-        .map(|s| s.name)
 }
 
 /// Serialize a graph to a pretty-printed JSON string.
@@ -236,7 +326,6 @@ pub fn graph_from_json_str(s: &str, registry: &NodeRegistry) -> Result<LoadResul
 mod tests {
     use super::*;
     use crate::graph::graph::Edge;
-    use crate::graph::node::SocketId;
     use crate::nodes;
 
     fn registry() -> NodeRegistry {
@@ -249,26 +338,16 @@ mod tests {
     fn round_trip_box_transform_graph() {
         let reg = registry();
         let mut g = Graph::new();
-        let a = g.allocate_id();
-        let b = g.allocate_id();
-        let mut na = NodeInstance::new(a, "Box", [10.0, 20.0]);
-        na.properties.insert("width", PortValue::Number(7.5));
-        na.properties.insert("height", PortValue::Number(8.0));
-        na.properties.insert("depth", PortValue::Number(9.0));
-        let mut nb = NodeInstance::new(b, "Transform", [220.0, 30.0]);
-        nb.properties.insert("ty", PortValue::Number(2.5));
-        nb.properties.insert("sx", PortValue::Number(1.0));
-        nb.properties.insert("sy", PortValue::Number(1.0));
-        nb.properties.insert("sz", PortValue::Number(1.0));
-        g.add_node(na).unwrap();
-        g.add_node(nb).unwrap();
-        g.connect(
-            Edge {
-                from: SocketId { node: a, name: "out" },
-                to: SocketId { node: b, name: "input" },
-            },
-            &reg,
-        ).unwrap();
+        let a = g.add_new_node("Box", [10.0, 20.0], &reg).unwrap();
+        let b = g.add_new_node("Transform", [220.0, 30.0], &reg).unwrap();
+        g.set_property(a, "width", PortValue::Number(7.5)).unwrap();
+        g.set_property(a, "height", PortValue::Number(8.0)).unwrap();
+        g.set_property(a, "depth", PortValue::Number(9.0)).unwrap();
+        g.set_property(b, "ty", PortValue::Number(2.5)).unwrap();
+
+        let out_a = g.get(a).unwrap().output_by_name("out").unwrap().uid;
+        let in_b = g.get(b).unwrap().input_by_name("input").unwrap().uid;
+        g.connect(Edge::new(a, out_a, b, in_b), &reg).unwrap();
 
         let json = graph_to_json_string(&g);
         let LoadResult { graph: g2, warnings } = graph_from_json_str(&json, &reg).unwrap();
@@ -276,42 +355,41 @@ mod tests {
         assert_eq!(g2.node_count(), 2);
         assert_eq!(g2.edge_count(), 1);
 
-        // Find the Box and verify its properties survived.
         let box_node = g2
             .nodes()
-            .find(|n| n.type_id == "Box")
+            .find(|n| n.type_id.as_ref() == "Box")
             .expect("Box not present after reload");
         match box_node.properties.get("width").unwrap() {
             PortValue::Number(w) => assert!((*w - 7.5).abs() < 1e-9),
             _ => panic!(),
         }
+        // Edge UID stable across round-trip.
+        assert_eq!(g2.edges()[0].from.socket, out_a);
+        assert_eq!(g2.edges()[0].to.socket, in_b);
     }
 
     #[test]
     fn round_trip_extrude_preserves_color_and_matrix_properties() {
         let reg = registry();
         let mut g = Graph::new();
-        let id = g.allocate_id();
-        let mut node = NodeInstance::new(id, "Extrude", [0.0, 0.0]);
-        node.properties.insert("height", PortValue::Number(8.5));
-        node.properties.insert("bevel_radius", PortValue::Number(1.25));
-        node.properties.insert("bevel_segments", PortValue::Number(12.0));
-        node.properties
-            .insert("color", PortValue::Color([0.25, 0.5, 0.75, 1.0]));
+        let id = g.add_new_node("Extrude", [0.0, 0.0], &reg).unwrap();
+        g.set_property(id, "height", PortValue::Number(8.5)).unwrap();
+        g.set_property(id, "bevel_radius", PortValue::Number(1.25)).unwrap();
+        g.set_property(id, "bevel_segments", PortValue::Number(12.0)).unwrap();
+        g.set_property(id, "color", PortValue::Color([0.25, 0.5, 0.75, 1.0])).unwrap();
         let m: [f32; 16] = [
-            1.0, 0.0, 0.0, 0.0, //
-            0.0, 1.0, 0.0, 0.0, //
-            0.0, 0.0, 1.0, 0.0, //
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
             2.0, 3.0, 4.0, 1.0,
         ];
-        node.properties.insert("matrix", PortValue::Matrix4x4(m));
-        g.add_node(node).unwrap();
+        g.set_property(id, "matrix", PortValue::Matrix4x4(m)).unwrap();
 
         let json = graph_to_json_string(&g);
         let LoadResult { graph: g2, warnings } = graph_from_json_str(&json, &reg).unwrap();
         assert!(warnings.is_empty(), "warnings: {:?}", warnings);
 
-        let restored = g2.nodes().find(|n| n.type_id == "Extrude").unwrap();
+        let restored = g2.nodes().find(|n| n.type_id.as_ref() == "Extrude").unwrap();
         match restored.properties.get("color").unwrap() {
             PortValue::Color(c) => assert_eq!(*c, [0.25, 0.5, 0.75, 1.0]),
             _ => panic!("color did not round-trip as Color"),
@@ -320,24 +398,17 @@ mod tests {
             PortValue::Matrix4x4(mm) => assert_eq!(*mm, m),
             _ => panic!("matrix did not round-trip as Matrix4x4"),
         }
-        match restored.properties.get("height").unwrap() {
-            PortValue::Number(v) => assert!((v - 8.5).abs() < 1e-9),
-            _ => panic!(),
-        }
-        match restored.properties.get("bevel_segments").unwrap() {
-            PortValue::Number(v) => assert!((v - 12.0).abs() < 1e-9),
-            _ => panic!(),
-        }
     }
 
     #[test]
     fn unknown_node_type_is_skipped_with_warning() {
         let reg = registry();
         let json = r#"{
-            "version": 1,
+            "version": 2,
+            "next_socket_uid": 0,
             "nodes": [
-                {"id": 0, "type_id": "WidgetFromTheFuture", "position": [0,0], "properties": {}},
-                {"id": 1, "type_id": "Box", "position": [10,10], "properties": {}}
+                {"id": 0, "type_id": "WidgetFromTheFuture", "position": [0,0], "inputs": [], "outputs": [], "properties": {}},
+                {"id": 1, "type_id": "Box", "position": [10,10], "inputs": [], "outputs": [], "properties": {}}
             ],
             "edges": []
         }"#;

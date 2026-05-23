@@ -394,15 +394,15 @@ impl AppState {
             // freshly-imported asset ref + runtime mesh cache.
             if let Some(def) = self.registry.get(mesh_node::TYPE_ID) {
                 for prop in def.properties() {
-                    node.properties.insert(prop.name, prop.default);
+                    node.properties.insert(prop.name.clone(), prop.default);
                 }
             }
             node.properties.insert(
-                "asset",
+                Arc::<str>::from("asset"),
                 PortValue::StringVal(Arc::new(asset_ref.as_str().to_string())),
             );
             node.properties
-                .insert("mesh", PortValue::Geometry3d(Arc::new(mesh)));
+                .insert(Arc::<str>::from("mesh"), PortValue::Geometry3d(Arc::new(mesh)));
             node.dirty = true;
             graph
                 .add_node(node)

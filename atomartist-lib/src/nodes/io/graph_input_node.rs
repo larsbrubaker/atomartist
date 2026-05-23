@@ -10,8 +10,9 @@
 use std::sync::Arc;
 
 use crate::graph::node::PortValue;
+use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    NodeDef, NodeError, NodeInputs, NodeOutputs, NodeProperties, NodeRegistry, PropDef, SocketDef,
+    EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeRegistry, PropDef,
 };
 use crate::socket_types::SocketType;
 
@@ -22,9 +23,10 @@ impl NodeDef for GraphInputNode {
     fn display_name(&self) -> &'static str { "Graph Input" }
     fn category(&self) -> &'static str { "I/O" }
 
-    fn input_sockets(&self) -> Vec<SocketDef> { vec![] }
-    fn output_sockets(&self) -> Vec<SocketDef> {
-        vec![SocketDef::required("out", SocketType::Geometry3d)]
+    fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
+        InstanceTemplate::builder(alloc)
+            .output("out", SocketType::Geometry3d)
+            .build()
     }
 
     fn properties(&self) -> Vec<PropDef> {
@@ -37,8 +39,8 @@ impl NodeDef for GraphInputNode {
         ]
     }
 
-    fn evaluate(&self, _inputs: &NodeInputs, props: &NodeProperties) -> Result<NodeOutputs, NodeError> {
-        let value = props.get("_injected").clone();
+    fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
+        let value = ctx.properties.get("_injected").clone();
         let mut out = NodeOutputs::default();
         out.set("out", value);
         Ok(out)

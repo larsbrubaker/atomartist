@@ -5,10 +5,11 @@
 
 use std::sync::Arc;
 
-use crate::graph::node::PortValue;
 use crate::geometry::path2d::CrossSection;
+use crate::graph::node::PortValue;
+use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    NodeDef, NodeError, NodeInputs, NodeOutputs, NodeProperties, NodeRegistry, PropDef, SocketDef,
+    EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeRegistry, PropDef,
 };
 use crate::socket_types::SocketType;
 
@@ -19,11 +20,11 @@ impl NodeDef for InflateNode {
     fn display_name(&self) -> &'static str { "Inflate" }
     fn category(&self) -> &'static str { "Operations 2D" }
 
-    fn input_sockets(&self) -> Vec<SocketDef> {
-        vec![SocketDef::required("input", SocketType::Path2d)]
-    }
-    fn output_sockets(&self) -> Vec<SocketDef> {
-        vec![SocketDef::required("out", SocketType::Path2d)]
+    fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
+        InstanceTemplate::builder(alloc)
+            .input("input", SocketType::Path2d)
+            .output("out", SocketType::Path2d)
+            .build()
     }
 
     fn properties(&self) -> Vec<PropDef> {
@@ -32,15 +33,15 @@ impl NodeDef for InflateNode {
         ]
     }
 
-    fn evaluate(&self, inputs: &NodeInputs, props: &NodeProperties) -> Result<NodeOutputs, NodeError> {
-        let input = match inputs.get("input") {
+    fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
+        let input = match ctx.input_named("input") {
             PortValue::Path2d(p) => p.clone(),
             PortValue::None => return Ok(NodeOutputs::default()),
             other => return Err(NodeError::msg(format!(
                 "Inflate: expected Path2d input, got {:?}", other.socket_type()
             ))),
         };
-        let delta = props.number("delta", 1.0);
+        let delta = ctx.properties.number("delta", 1.0);
         let result: CrossSection = input.offset(delta);
         let mut out = NodeOutputs::default();
         out.set("out", PortValue::Path2d(Arc::new(result)));

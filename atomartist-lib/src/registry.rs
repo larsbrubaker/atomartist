@@ -12,47 +12,24 @@
 //! No proc-macro magic; registration is a plain function call. Each node
 //! module exposes a `register(reg: &mut NodeRegistry)` function that the
 //! library's top-level `register_all_nodes()` invokes.
+//!
+//! ### The instantiation model
+//!
+//! `NodeDef` is a factory + behavior trait. It mints the initial socket
+//! layout for new instances (`instantiate`), describes its property
+//! schema, and exposes connection-time hooks. After instantiation, the
+//! per-instance socket layout lives on the `NodeInstance` itself — the
+//! trait does not answer "what sockets does this instance have?" queries
+//! at lookup time. This is the lesson from NodeDesigner: locking sockets
+//! to a static type-side description forced churn for every dynamic-input
+//! node (Combine, Group Output, …).
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::graph::node::PortValue;
+use crate::graph::socket::{Socket, SocketUid, SocketUidAlloc};
 use crate::socket_types::SocketType;
-
-/// Description of one named input or output socket on a node type.
-///
-/// `display_label` overrides the socket's display name in the canvas row;
-/// the underlying `name` is still used for serialization and lookups. This
-/// lets us keep socket identifiers stable (e.g. `"bevel_radius"`) while
-/// the canvas shows a human-readable label (e.g. `"Radius"`), matching
-/// NodeDesigner's input rows.
-#[derive(Clone, Debug)]
-pub struct SocketDef {
-    pub name: &'static str,
-    pub socket_type: SocketType,
-    /// True when the socket is allowed to be unconnected (the executor will
-    /// pass `PortValue::None` if no edge is wired).
-    pub optional: bool,
-    /// Human-readable label shown next to the socket on the canvas. When
-    /// `None` the canvas falls back to `name`.
-    pub display_label: Option<&'static str>,
-}
-
-impl SocketDef {
-    pub fn required(name: &'static str, socket_type: SocketType) -> Self {
-        Self { name, socket_type, optional: false, display_label: None }
-    }
-    pub fn optional(name: &'static str, socket_type: SocketType) -> Self {
-        Self { name, socket_type, optional: true, display_label: None }
-    }
-    /// Add a human-readable display label. The canvas uses this when
-    /// drawing the socket row; serialization and graph lookups still use
-    /// `name`.
-    pub fn with_label(mut self, label: &'static str) -> Self {
-        self.display_label = Some(label);
-        self
-    }
-}
 
 /// Editor hint for a property — how the UI layer should render an inline
 /// editor for the property's current value.
@@ -176,40 +153,31 @@ impl NumberAttrs {
 /// declared once per field and consumed both by [`PropDef::from_attrs`]
 /// (to mint a `PropDef`) and by the UI layer to render the field's
 /// editor + label.
-///
-/// This is the "Bevy-style" attribute surface: property structs derive
-/// [`bevy_reflect::Reflect`] so callers can iterate fields by type at
-/// runtime, and `NodeFieldAttrs` rides alongside each field as the
-/// editor / label / binding metadata — keeping the per-node UI wiring
-/// in one place instead of duplicated across `input_sockets()` and
-/// `properties()`.
 #[derive(Clone, Debug, Default)]
 pub struct NodeFieldAttrs {
-    /// Human-readable label (overrides the field name).
-    pub label: Option<&'static str>,
-    /// Editor shape for the field's value.
+    pub label: Option<Arc<str>>,
     pub editor: EditorKind,
     /// When `Some(socket_name)`, the field is paired with the input
     /// socket of that name: the canvas draws the field's inline editor on
     /// the socket's row, and the editor is hidden when the socket is
     /// connected.
-    pub bound_input: Option<&'static str>,
+    pub bound_input: Option<Arc<str>>,
 }
 
 impl NodeFieldAttrs {
     pub fn new() -> Self {
         Self::default()
     }
-    pub fn with_label(mut self, label: &'static str) -> Self {
-        self.label = Some(label);
+    pub fn with_label(mut self, label: impl Into<Arc<str>>) -> Self {
+        self.label = Some(label.into());
         self
     }
     pub fn with_editor(mut self, editor: EditorKind) -> Self {
         self.editor = editor;
         self
     }
-    pub fn bound_to(mut self, socket: &'static str) -> Self {
-        self.bound_input = Some(socket);
+    pub fn bound_to(mut self, socket: impl Into<Arc<str>>) -> Self {
+        self.bound_input = Some(socket.into());
         self
     }
 }
@@ -219,13 +187,10 @@ impl NodeFieldAttrs {
 /// Properties are values stored on the node itself (as opposed to flowing in
 /// over a socket connection). They appear as widgets on the node box on the
 /// canvas, and as rows in the right-side property panel when the node is
-/// selected. The `editor` hint drives the inline editor shape; the
-/// optional `bound_input` pairs the property with an input socket so the
-/// editor draws on the socket's row and disappears once the socket is
-/// connected — matching NodeDesigner's row-pairing model.
+/// selected.
 #[derive(Clone, Debug)]
 pub struct PropDef {
-    pub name: &'static str,
+    pub name: Arc<str>,
     pub default: PortValue,
     /// Inclusive minimum for numeric properties. Mirrored from
     /// `editor.numeric_range()` for backwards compatibility.
@@ -233,20 +198,20 @@ pub struct PropDef {
     /// Inclusive maximum.
     pub max: Option<f64>,
     /// Display label override. Falls back to `name` when `None`.
-    pub label: Option<&'static str>,
+    pub label: Option<Arc<str>>,
     /// Editor hint — the UI layer picks the widget; the schema describes
     /// the intent + numeric range / integer-ness.
     pub editor: EditorKind,
     /// When `Some(socket_name)`, the property is rendered inline on that
     /// input socket's row. The editor hides itself when the socket is
     /// connected.
-    pub bound_input: Option<&'static str>,
+    pub bound_input: Option<Arc<str>>,
 }
 
 impl PropDef {
-    pub fn new(name: &'static str, default: PortValue) -> Self {
+    pub fn new(name: impl Into<Arc<str>>, default: PortValue) -> Self {
         Self {
-            name,
+            name: name.into(),
             default,
             min: None,
             max: None,
@@ -293,47 +258,153 @@ impl PropDef {
     }
 
     /// Set the human-readable display label.
-    pub fn with_label(mut self, label: &'static str) -> Self {
-        self.label = Some(label);
+    pub fn with_label(mut self, label: impl Into<Arc<str>>) -> Self {
+        self.label = Some(label.into());
         self
     }
 
     /// Bind the property to an input socket: the canvas will render the
     /// inline editor on that socket's row, and hide it once the socket is
     /// connected.
-    pub fn bind_input(mut self, socket_name: &'static str) -> Self {
-        self.bound_input = Some(socket_name);
+    pub fn bind_input(mut self, socket_name: impl Into<Arc<str>>) -> Self {
+        self.bound_input = Some(socket_name.into());
         self
     }
 
     /// Construct a `PropDef` from a [`NodeFieldAttrs`] + default value.
     /// Used by reflected property structs to mint their `PropDef`s.
-    pub fn from_attrs(name: &'static str, default: PortValue, attrs: &NodeFieldAttrs) -> Self {
+    pub fn from_attrs(name: impl Into<Arc<str>>, default: PortValue, attrs: &NodeFieldAttrs) -> Self {
         let mut p = PropDef::new(name, default).with_editor(attrs.editor.clone());
-        if let Some(l) = attrs.label {
-            p = p.with_label(l);
+        if let Some(l) = &attrs.label {
+            p = p.with_label(l.clone());
         }
-        if let Some(s) = attrs.bound_input {
-            p = p.bind_input(s);
+        if let Some(s) = &attrs.bound_input {
+            p = p.bind_input(s.clone());
         }
         p
     }
 }
 
-/// Inputs handed to `NodeDef::evaluate`: for each declared input socket the
-/// executor inserts the upstream value (or `PortValue::None` if unconnected
-/// and the socket is optional).
+/// Initial socket + property layout for a new node instance — what
+/// [`NodeDef::instantiate`] returns. The graph populates a new
+/// `NodeInstance` directly from this struct.
+pub struct InstanceTemplate {
+    pub inputs: Vec<Socket>,
+    pub outputs: Vec<Socket>,
+    pub initial_properties: HashMap<Arc<str>, PortValue>,
+}
+
+impl InstanceTemplate {
+    /// Start a builder bound to a uid allocator. The allocator hands out
+    /// graph-unique uids so every newly minted socket can be referenced
+    /// by edges immediately.
+    pub fn builder<'a>(alloc: &'a mut SocketUidAlloc) -> TemplateBuilder<'a> {
+        TemplateBuilder::new(alloc)
+    }
+}
+
+/// Fluent builder for [`InstanceTemplate`].
+pub struct TemplateBuilder<'a> {
+    alloc: &'a mut SocketUidAlloc,
+    inputs: Vec<Socket>,
+    outputs: Vec<Socket>,
+    initial_properties: HashMap<Arc<str>, PortValue>,
+}
+
+impl<'a> TemplateBuilder<'a> {
+    pub fn new(alloc: &'a mut SocketUidAlloc) -> Self {
+        Self {
+            alloc,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            initial_properties: HashMap::new(),
+        }
+    }
+
+    /// Add a required input socket.
+    pub fn input(mut self, name: impl Into<Arc<str>>, socket_type: SocketType) -> Self {
+        let uid = self.alloc.allocate();
+        self.inputs.push(Socket::new(uid, name, socket_type, false));
+        self
+    }
+
+    /// Add an optional input socket — the executor passes `PortValue::None`
+    /// when no edge is wired and the node's `evaluate` is responsible for
+    /// the fallback (typically a stored property).
+    pub fn input_opt(mut self, name: impl Into<Arc<str>>, socket_type: SocketType) -> Self {
+        let uid = self.alloc.allocate();
+        self.inputs.push(Socket::new(uid, name, socket_type, true));
+        self
+    }
+
+    /// Add an input socket with a display-label override.
+    pub fn input_with_label(
+        mut self,
+        name: impl Into<Arc<str>>,
+        label: impl Into<Arc<str>>,
+        socket_type: SocketType,
+        optional: bool,
+    ) -> Self {
+        let uid = self.alloc.allocate();
+        let socket = Socket::new(uid, name, socket_type, optional).with_label(label);
+        self.inputs.push(socket);
+        self
+    }
+
+    /// Add an output socket.
+    pub fn output(mut self, name: impl Into<Arc<str>>, socket_type: SocketType) -> Self {
+        let uid = self.alloc.allocate();
+        // Outputs have no "optional" semantics from the executor's POV —
+        // they always carry whatever the node wrote in `evaluate`.
+        self.outputs.push(Socket::new(uid, name, socket_type, false));
+        self
+    }
+
+    /// Add an output socket with a display-label override.
+    pub fn output_with_label(
+        mut self,
+        name: impl Into<Arc<str>>,
+        label: impl Into<Arc<str>>,
+        socket_type: SocketType,
+    ) -> Self {
+        let uid = self.alloc.allocate();
+        let socket = Socket::new(uid, name, socket_type, false).with_label(label);
+        self.outputs.push(socket);
+        self
+    }
+
+    /// Set an initial property value. Properties not set here pick up
+    /// `PropDef::default` from the type's `properties()` list when the
+    /// instance is constructed by [`crate::graph::Graph::add_new_node`].
+    pub fn property(mut self, name: impl Into<Arc<str>>, value: PortValue) -> Self {
+        self.initial_properties.insert(name.into(), value);
+        self
+    }
+
+    pub fn build(self) -> InstanceTemplate {
+        InstanceTemplate {
+            inputs: self.inputs,
+            outputs: self.outputs,
+            initial_properties: self.initial_properties,
+        }
+    }
+}
+
+/// Inputs handed to `NodeDef::evaluate` — for each connected input socket
+/// (resolved by uid), the executor inserts the upstream value. Disconnected
+/// optional inputs are absent from the map; node code should use the
+/// `ctx.input*` accessors which fall back to `PortValue::None`.
 #[derive(Default)]
 pub struct NodeInputs {
-    pub by_name: HashMap<&'static str, PortValue>,
+    pub by_uid: HashMap<SocketUid, PortValue>,
 }
 
 impl NodeInputs {
-    pub fn get(&self, name: &str) -> &PortValue {
-        self.by_name.get(name).unwrap_or(&PortValue::None)
+    pub fn insert(&mut self, uid: SocketUid, value: PortValue) {
+        self.by_uid.insert(uid, value);
     }
-    pub fn insert(&mut self, name: &'static str, value: PortValue) {
-        self.by_name.insert(name, value);
+    pub fn get(&self, uid: SocketUid) -> &PortValue {
+        self.by_uid.get(&uid).unwrap_or(&PortValue::None)
     }
 }
 
@@ -342,7 +413,7 @@ impl NodeInputs {
 /// touches mutable state.
 #[derive(Default)]
 pub struct NodeProperties {
-    pub by_name: HashMap<&'static str, PortValue>,
+    pub by_name: HashMap<Arc<str>, PortValue>,
 }
 
 impl NodeProperties {
@@ -366,27 +437,28 @@ impl NodeProperties {
         }
     }
 
-    pub fn insert(&mut self, name: &'static str, value: PortValue) {
-        self.by_name.insert(name, value);
+    pub fn insert(&mut self, name: impl Into<Arc<str>>, value: PortValue) {
+        self.by_name.insert(name.into(), value);
     }
 }
 
-/// Outputs returned by `NodeDef::evaluate`, one entry per declared output
-/// socket. The executor stores these on the node's `cached_outputs` map and
-/// uses them as inputs to downstream nodes.
+/// Outputs returned by `NodeDef::evaluate`, keyed by socket name. The
+/// executor resolves each name against the node instance's `outputs` list
+/// to find the producing socket's uid, then stores the value in
+/// `cached_outputs` under that uid. Keeping node code name-keyed is the
+/// ergonomic choice — nodes don't need to track uids themselves.
 #[derive(Default)]
 pub struct NodeOutputs {
-    pub by_name: HashMap<&'static str, PortValue>,
+    pub by_name: HashMap<Arc<str>, PortValue>,
 }
 
 impl NodeOutputs {
-    pub fn set(&mut self, name: &'static str, value: PortValue) {
-        self.by_name.insert(name, value);
+    pub fn set(&mut self, name: impl Into<Arc<str>>, value: PortValue) {
+        self.by_name.insert(name.into(), value);
     }
 }
 
-/// Errors a node may raise during evaluation. Currently a single string
-/// variant; more structured variants can be added as nodes need them.
+/// Errors a node may raise during evaluation.
 #[derive(Clone, Debug)]
 pub enum NodeError {
     Message(String),
@@ -408,8 +480,81 @@ impl std::fmt::Display for NodeError {
 
 impl std::error::Error for NodeError {}
 
-/// One registered node type — describes its sockets, properties, category,
-/// and how to evaluate it.
+/// Evaluation context handed to [`NodeDef::evaluate`]. Provides
+/// uid-keyed access to inputs plus name-keyed convenience accessors
+/// that resolve names against the instance's current socket list.
+///
+/// Nodes that declare static socket layouts in `instantiate` should
+/// prefer the name-keyed accessors (`ctx.input_named("size")`) so their
+/// `evaluate` bodies don't need to track uids. Dynamic nodes
+/// (Output, future Combine) may want uid access for stable identity.
+pub struct EvalCtx<'a> {
+    pub instance: &'a crate::graph::node::NodeInstance,
+    pub properties: &'a NodeProperties,
+    pub inputs: &'a NodeInputs,
+}
+
+impl<'a> EvalCtx<'a> {
+    /// Look up an input value by socket uid.
+    pub fn input(&self, uid: SocketUid) -> &PortValue {
+        self.inputs.get(uid)
+    }
+
+    /// Look up an input value by socket name (resolved against the
+    /// instance's current `inputs`). Returns `PortValue::None` when no
+    /// such socket exists or it has no incoming edge.
+    pub fn input_named(&self, name: &str) -> &PortValue {
+        match self.instance.input_by_name(name) {
+            Some(s) => self.input(s.uid),
+            None => &PortValue::None,
+        }
+    }
+
+    /// All connected inputs, in instance-order. Skips disconnected
+    /// optional sockets (which are absent from `inputs`). Convenient for
+    /// dynamic nodes that iterate over whatever the user wired up.
+    pub fn connected_inputs(&self) -> impl Iterator<Item = (&Socket, &PortValue)> {
+        self.instance
+            .inputs
+            .iter()
+            .filter_map(|s| self.inputs.by_uid.get(&s.uid).map(|v| (s, v)))
+    }
+}
+
+/// Context passed to [`NodeDef::validate_input_connection`] — invoked
+/// *before* the edge is inserted. Returning `Err` rejects the connection
+/// and surfaces the reason to the UI.
+pub struct ValidateCtx<'a> {
+    pub graph: &'a crate::graph::graph::Graph,
+    pub this_node: crate::graph::node::NodeId,
+    pub target_socket: SocketUid,
+    pub source_node: crate::graph::node::NodeId,
+    pub source_socket: SocketUid,
+}
+
+/// Context passed to [`NodeDef::on_input_connected`] — invoked *after*
+/// the edge has been inserted. The hook may further mutate the target
+/// node's sockets via `graph`'s socket-mutation API (rename / append /
+/// remove). Each such mutation may recursively fire connection hooks on
+/// neighbors, so keep the work minimal and idempotent.
+pub struct ConnectCtx<'a> {
+    pub graph: &'a mut crate::graph::graph::Graph,
+    pub this_node: crate::graph::node::NodeId,
+    pub target_socket: SocketUid,
+    pub source_node: crate::graph::node::NodeId,
+    pub source_socket: SocketUid,
+}
+
+/// Context passed to [`NodeDef::on_input_disconnected`] — invoked *after*
+/// the edge has been removed. The hook may collapse the now-orphan input
+/// slot.
+pub struct DisconnectCtx<'a> {
+    pub graph: &'a mut crate::graph::graph::Graph,
+    pub this_node: crate::graph::node::NodeId,
+    pub target_socket: SocketUid,
+}
+
+/// One registered node type — describes its factory + behavior.
 pub trait NodeDef: Send + Sync {
     /// Stable identifier used for serialization and registry lookup.
     fn type_id(&self) -> &'static str;
@@ -422,9 +567,16 @@ pub trait NodeDef: Send + Sync {
     /// Menu category, e.g. "Primitives 3D", "Operations 3D", "Math".
     fn category(&self) -> &'static str;
 
-    fn input_sockets(&self) -> Vec<SocketDef>;
-    fn output_sockets(&self) -> Vec<SocketDef>;
+    /// Mint the initial socket layout for a new instance. The graph
+    /// supplies a uid allocator so every socket lands with a unique,
+    /// graph-stable identifier.
+    fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate;
 
+    /// Property schema (default values, editor hints). Used by the UI to
+    /// render inline editors on the node row. Defaults to empty — most
+    /// nodes that have properties declare them here as well as in
+    /// `instantiate`'s `property()` calls (the former drives the editor;
+    /// the latter seeds the value on a brand-new instance).
     fn properties(&self) -> Vec<PropDef> {
         Vec::new()
     }
@@ -432,11 +584,24 @@ pub trait NodeDef: Send + Sync {
     /// Compute outputs from inputs and properties. Pure function — must not
     /// stash mutable state on `&self` and must be safe to call from a
     /// background thread.
-    fn evaluate(
-        &self,
-        inputs: &NodeInputs,
-        props: &NodeProperties,
-    ) -> Result<NodeOutputs, NodeError>;
+    fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError>;
+
+    /// Pre-connect veto hook. Return `Err(reason)` to reject the
+    /// connection. Default: allow.
+    fn validate_input_connection(&self, _ctx: &ValidateCtx) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Invoked after an edge connects to one of this node's inputs. The
+    /// default is no-op; dynamic-input nodes override this to adopt the
+    /// source's name and type, append a trailing empty slot, or mint a
+    /// matching output mirror.
+    fn on_input_connected(&self, _ctx: &mut ConnectCtx) {}
+
+    /// Invoked after an edge is removed from one of this node's inputs.
+    /// Default is no-op; dynamic-input nodes override to collapse the
+    /// now-orphan slot.
+    fn on_input_disconnected(&self, _ctx: &mut DisconnectCtx) {}
 }
 
 /// Map of `type_id` to `Arc<dyn NodeDef>`. Constructed once at startup and
@@ -503,16 +668,18 @@ impl NodeRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::node::{NodeId, NodeInstance};
 
     struct DummyNode;
     impl NodeDef for DummyNode {
         fn type_id(&self) -> &'static str { "Dummy" }
         fn category(&self) -> &'static str { "Test" }
-        fn input_sockets(&self) -> Vec<SocketDef> { vec![] }
-        fn output_sockets(&self) -> Vec<SocketDef> {
-            vec![SocketDef::required("out", SocketType::Number)]
+        fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
+            InstanceTemplate::builder(alloc)
+                .output("out", SocketType::Number)
+                .build()
         }
-        fn evaluate(&self, _i: &NodeInputs, _p: &NodeProperties) -> Result<NodeOutputs, NodeError> {
+        fn evaluate(&self, _ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
             let mut o = NodeOutputs::default();
             o.set("out", PortValue::Number(42.0));
             Ok(o)
@@ -523,9 +690,10 @@ mod tests {
     impl NodeDef for OtherNode {
         fn type_id(&self) -> &'static str { "Other" }
         fn category(&self) -> &'static str { "Test" }
-        fn input_sockets(&self) -> Vec<SocketDef> { vec![] }
-        fn output_sockets(&self) -> Vec<SocketDef> { vec![] }
-        fn evaluate(&self, _i: &NodeInputs, _p: &NodeProperties) -> Result<NodeOutputs, NodeError> {
+        fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
+            InstanceTemplate::builder(alloc).build()
+        }
+        fn evaluate(&self, _ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
             Ok(NodeOutputs::default())
         }
     }
@@ -545,68 +713,47 @@ mod tests {
     }
 
     #[test]
-    fn properties_default_to_none_when_missing() {
-        let p = NodeProperties::default();
-        assert_eq!(p.number("missing", 7.5), 7.5);
-        assert!(!p.bool_("missing", false));
+    fn template_builder_mints_uids_sequentially() {
+        let mut alloc = SocketUidAlloc::new();
+        let tpl = InstanceTemplate::builder(&mut alloc)
+            .input("a", SocketType::Number)
+            .input_opt("b", SocketType::Number)
+            .output("out", SocketType::Number)
+            .property("scale", PortValue::Number(1.0))
+            .build();
+        assert_eq!(tpl.inputs.len(), 2);
+        assert_eq!(tpl.outputs.len(), 1);
+        // First input gets uid 0, second gets 1, output gets 2.
+        assert_eq!(tpl.inputs[0].uid, SocketUid(0));
+        assert_eq!(tpl.inputs[1].uid, SocketUid(1));
+        assert_eq!(tpl.outputs[0].uid, SocketUid(2));
+        assert!(tpl.inputs[0].optional == false);
+        assert!(tpl.inputs[1].optional == true);
+        assert_eq!(
+            tpl.initial_properties.get("scale"),
+            Some(&PortValue::Number(1.0))
+        );
     }
 
     #[test]
-    fn socket_def_with_label_overrides_display() {
-        let s = SocketDef::optional("bevel_radius", SocketType::Number).with_label("Radius");
-        assert_eq!(s.name, "bevel_radius");
-        assert_eq!(s.display_label, Some("Radius"));
-        assert!(s.optional);
-    }
-
-    #[test]
-    fn prop_def_with_editor_mirrors_range_to_min_max() {
-        let p = PropDef::new("height", PortValue::Number(5.0))
-            .with_editor(EditorKind::slider_range(0.1, 40.0));
-        assert_eq!(p.min, Some(0.1));
-        assert_eq!(p.max, Some(40.0));
-        match p.editor {
-            EditorKind::Slider(a) => {
-                assert_eq!(a.min, Some(0.1));
-                assert_eq!(a.max, Some(40.0));
-            }
-            _ => panic!("expected Slider editor"),
-        }
-    }
-
-    #[test]
-    fn prop_def_bind_input_records_socket_name() {
-        let p = PropDef::new("height", PortValue::Number(5.0))
-            .with_editor(EditorKind::slider_range(0.1, 40.0))
-            .bind_input("Height");
-        assert_eq!(p.bound_input, Some("Height"));
-    }
-
-    #[test]
-    fn prop_def_from_attrs_carries_label_editor_binding() {
-        let attrs = NodeFieldAttrs::new()
-            .with_label("Bevel Radius")
-            .with_editor(EditorKind::slider_range(0.0, 10.0))
-            .bound_to("Radius");
-        let p = PropDef::from_attrs("bevel_radius", PortValue::Number(0.0), &attrs);
-        assert_eq!(p.label, Some("Bevel Radius"));
-        assert_eq!(p.bound_input, Some("Radius"));
-        assert_eq!(p.min, Some(0.0));
-        assert_eq!(p.max, Some(10.0));
-    }
-
-    #[test]
-    fn number_attrs_builders_compose() {
-        let a = NumberAttrs::with_range(1.0, 30.0)
-            .integer()
-            .with_step(1.0)
-            .with_ease_in(2.0)
-            .with_snap_grid();
-        assert_eq!(a.min, Some(1.0));
-        assert_eq!(a.max, Some(30.0));
-        assert!(a.integer);
-        assert_eq!(a.step, Some(1.0));
-        assert_eq!(a.ease_in, Some(2.0));
-        assert!(a.snap_grid);
+    fn eval_ctx_input_named_resolves_through_instance() {
+        let mut alloc = SocketUidAlloc::new();
+        let mut inst = NodeInstance::new(NodeId(1), "Dummy", [0.0, 0.0]);
+        let tpl = InstanceTemplate::builder(&mut alloc)
+            .input("size", SocketType::Number)
+            .build();
+        inst.inputs = tpl.inputs;
+        let uid = inst.inputs[0].uid;
+        let mut ins = NodeInputs::default();
+        ins.insert(uid, PortValue::Number(7.5));
+        let props = NodeProperties::default();
+        let ctx = EvalCtx {
+            instance: &inst,
+            properties: &props,
+            inputs: &ins,
+        };
+        assert_eq!(ctx.input(uid), &PortValue::Number(7.5));
+        assert_eq!(ctx.input_named("size"), &PortValue::Number(7.5));
+        assert_eq!(ctx.input_named("missing"), &PortValue::None);
     }
 }

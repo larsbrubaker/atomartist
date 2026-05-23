@@ -4,8 +4,9 @@ use std::sync::Arc;
 
 use crate::geometry::generate_torus;
 use crate::graph::node::PortValue;
+use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    NodeDef, NodeError, NodeInputs, NodeOutputs, NodeProperties, NodeRegistry, PropDef, SocketDef,
+    EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeRegistry, PropDef,
 };
 use crate::socket_types::SocketType;
 
@@ -16,9 +17,10 @@ impl NodeDef for TorusNode {
     fn display_name(&self) -> &'static str { "Torus" }
     fn category(&self) -> &'static str { "Primitives 3D" }
 
-    fn input_sockets(&self) -> Vec<SocketDef> { vec![] }
-    fn output_sockets(&self) -> Vec<SocketDef> {
-        vec![SocketDef::required("out", SocketType::Geometry3d)]
+    fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
+        InstanceTemplate::builder(alloc)
+            .output("out", SocketType::Geometry3d)
+            .build()
     }
 
     fn properties(&self) -> Vec<PropDef> {
@@ -30,11 +32,11 @@ impl NodeDef for TorusNode {
         ]
     }
 
-    fn evaluate(&self, _i: &NodeInputs, p: &NodeProperties) -> Result<NodeOutputs, NodeError> {
-        let major = p.number("major_radius", 10.0);
-        let minor = p.number("minor_radius", 3.0);
-        let su = p.number("segments_major", 32.0).round().clamp(3.0, 256.0) as u32;
-        let sv = p.number("segments_minor", 16.0).round().clamp(3.0, 256.0) as u32;
+    fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
+        let major = ctx.properties.number("major_radius", 10.0);
+        let minor = ctx.properties.number("minor_radius", 3.0);
+        let su = ctx.properties.number("segments_major", 32.0).round().clamp(3.0, 256.0) as u32;
+        let sv = ctx.properties.number("segments_minor", 16.0).round().clamp(3.0, 256.0) as u32;
         let mut o = NodeOutputs::default();
         o.set("out", PortValue::Geometry3d(Arc::new(generate_torus(major, minor, su, sv))));
         Ok(o)

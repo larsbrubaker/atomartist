@@ -4,10 +4,7 @@
 use std::sync::Arc;
 
 use atomartist_lib::{
-    graph::{
-        executor::evaluate_all,
-        Edge, Graph, NodeId, NodeInstance, PortValue, SocketId,
-    },
+    graph::{executor::evaluate_all, Edge, Graph, NodeId, PortValue},
     nodes,
     registry::NodeRegistry,
 };
@@ -18,29 +15,20 @@ fn box_transform_graph() -> (Graph, NodeRegistry, NodeId) {
     nodes::register_all(&mut reg);
     let mut g = Graph::new();
 
-    let box_id = g.allocate_id();
-    let mut box_node = NodeInstance::new(box_id, "Box", [0.0, 0.0]);
-    box_node.properties.insert("width", PortValue::Number(2.0));
-    box_node.properties.insert("height", PortValue::Number(2.0));
-    box_node.properties.insert("depth", PortValue::Number(2.0));
-    g.add_node(box_node).unwrap();
+    let box_id = g.add_new_node("Box", [0.0, 0.0], &reg).unwrap();
+    g.set_property(box_id, "width", PortValue::Number(2.0)).unwrap();
+    g.set_property(box_id, "height", PortValue::Number(2.0)).unwrap();
+    g.set_property(box_id, "depth", PortValue::Number(2.0)).unwrap();
 
-    let xform_id = g.allocate_id();
-    let mut xform = NodeInstance::new(xform_id, "Transform", [200.0, 0.0]);
-    xform.properties.insert("ty", PortValue::Number(5.0));
-    xform.properties.insert("sx", PortValue::Number(1.0));
-    xform.properties.insert("sy", PortValue::Number(1.0));
-    xform.properties.insert("sz", PortValue::Number(1.0));
-    g.add_node(xform).unwrap();
+    let xform_id = g.add_new_node("Transform", [200.0, 0.0], &reg).unwrap();
+    g.set_property(xform_id, "ty", PortValue::Number(5.0)).unwrap();
+    g.set_property(xform_id, "sx", PortValue::Number(1.0)).unwrap();
+    g.set_property(xform_id, "sy", PortValue::Number(1.0)).unwrap();
+    g.set_property(xform_id, "sz", PortValue::Number(1.0)).unwrap();
 
-    g.connect(
-        Edge {
-            from: SocketId { node: box_id, name: "out" },
-            to: SocketId { node: xform_id, name: "input" },
-        },
-        &reg,
-    )
-    .unwrap();
+    let out_box = g.get(box_id).unwrap().output_by_name("out").unwrap().uid;
+    let in_xform = g.get(xform_id).unwrap().input_by_name("input").unwrap().uid;
+    g.connect(Edge::new(box_id, out_box, xform_id, in_xform), &reg).unwrap();
 
     (g, reg, xform_id)
 }
@@ -50,8 +38,9 @@ fn box_through_transform_produces_translated_mesh() {
     let (mut g, reg, xform_id) = box_transform_graph();
     evaluate_all(&mut g, &reg).unwrap();
 
+    let out_uid = g.get(xform_id).unwrap().output_by_name("out").unwrap().uid;
     let out = g.get(xform_id).unwrap()
-        .cached_outputs.get("out").cloned().unwrap();
+        .cached_outputs.get(&out_uid).cloned().unwrap();
     match out {
         PortValue::Geometry3d(mesh) => {
             assert_mesh_translated_y(&mesh, 5.0);
@@ -63,8 +52,6 @@ fn box_through_transform_produces_translated_mesh() {
 fn assert_mesh_translated_y(mesh: &MeshGL, expected_dy: f32) {
     let stride = mesh.num_prop as usize;
     assert!(stride > 0);
-    // Box(2,2,2) is centered at origin, so y values range from -1 to +1.
-    // After translate_y=5, y values should range from 4 to 6.
     let mut min_y = f32::INFINITY;
     let mut max_y = f32::NEG_INFINITY;
     let n = mesh.vert_properties.len() / stride;
@@ -95,29 +82,21 @@ fn rectangle_through_extrude_produces_solid() {
     let mut reg = NodeRegistry::new();
     nodes::register_all(&mut reg);
     let mut g = Graph::new();
-    let r = g.allocate_id();
-    let e = g.allocate_id();
-    let mut rn = NodeInstance::new(r, "Rectangle", [0.0, 0.0]);
-    rn.properties.insert("width", PortValue::Number(4.0));
-    rn.properties.insert("height", PortValue::Number(2.0));
-    let mut en = NodeInstance::new(e, "Extrude", [200.0, 0.0]);
-    en.properties.insert("height", PortValue::Number(3.0));
-    g.add_node(rn).unwrap();
-    g.add_node(en).unwrap();
-    // Extrude's input socket is `Paths` (Path2d), not `input`.
-    g.connect(
-        Edge { from: SocketId { node: r, name: "out" }, to: SocketId { node: e, name: "Paths" } },
-        &reg,
-    ).unwrap();
+    let r = g.add_new_node("Rectangle", [0.0, 0.0], &reg).unwrap();
+    g.set_property(r, "width", PortValue::Number(4.0)).unwrap();
+    g.set_property(r, "height", PortValue::Number(2.0)).unwrap();
+    let e = g.add_new_node("Extrude", [200.0, 0.0], &reg).unwrap();
+    g.set_property(e, "height", PortValue::Number(3.0)).unwrap();
+    let out_r = g.get(r).unwrap().output_by_name("out").unwrap().uid;
+    let in_e = g.get(e).unwrap().input_by_name("Paths").unwrap().uid;
+    g.connect(Edge::new(r, out_r, e, in_e), &reg).unwrap();
 
     atomartist_lib::graph::executor::evaluate_all(&mut g, &reg).unwrap();
-    // Extrude's output socket is named `Geometry`.
-    match g.get(e).unwrap().cached_outputs.get("Geometry") {
+    let geo_uid = g.get(e).unwrap().output_by_name("Geometry").unwrap().uid;
+    match g.get(e).unwrap().cached_outputs.get(&geo_uid) {
         Some(PortValue::Geometry3d(m)) => {
-            // Extrude produces caps + sides; vert count > 0, tri count > 0.
             assert!(m.vert_properties.len() > 0);
             assert!(m.tri_verts.len() >= 12);
-            // Z extents are ±1.5.
             let stride = m.num_prop as usize;
             let n = m.vert_properties.len() / stride;
             let mut z_min = f32::INFINITY; let mut z_max = f32::NEG_INFINITY;
@@ -139,41 +118,28 @@ fn combine_two_boxes_via_executor() {
     nodes::register_all(&mut reg);
     let mut g = Graph::new();
 
-    let a = g.allocate_id();
-    let b = g.allocate_id();
-    let c = g.allocate_id();
-    g.add_node(NodeInstance::new(a, "Box", [0.0, 0.0])).unwrap();
-    g.add_node(NodeInstance::new(b, "Box", [0.0, 100.0])).unwrap();
-    g.add_node(NodeInstance::new(c, "Combine", [200.0, 0.0])).unwrap();
+    let a = g.add_new_node("Box", [0.0, 0.0], &reg).unwrap();
+    let b = g.add_new_node("Box", [0.0, 100.0], &reg).unwrap();
+    let c = g.add_new_node("Combine", [200.0, 0.0], &reg).unwrap();
 
-    g.connect(
-        Edge {
-            from: SocketId { node: a, name: "out" },
-            to: SocketId { node: c, name: "input_1" },
-        },
-        &reg,
-    ).unwrap();
-    g.connect(
-        Edge {
-            from: SocketId { node: b, name: "out" },
-            to: SocketId { node: c, name: "input_2" },
-        },
-        &reg,
-    ).unwrap();
+    let out_a = g.get(a).unwrap().output_by_name("out").unwrap().uid;
+    let out_b = g.get(b).unwrap().output_by_name("out").unwrap().uid;
+    let in_1 = g.get(c).unwrap().input_by_name("input_1").unwrap().uid;
+    let in_2 = g.get(c).unwrap().input_by_name("input_2").unwrap().uid;
+    g.connect(Edge::new(a, out_a, c, in_1), &reg).unwrap();
+    g.connect(Edge::new(b, out_b, c, in_2), &reg).unwrap();
 
     evaluate_all(&mut g, &reg).unwrap();
-    match g.get(c).unwrap().cached_outputs.get("out") {
+    let out_c = g.get(c).unwrap().output_by_name("out").unwrap().uid;
+    match g.get(c).unwrap().cached_outputs.get(&out_c) {
         Some(PortValue::Geometry3d(m)) => {
-            // Each Box has 24 verts, 12 tris; combined → 48, 24.
             assert_eq!(m.vert_properties.len() / m.num_prop as usize, 48);
             assert_eq!(m.tri_verts.len() / 3, 24);
         }
         other => panic!("unexpected output: {:?}", other.map(|v| v.socket_type())),
     }
 
-    // Just make sure we hold the result via Arc — sanity check on the
-    // PortValue<->Arc invariant.
-    let _arc: Arc<MeshGL> = match g.get(c).unwrap().cached_outputs.get("out") {
+    let _arc: Arc<MeshGL> = match g.get(c).unwrap().cached_outputs.get(&out_c) {
         Some(PortValue::Geometry3d(m)) => m.clone(),
         _ => panic!(),
     };

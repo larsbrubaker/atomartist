@@ -1,15 +1,16 @@
 //! GraphOutput — declarative output port for a subgraph.
 //!
-//! Mirrors GraphInput on the other side. When the host graph is wrapped
-//! as a `SubgraphNodeDef`, each GraphOutput contributes one output
-//! socket named by `name`. Until then, GraphOutput is a passthrough that
-//! exposes `out` for downstream debugging.
+//! NOTE: This node is slated for removal in Stage 1i of the engine refactor;
+//! the unified `Output` node (Stage 2) absorbs both this and the legacy
+//! display-anchor `OutputNode`. Kept here in its single-input form purely
+//! so the workspace compiles during the refactor — no behavior changes.
 
 use std::sync::Arc;
 
 use crate::graph::node::PortValue;
+use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    NodeDef, NodeError, NodeInputs, NodeOutputs, NodeProperties, NodeRegistry, PropDef, SocketDef,
+    EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeRegistry, PropDef,
 };
 use crate::socket_types::SocketType;
 
@@ -20,21 +21,19 @@ impl NodeDef for GraphOutputNode {
     fn display_name(&self) -> &'static str { "Graph Output" }
     fn category(&self) -> &'static str { "I/O" }
 
-    fn input_sockets(&self) -> Vec<SocketDef> {
-        vec![SocketDef::required("in", SocketType::Geometry3d)]
-    }
-    fn output_sockets(&self) -> Vec<SocketDef> {
-        vec![SocketDef::required("out", SocketType::Geometry3d)]
+    fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
+        InstanceTemplate::builder(alloc)
+            .input("in", SocketType::Geometry3d)
+            .output("out", SocketType::Geometry3d)
+            .build()
     }
 
     fn properties(&self) -> Vec<PropDef> {
-        vec![
-            PropDef::new("name", PortValue::StringVal(Arc::new("output".into()))),
-        ]
+        vec![PropDef::new("name", PortValue::StringVal(Arc::new("output".into())))]
     }
 
-    fn evaluate(&self, inputs: &NodeInputs, _props: &NodeProperties) -> Result<NodeOutputs, NodeError> {
-        let v = inputs.get("in").clone();
+    fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
+        let v = ctx.input_named("in").clone();
         let mut out = NodeOutputs::default();
         out.set("out", v);
         Ok(out)

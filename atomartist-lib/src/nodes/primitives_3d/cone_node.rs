@@ -4,8 +4,9 @@ use std::sync::Arc;
 
 use crate::geometry::generate_cone;
 use crate::graph::node::PortValue;
+use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    NodeDef, NodeError, NodeInputs, NodeOutputs, NodeProperties, NodeRegistry, PropDef, SocketDef,
+    EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeRegistry, PropDef,
 };
 use crate::socket_types::SocketType;
 
@@ -16,9 +17,10 @@ impl NodeDef for ConeNode {
     fn display_name(&self) -> &'static str { "Cone" }
     fn category(&self) -> &'static str { "Primitives 3D" }
 
-    fn input_sockets(&self) -> Vec<SocketDef> { vec![] }
-    fn output_sockets(&self) -> Vec<SocketDef> {
-        vec![SocketDef::required("out", SocketType::Geometry3d)]
+    fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
+        InstanceTemplate::builder(alloc)
+            .output("out", SocketType::Geometry3d)
+            .build()
     }
 
     fn properties(&self) -> Vec<PropDef> {
@@ -29,10 +31,10 @@ impl NodeDef for ConeNode {
         ]
     }
 
-    fn evaluate(&self, _i: &NodeInputs, p: &NodeProperties) -> Result<NodeOutputs, NodeError> {
-        let r = p.number("radius", 10.0);
-        let h = p.number("height", 20.0);
-        let s = p.number("segments", 32.0).round().clamp(3.0, 256.0) as u32;
+    fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
+        let r = ctx.properties.number("radius", 10.0);
+        let h = ctx.properties.number("height", 20.0);
+        let s = ctx.properties.number("segments", 32.0).round().clamp(3.0, 256.0) as u32;
         let mut o = NodeOutputs::default();
         o.set("out", PortValue::Geometry3d(Arc::new(generate_cone(r, h, s))));
         Ok(o)

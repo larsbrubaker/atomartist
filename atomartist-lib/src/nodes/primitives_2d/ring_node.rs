@@ -5,8 +5,9 @@ use std::sync::Arc;
 use manifold_rust::cross_section::CrossSection;
 
 use crate::graph::node::PortValue;
+use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    NodeDef, NodeError, NodeInputs, NodeOutputs, NodeProperties, NodeRegistry, PropDef, SocketDef,
+    EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeRegistry, PropDef,
 };
 use crate::socket_types::SocketType;
 
@@ -17,9 +18,10 @@ impl NodeDef for RingNode {
     fn display_name(&self) -> &'static str { "Ring" }
     fn category(&self) -> &'static str { "Primitives 2D" }
 
-    fn input_sockets(&self) -> Vec<SocketDef> { vec![] }
-    fn output_sockets(&self) -> Vec<SocketDef> {
-        vec![SocketDef::required("out", SocketType::Path2d)]
+    fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
+        InstanceTemplate::builder(alloc)
+            .output("out", SocketType::Path2d)
+            .build()
     }
 
     fn properties(&self) -> Vec<PropDef> {
@@ -30,10 +32,10 @@ impl NodeDef for RingNode {
         ]
     }
 
-    fn evaluate(&self, _inputs: &NodeInputs, props: &NodeProperties) -> Result<NodeOutputs, NodeError> {
-        let r_out = props.number("outer_radius", 10.0);
-        let r_in = props.number("inner_radius", 6.0).min(r_out - 1e-6).max(0.0);
-        let segs = props.number("segments", 32.0).round().clamp(3.0, 256.0) as i32;
+    fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
+        let r_out = ctx.properties.number("outer_radius", 10.0);
+        let r_in = ctx.properties.number("inner_radius", 6.0).min(r_out - 1e-6).max(0.0);
+        let segs = ctx.properties.number("segments", 32.0).round().clamp(3.0, 256.0) as i32;
         let outer = CrossSection::circle(r_out, segs);
         let cs = if r_in > 1e-6 {
             let inner = CrossSection::circle(r_in, segs);

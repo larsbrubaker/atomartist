@@ -183,47 +183,31 @@ pub fn fresh_state_with_builtins() -> AppState {
 /// NodeDesigner reference scene) and runs the first evaluation so the
 /// 3D viewport shows a rounded extruded plate on app start.
 pub fn fresh_state_with_starter_graph() -> AppState {
-    use atomartist_lib::graph::node::NodeInstance;
     use atomartist_lib::graph::graph::Edge;
-    use atomartist_lib::graph::node::SocketId;
     let state = fresh_state_with_builtins();
     let extrude_id = {
         let mut g = state.graph.lock().unwrap();
-        let mk = |g: &mut atomartist_lib::Graph,
-                  type_id: &'static str,
-                  pos: [f64; 2],
-                  reg: &atomartist_lib::registry::NodeRegistry| {
-            let id = g.allocate_id();
-            let mut n = NodeInstance::new(id, type_id, pos);
-            if let Some(def) = reg.get(type_id) {
-                for prop in def.properties() {
-                    n.properties.insert(prop.name, prop.default);
-                }
-            }
-            let _ = g.add_node(n);
-            id
-        };
 
         // Y is up in canvas-space and node.position is the node's top-left.
-        // Place starter nodes near the top of the bottom panel so they sit
-        // entirely inside the visible area on first launch.
-        let rect = mk(&mut g, "Rectangle", [40.0, 240.0], &state.registry);
-        let inflate = mk(&mut g, "Inflate", [260.0, 240.0], &state.registry);
-        let extrude = mk(&mut g, "Extrude", [480.0, 240.0], &state.registry);
-        let output = mk(&mut g, "Output", [700.0, 240.0], &state.registry);
+        let rect = g.add_new_node("Rectangle", [40.0, 240.0], &state.registry).unwrap();
+        let inflate = g.add_new_node("Inflate", [260.0, 240.0], &state.registry).unwrap();
+        let extrude = g.add_new_node("Extrude", [480.0, 240.0], &state.registry).unwrap();
+        let output = g.add_new_node("Output", [700.0, 240.0], &state.registry).unwrap();
 
-        let _ = g.connect(
-            Edge { from: SocketId { node: rect, name: "out" }, to: SocketId { node: inflate, name: "input" } },
-            &state.registry,
-        );
-        let _ = g.connect(
-            Edge { from: SocketId { node: inflate, name: "out" }, to: SocketId { node: extrude, name: "Paths" } },
-            &state.registry,
-        );
-        let _ = g.connect(
-            Edge { from: SocketId { node: extrude, name: "Geometry" }, to: SocketId { node: output, name: "in" } },
-            &state.registry,
-        );
+        // Resolve socket uids on the fresh instances, then connect.
+        let connect_by_name =
+            |g: &mut atomartist_lib::Graph,
+             from: atomartist_lib::graph::node::NodeId,
+             from_name: &str,
+             to: atomartist_lib::graph::node::NodeId,
+             to_name: &str| {
+                let from_uid = g.get(from).unwrap().output_by_name(from_name).unwrap().uid;
+                let to_uid = g.get(to).unwrap().input_by_name(to_name).unwrap().uid;
+                let _ = g.connect(Edge::new(from, from_uid, to, to_uid), &state.registry);
+            };
+        connect_by_name(&mut g, rect, "out", inflate, "input");
+        connect_by_name(&mut g, inflate, "out", extrude, "Paths");
+        connect_by_name(&mut g, extrude, "Geometry", output, "in");
         output
     };
     state.set_display_node(Some(extrude_id));

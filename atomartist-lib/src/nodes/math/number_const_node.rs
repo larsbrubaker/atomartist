@@ -2,8 +2,9 @@
 //! of truth driving multiple Box / Cylinder / Transform inputs.
 
 use crate::graph::node::PortValue;
+use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    NodeDef, NodeError, NodeInputs, NodeOutputs, NodeProperties, NodeRegistry, PropDef, SocketDef,
+    EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeRegistry, PropDef,
 };
 use crate::socket_types::SocketType;
 
@@ -14,17 +15,18 @@ impl NodeDef for NumberConstNode {
     fn display_name(&self) -> &'static str { "Number" }
     fn category(&self) -> &'static str { "Math" }
 
-    fn input_sockets(&self) -> Vec<SocketDef> { vec![] }
-    fn output_sockets(&self) -> Vec<SocketDef> {
-        vec![SocketDef::required("out", SocketType::Number)]
+    fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
+        InstanceTemplate::builder(alloc)
+            .output("out", SocketType::Number)
+            .build()
     }
 
     fn properties(&self) -> Vec<PropDef> {
         vec![PropDef::new("value", PortValue::Number(1.0)).with_range(-10_000.0, 10_000.0)]
     }
 
-    fn evaluate(&self, _inputs: &NodeInputs, props: &NodeProperties) -> Result<NodeOutputs, NodeError> {
-        let v = props.number("value", 1.0);
+    fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
+        let v = ctx.properties.number("value", 1.0);
         let mut out = NodeOutputs::default();
         out.set("out", PortValue::Number(v));
         Ok(out)

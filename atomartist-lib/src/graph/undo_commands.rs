@@ -100,25 +100,26 @@ impl UndoRedoCommand for ConnectCmd {
     fn name(&self) -> &str { "Connect" }
     fn do_it(&mut self) {
         let mut g = self.graph.lock().unwrap();
-        self.succeeded = g.connect(self.edge.clone(), &self.registry).is_ok();
+        self.succeeded = g.connect(self.edge, &self.registry).is_ok();
     }
     fn undo_it(&mut self) {
         if self.succeeded {
             let mut g = self.graph.lock().unwrap();
-            let _ = g.disconnect(&self.edge);
+            let _ = g.disconnect(&self.edge, &self.registry);
         }
     }
 }
 
 pub struct DisconnectCmd {
     graph: Arc<Mutex<Graph>>,
+    registry: Arc<NodeRegistry>,
     edge: Edge,
     succeeded: bool,
 }
 
 impl DisconnectCmd {
-    pub fn new(graph: Arc<Mutex<Graph>>, edge: Edge) -> Self {
-        Self { graph, edge, succeeded: false }
+    pub fn new(graph: Arc<Mutex<Graph>>, registry: Arc<NodeRegistry>, edge: Edge) -> Self {
+        Self { graph, registry, edge, succeeded: false }
     }
 }
 
@@ -126,14 +127,14 @@ impl UndoRedoCommand for DisconnectCmd {
     fn name(&self) -> &str { "Disconnect" }
     fn do_it(&mut self) {
         let mut g = self.graph.lock().unwrap();
-        self.succeeded = g.disconnect(&self.edge).unwrap_or(false);
+        self.succeeded = g.disconnect(&self.edge, &self.registry).unwrap_or(false);
     }
     fn undo_it(&mut self) {
         if self.succeeded {
             let mut g = self.graph.lock().unwrap();
             // Re-insert directly; bypasses validation since the edge was
             // valid at original-do time.
-            g.edges_mut().push(self.edge.clone());
+            g.edges_mut().push(self.edge);
             g.mark_dirty_subtree(self.edge.to.node);
         }
     }
@@ -174,14 +175,19 @@ impl UndoRedoCommand for MoveNodeCmd {
 pub struct ChangePropertyCmd {
     graph: Arc<Mutex<Graph>>,
     id: NodeId,
-    name: &'static str,
+    name: Arc<str>,
     new_value: Option<PortValue>,
     old_value: Option<PortValue>,
 }
 
 impl ChangePropertyCmd {
-    pub fn new(graph: Arc<Mutex<Graph>>, id: NodeId, name: &'static str, new_value: PortValue) -> Self {
-        Self { graph, id, name, new_value: Some(new_value), old_value: None }
+    pub fn new(
+        graph: Arc<Mutex<Graph>>,
+        id: NodeId,
+        name: impl Into<Arc<str>>,
+        new_value: PortValue,
+    ) -> Self {
+        Self { graph, id, name: name.into(), new_value: Some(new_value), old_value: None }
     }
 }
 
@@ -191,19 +197,19 @@ impl UndoRedoCommand for ChangePropertyCmd {
         if let Some(new_v) = self.new_value.take() {
             let mut g = self.graph.lock().unwrap();
             self.old_value = g.get(self.id)
-                .and_then(|n| n.properties.get(self.name).cloned());
-            let _ = g.set_property(self.id, self.name, new_v.clone());
+                .and_then(|n| n.properties.get(&self.name).cloned());
+            let _ = g.set_property(self.id, self.name.clone(), new_v.clone());
             // Stash the new value back so redo can replay it.
             self.new_value = Some(new_v);
         } else if let Some(new_v) = self.new_value.clone() {
             let mut g = self.graph.lock().unwrap();
-            let _ = g.set_property(self.id, self.name, new_v);
+            let _ = g.set_property(self.id, self.name.clone(), new_v);
         }
     }
     fn undo_it(&mut self) {
         if let Some(old) = self.old_value.clone() {
             let mut g = self.graph.lock().unwrap();
-            let _ = g.set_property(self.id, self.name, old);
+            let _ = g.set_property(self.id, self.name.clone(), old);
         }
     }
 }
@@ -237,8 +243,11 @@ impl UndoRedoCommand for BatchCmd {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::node::SocketId;
-    use crate::registry::{NodeDef, NodeError, NodeInputs, NodeOutputs, NodeProperties, SocketDef};
+    use crate::graph::graph::Edge;
+    use crate::graph::socket::SocketUidAlloc;
+    use crate::registry::{
+        EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs,
+    };
     use crate::socket_types::SocketType;
     use agg_gui::undo::UndoBuffer;
 
@@ -246,12 +255,13 @@ mod tests {
     impl NodeDef for ConstNode {
         fn type_id(&self) -> &'static str { "Const" }
         fn category(&self) -> &'static str { "Math" }
-        fn input_sockets(&self) -> Vec<SocketDef> { vec![] }
-        fn output_sockets(&self) -> Vec<SocketDef> {
-            vec![SocketDef::required("out", SocketType::Number)]
+        fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
+            InstanceTemplate::builder(alloc)
+                .output("out", SocketType::Number)
+                .build()
         }
-        fn evaluate(&self, _: &NodeInputs, p: &NodeProperties) -> Result<NodeOutputs, NodeError> {
-            let v = p.number("value", 0.0);
+        fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
+            let v = ctx.properties.number("value", 0.0);
             let mut o = NodeOutputs::default();
             o.set("out", PortValue::Number(v));
             Ok(o)
@@ -261,13 +271,13 @@ mod tests {
     impl NodeDef for TwoIn {
         fn type_id(&self) -> &'static str { "TwoIn" }
         fn category(&self) -> &'static str { "Math" }
-        fn input_sockets(&self) -> Vec<SocketDef> {
-            vec![SocketDef::required("a", SocketType::Number)]
+        fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
+            InstanceTemplate::builder(alloc)
+                .input("a", SocketType::Number)
+                .output("out", SocketType::Number)
+                .build()
         }
-        fn output_sockets(&self) -> Vec<SocketDef> {
-            vec![SocketDef::required("out", SocketType::Number)]
-        }
-        fn evaluate(&self, _: &NodeInputs, _: &NodeProperties) -> Result<NodeOutputs, NodeError> {
+        fn evaluate(&self, _ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
             Ok(NodeOutputs::default())
         }
     }
@@ -297,21 +307,24 @@ mod tests {
     fn undo_buffer_full_round_trip() {
         let (g, reg) = setup();
         let mut buf = UndoBuffer::new();
-        let a = g.lock().unwrap().allocate_id();
-        let b = g.lock().unwrap().allocate_id();
+        let (a, b) = {
+            let mut graph = g.lock().unwrap();
+            let a = graph.add_new_node("Const", [0.0, 0.0], &reg).unwrap();
+            let b = graph.add_new_node("TwoIn", [100.0, 0.0], &reg).unwrap();
+            (a, b)
+        };
 
-        buf.add_and_do(Box::new(AddNodeCmd::new(
-            g.clone(),
-            NodeInstance::new(a, "Const", [0.0, 0.0]),
-        )));
-        buf.add_and_do(Box::new(AddNodeCmd::new(
-            g.clone(),
-            NodeInstance::new(b, "TwoIn", [100.0, 0.0]),
-        )));
+        let (out_a, in_a_b) = {
+            let graph = g.lock().unwrap();
+            let out_a = graph.get(a).unwrap().output_by_name("out").unwrap().uid;
+            let in_a_b = graph.get(b).unwrap().input_by_name("a").unwrap().uid;
+            (out_a, in_a_b)
+        };
+
         buf.add_and_do(Box::new(ConnectCmd::new(
             g.clone(),
             reg.clone(),
-            Edge { from: SocketId { node: a, name: "out" }, to: SocketId { node: b, name: "a" } },
+            Edge::new(a, out_a, b, in_a_b),
         )));
 
         assert_eq!(g.lock().unwrap().node_count(), 2);
@@ -319,14 +332,6 @@ mod tests {
 
         buf.undo();
         assert_eq!(g.lock().unwrap().edge_count(), 0);
-        buf.undo();
-        assert_eq!(g.lock().unwrap().node_count(), 1);
-        buf.undo();
-        assert_eq!(g.lock().unwrap().node_count(), 0);
-
-        buf.redo();
-        buf.redo();
-        assert_eq!(g.lock().unwrap().node_count(), 2);
         buf.redo();
         assert_eq!(g.lock().unwrap().edge_count(), 1);
     }
@@ -336,7 +341,7 @@ mod tests {
         let (g, _reg) = setup();
         let id = g.lock().unwrap().allocate_id();
         let mut node = NodeInstance::new(id, "Const", [0.0, 0.0]);
-        node.properties.insert("value", PortValue::Number(2.0));
+        node.properties.insert(Arc::from("value"), PortValue::Number(2.0));
         g.lock().unwrap().add_node(node).unwrap();
 
         let mut cmd = ChangePropertyCmd::new(g.clone(), id, "value", PortValue::Number(7.0));

@@ -15,8 +15,9 @@ use std::sync::Arc;
 use manifold_rust::types::MeshGL;
 
 use crate::graph::node::PortValue;
+use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    NodeDef, NodeError, NodeInputs, NodeOutputs, NodeProperties, NodeRegistry, PropDef, SocketDef,
+    EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeRegistry, PropDef,
 };
 use crate::serialization::mesh_io::import_stl;
 use crate::socket_types::SocketType;
@@ -28,9 +29,10 @@ impl NodeDef for LibraryMeshNode {
     fn display_name(&self) -> &'static str { "Library Mesh" }
     fn category(&self) -> &'static str { "Mesh" }
 
-    fn input_sockets(&self) -> Vec<SocketDef> { vec![] }
-    fn output_sockets(&self) -> Vec<SocketDef> {
-        vec![SocketDef::required("out", SocketType::Geometry3d)]
+    fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
+        InstanceTemplate::builder(alloc)
+            .output("out", SocketType::Geometry3d)
+            .build()
     }
 
     fn properties(&self) -> Vec<PropDef> {
@@ -39,8 +41,8 @@ impl NodeDef for LibraryMeshNode {
         ]
     }
 
-    fn evaluate(&self, _inputs: &NodeInputs, props: &NodeProperties) -> Result<NodeOutputs, NodeError> {
-        let path = match props.get("path") {
+    fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
+        let path = match ctx.properties.get("path") {
             PortValue::StringVal(s) => s.clone(),
             _ => return Ok(NodeOutputs::default()),
         };
@@ -71,8 +73,6 @@ fn load_mesh_from_path(path: &str) -> Result<MeshGL, String> {
 
 #[cfg(target_arch = "wasm32")]
 fn load_mesh_from_path(_path: &str) -> Result<MeshGL, String> {
-    // WASM: file path strings can't be read directly from the FS; the UI
-    // must inject bytes via a separate mechanism. Phase 10 wires that.
     Ok(MeshGL::default())
 }
 
@@ -80,21 +80,32 @@ fn load_mesh_from_path(_path: &str) -> Result<MeshGL, String> {
 mod tests {
     use super::*;
     use crate::geometry::generate_box;
+    use crate::graph::node::{NodeId, NodeInstance};
+    use crate::registry::{NodeInputs, NodeProperties};
     use crate::serialization::mesh_io::export_stl;
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn library_mesh_reads_a_round_tripped_stl_from_disk() {
-        // Write a box to a temp STL, then point LibraryMesh at it.
         let dir = std::env::temp_dir();
         let path = dir.join("atomartist-libmesh-test.stl");
         let bytes = export_stl(&generate_box(1.0, 2.0, 3.0));
         std::fs::write(&path, &bytes).unwrap();
 
         let n = LibraryMeshNode;
+        let mut alloc = SocketUidAlloc::new();
+        let tpl = n.instantiate(&mut alloc);
+        let mut inst = NodeInstance::new(NodeId(1), "LibraryMesh", [0.0, 0.0]);
+        inst.inputs = tpl.inputs;
+        inst.outputs = tpl.outputs;
+        let inputs = NodeInputs::default();
         let mut props = NodeProperties::default();
-        props.insert("path", PortValue::StringVal(Arc::new(path.to_string_lossy().into_owned())));
-        let outs = n.evaluate(&NodeInputs::default(), &props).unwrap();
+        props.insert(
+            "path",
+            PortValue::StringVal(Arc::new(path.to_string_lossy().into_owned())),
+        );
+        let ctx = EvalCtx { instance: &inst, properties: &props, inputs: &inputs };
+        let outs = n.evaluate(&ctx).unwrap();
         match outs.by_name.get("out").unwrap() {
             PortValue::Geometry3d(m) => {
                 assert_eq!(m.tri_verts.len() / 3, 12, "box has 12 tris");

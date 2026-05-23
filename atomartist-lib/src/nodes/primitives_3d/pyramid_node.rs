@@ -4,8 +4,9 @@ use std::sync::Arc;
 
 use crate::geometry::generate_pyramid;
 use crate::graph::node::PortValue;
+use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    NodeDef, NodeError, NodeInputs, NodeOutputs, NodeProperties, NodeRegistry, PropDef, SocketDef,
+    EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeRegistry, PropDef,
 };
 use crate::socket_types::SocketType;
 
@@ -16,9 +17,10 @@ impl NodeDef for PyramidNode {
     fn display_name(&self) -> &'static str { "Pyramid" }
     fn category(&self) -> &'static str { "Primitives 3D" }
 
-    fn input_sockets(&self) -> Vec<SocketDef> { vec![] }
-    fn output_sockets(&self) -> Vec<SocketDef> {
-        vec![SocketDef::required("out", SocketType::Geometry3d)]
+    fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
+        InstanceTemplate::builder(alloc)
+            .output("out", SocketType::Geometry3d)
+            .build()
     }
 
     fn properties(&self) -> Vec<PropDef> {
@@ -29,10 +31,10 @@ impl NodeDef for PyramidNode {
         ]
     }
 
-    fn evaluate(&self, _i: &NodeInputs, p: &NodeProperties) -> Result<NodeOutputs, NodeError> {
-        let w = p.number("width", 20.0);
-        let h = p.number("height", 20.0);
-        let d = p.number("depth", 20.0);
+    fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
+        let w = ctx.properties.number("width", 20.0);
+        let h = ctx.properties.number("height", 20.0);
+        let d = ctx.properties.number("depth", 20.0);
         let mut o = NodeOutputs::default();
         o.set("out", PortValue::Geometry3d(Arc::new(generate_pyramid(w, h, d))));
         Ok(o)

@@ -11,8 +11,9 @@ use std::sync::Arc;
 
 use crate::geometry::{apply_transform, bounds};
 use crate::graph::node::PortValue;
+use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    NodeDef, NodeError, NodeInputs, NodeOutputs, NodeProperties, NodeRegistry, PropDef, SocketDef,
+    EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeRegistry, PropDef,
 };
 use crate::socket_types::SocketType;
 
@@ -23,11 +24,11 @@ impl NodeDef for AlignNode {
     fn display_name(&self) -> &'static str { "Align" }
     fn category(&self) -> &'static str { "Operations 3D" }
 
-    fn input_sockets(&self) -> Vec<SocketDef> {
-        vec![SocketDef::required("input", SocketType::Geometry3d)]
-    }
-    fn output_sockets(&self) -> Vec<SocketDef> {
-        vec![SocketDef::required("out", SocketType::Geometry3d)]
+    fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
+        InstanceTemplate::builder(alloc)
+            .input("input", SocketType::Geometry3d)
+            .output("out", SocketType::Geometry3d)
+            .build()
     }
 
     fn properties(&self) -> Vec<PropDef> {
@@ -38,8 +39,8 @@ impl NodeDef for AlignNode {
         ]
     }
 
-    fn evaluate(&self, inputs: &NodeInputs, props: &NodeProperties) -> Result<NodeOutputs, NodeError> {
-        let input = match inputs.get("input") {
+    fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
+        let input = match ctx.input_named("input") {
             PortValue::Geometry3d(m) => m.clone(),
             PortValue::None => return Ok(NodeOutputs::default()),
             other => return Err(NodeError::msg(format!(
@@ -54,12 +55,10 @@ impl NodeDef for AlignNode {
                 return Ok(o);
             }
         };
-        let ax = props.number("align_x", 0.0) as f32;
-        let ay = props.number("align_y", -1.0) as f32;
-        let az = props.number("align_z", 0.0) as f32;
+        let ax = ctx.properties.number("align_x", 0.0) as f32;
+        let ay = ctx.properties.number("align_y", -1.0) as f32;
+        let az = ctx.properties.number("align_z", 0.0) as f32;
 
-        // Anchor = mid + a * half_extent. For a == -1 the anchor is the
-        // min edge; for +1 the max edge. Translate so the anchor → origin.
         let anchor_x = (mn[0] + mx[0]) * 0.5 + ax * (mx[0] - mn[0]) * 0.5;
         let anchor_y = (mn[1] + mx[1]) * 0.5 + ay * (mx[1] - mn[1]) * 0.5;
         let anchor_z = (mn[2] + mx[2]) * 0.5 + az * (mx[2] - mn[2]) * 0.5;

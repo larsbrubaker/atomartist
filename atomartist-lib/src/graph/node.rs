@@ -1,23 +1,23 @@
 //! Node-level data: identifiers, port values, node instances.
 //!
 //! A `Graph` is composed of `NodeInstance`s wired together by edges. Each
-//! node carries:
-//!   - a stable `NodeId` (allocated by the graph)
-//!   - its registered type id (`&'static str`, looked up in `NodeRegistry`)
-//!   - canvas position (free 2D layout decided by the user)
-//!   - the current values of its named properties (`PortValue`)
-//!   - cached output values (one `PortValue` per declared output socket)
+//! node owns its socket layout (`inputs`, `outputs`) and its property
+//! values; the type's `NodeDef` is the factory that mints the initial
+//! socket list and exposes connection-time behavior, but it does not
+//! answer "what sockets do I have?" once the instance exists.
 //!
 //! The `PortValue` enum is the lingua franca of the graph — every edge
 //! carries one, and every property is one. Variants that wrap heap data
 //! (`Path2d`, `Geometry3d`, `StringVal`) use `Arc` so downstream nodes share
 //! upstream outputs without copying.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use manifold_rust::cross_section::CrossSection;
 use manifold_rust::types::MeshGL;
 
+use crate::graph::socket::{Socket, SocketUid};
 use crate::socket_types::SocketType;
 
 /// Stable identifier for a node within a single `Graph`.
@@ -27,15 +27,6 @@ use crate::socket_types::SocketType;
 /// the old id remain valid for re-connection).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NodeId(pub u64);
-
-/// Identifier for one named socket on one node — the `(node, socket_name)`
-/// pair that an edge endpoint refers to. Socket names are `&'static str`
-/// because they come from a node-type's static `SocketDef` table.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct SocketId {
-    pub node: NodeId,
-    pub name: &'static str,
-}
 
 /// Value flowing along an edge or held in a property.
 ///
@@ -105,20 +96,31 @@ pub fn identity_matrix() -> [f32; 16] {
     ]
 }
 
-/// One node in a `Graph`. Owns its current property values and (after the
-/// executor runs) its cached outputs.
+/// One node in a `Graph`. Owns its socket layout and the current values of
+/// its named properties; the executor caches the most recent evaluated
+/// outputs in `cached_outputs`.
 #[derive(Clone, Debug)]
 pub struct NodeInstance {
     pub id: NodeId,
     /// Type id matching a `NodeDef` registered in the `NodeRegistry`.
-    pub type_id: &'static str,
+    /// `Arc<str>` (not `&'static str`) so future user-defined node types
+    /// can carry runtime-allocated identifiers without lifetime acrobatics.
+    pub type_id: Arc<str>,
     /// Position in canvas-space (Y-up — agg-gui convention).
     pub position: [f64; 2],
-    /// Current property values, keyed by `PropDef::name`.
-    pub properties: std::collections::HashMap<&'static str, PortValue>,
+    /// Input sockets, in display order. Order is meaningful (drag-reorder
+    /// is a Vec permutation). Edges reference these by `Socket::uid`.
+    pub inputs: Vec<Socket>,
+    /// Output sockets, in display order. Same ordering rules as `inputs`.
+    pub outputs: Vec<Socket>,
+    /// Current property values, keyed by `PropDef::name`. `Arc<str>` keys
+    /// so dynamic nodes can introduce runtime property names — symmetric
+    /// with the socket model.
+    pub properties: HashMap<Arc<str>, PortValue>,
     /// Cached outputs from the most recent successful evaluation, keyed
-    /// by `SocketDef::name`. Empty until the executor has run.
-    pub cached_outputs: std::collections::HashMap<&'static str, PortValue>,
+    /// by the producing socket's `SocketUid`. Empty until the executor
+    /// has run. Survives renames (uid is stable identity).
+    pub cached_outputs: HashMap<SocketUid, PortValue>,
     /// True when the node's inputs or properties changed since the last
     /// evaluation — set by `Graph::mark_dirty_subtree` and cleared by the
     /// executor after producing fresh outputs.
@@ -126,15 +128,52 @@ pub struct NodeInstance {
 }
 
 impl NodeInstance {
-    pub fn new(id: NodeId, type_id: &'static str, position: [f64; 2]) -> Self {
+    /// Bare-bones constructor — sockets default to empty. Real construction
+    /// goes through `Graph::add_node_with_def` which calls
+    /// `NodeDef::instantiate` to populate sockets and initial properties.
+    pub fn new(id: NodeId, type_id: impl Into<Arc<str>>, position: [f64; 2]) -> Self {
         Self {
             id,
-            type_id,
+            type_id: type_id.into(),
             position,
-            properties: Default::default(),
-            cached_outputs: Default::default(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            properties: HashMap::new(),
+            cached_outputs: HashMap::new(),
             dirty: true,
         }
+    }
+
+    /// Look up an input socket by name. Returns `None` when no socket has
+    /// that name. Empty-named slots (used by dynamic-input nodes for the
+    /// trailing placeholder) are matched too.
+    pub fn input_by_name(&self, name: &str) -> Option<&Socket> {
+        self.inputs.iter().find(|s| &*s.name == name)
+    }
+
+    /// Look up an input socket by uid.
+    pub fn input_by_uid(&self, uid: SocketUid) -> Option<&Socket> {
+        self.inputs.iter().find(|s| s.uid == uid)
+    }
+
+    /// Index of an input socket by uid, for in-place mutation.
+    pub fn input_index_by_uid(&self, uid: SocketUid) -> Option<usize> {
+        self.inputs.iter().position(|s| s.uid == uid)
+    }
+
+    /// Look up an output socket by name.
+    pub fn output_by_name(&self, name: &str) -> Option<&Socket> {
+        self.outputs.iter().find(|s| &*s.name == name)
+    }
+
+    /// Look up an output socket by uid.
+    pub fn output_by_uid(&self, uid: SocketUid) -> Option<&Socket> {
+        self.outputs.iter().find(|s| s.uid == uid)
+    }
+
+    /// Index of an output socket by uid, for in-place mutation.
+    pub fn output_index_by_uid(&self, uid: SocketUid) -> Option<usize> {
+        self.outputs.iter().position(|s| s.uid == uid)
     }
 }
 
@@ -187,9 +226,21 @@ mod tests {
     }
 
     #[test]
-    fn node_instance_starts_dirty() {
+    fn node_instance_starts_dirty_and_empty() {
         let n = NodeInstance::new(NodeId(1), "Box", [0.0, 0.0]);
         assert!(n.dirty);
-        assert_eq!(n.type_id, "Box");
+        assert_eq!(&*n.type_id, "Box");
+        assert!(n.inputs.is_empty());
+        assert!(n.outputs.is_empty());
+    }
+
+    #[test]
+    fn input_lookups_round_trip() {
+        let mut n = NodeInstance::new(NodeId(1), "Box", [0.0, 0.0]);
+        n.inputs.push(Socket::new(SocketUid(7), "size", SocketType::Number, false));
+        assert_eq!(n.input_by_name("size").unwrap().uid, SocketUid(7));
+        assert_eq!(n.input_by_uid(SocketUid(7)).unwrap().name.as_ref(), "size");
+        assert_eq!(n.input_index_by_uid(SocketUid(7)), Some(0));
+        assert!(n.input_by_name("missing").is_none());
     }
 }

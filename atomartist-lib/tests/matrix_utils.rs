@@ -9,31 +9,36 @@
 use std::sync::Arc;
 
 use atomartist_lib::geometry::{apply_transform, generate_box, get_pos, num_verts};
-use atomartist_lib::graph::node::PortValue;
+use atomartist_lib::graph::node::{NodeId, NodeInstance, PortValue};
+use atomartist_lib::graph::socket::SocketUidAlloc;
 use atomartist_lib::nodes::ops_3d::transform_node::TransformNode;
-use atomartist_lib::registry::{NodeDef, NodeInputs, NodeProperties};
+use atomartist_lib::registry::{EvalCtx, NodeDef, NodeInputs, NodeProperties};
 
-fn props_with(values: &[(&'static str, f64)]) -> NodeProperties {
-    let mut p = NodeProperties::default();
-    for (k, v) in values {
-        p.insert(k, PortValue::Number(*v));
+fn fixture(
+    mesh: Arc<manifold_rust::types::MeshGL>,
+    props_kv: &[(&'static str, f64)],
+) -> (NodeInstance, NodeInputs, NodeProperties) {
+    let mut alloc = SocketUidAlloc::new();
+    let tpl = TransformNode.instantiate(&mut alloc);
+    let mut inst = NodeInstance::new(NodeId(1), "Transform", [0.0, 0.0]);
+    inst.inputs = tpl.inputs;
+    inst.outputs = tpl.outputs;
+    let mut inputs = NodeInputs::default();
+    let uid = inst.input_by_name("input").unwrap().uid;
+    inputs.insert(uid, PortValue::Geometry3d(mesh));
+    let mut props = NodeProperties::default();
+    for (k, v) in props_kv {
+        props.insert(*k, PortValue::Number(*v));
     }
-    p
-}
-
-fn input_with(mesh: Arc<manifold_rust::types::MeshGL>) -> NodeInputs {
-    let mut i = NodeInputs::default();
-    i.insert("input", PortValue::Geometry3d(mesh));
-    i
+    (inst, inputs, props)
 }
 
 #[test]
 fn identity_transform_preserves_positions() {
     let m = Arc::new(generate_box(2.0, 3.0, 4.0));
-    let outs = TransformNode.evaluate(
-        &input_with(m.clone()),
-        &props_with(&[("sx", 1.0), ("sy", 1.0), ("sz", 1.0)]),
-    ).unwrap();
+    let (inst, inputs, props) = fixture(m.clone(), &[("sx", 1.0), ("sy", 1.0), ("sz", 1.0)]);
+    let ctx = EvalCtx { instance: &inst, properties: &props, inputs: &inputs };
+    let outs = TransformNode.evaluate(&ctx).unwrap();
     match outs.by_name.get("out").unwrap() {
         PortValue::Geometry3d(t) => {
             for i in 0..num_verts(t) {
@@ -55,10 +60,9 @@ fn identity_transform_preserves_positions() {
 #[test]
 fn nonuniform_scale_changes_each_axis_independently() {
     let m = Arc::new(generate_box(2.0, 2.0, 2.0));
-    let outs = TransformNode.evaluate(
-        &input_with(m.clone()),
-        &props_with(&[("sx", 2.0), ("sy", 0.5), ("sz", 1.0)]),
-    ).unwrap();
+    let (inst, inputs, props) = fixture(m.clone(), &[("sx", 2.0), ("sy", 0.5), ("sz", 1.0)]);
+    let ctx = EvalCtx { instance: &inst, properties: &props, inputs: &inputs };
+    let outs = TransformNode.evaluate(&ctx).unwrap();
     match outs.by_name.get("out").unwrap() {
         PortValue::Geometry3d(t) => {
             for i in 0..num_verts(t) {
@@ -76,9 +80,6 @@ fn nonuniform_scale_changes_each_axis_independently() {
 #[test]
 fn rotation_z_180_then_again_round_trips() {
     let m = generate_box(2.0, 3.0, 4.0);
-    // Two 180° rotations around Z = identity.
-    // Build the matrix manually and apply twice — sanity check on
-    // apply_transform's column-major math.
     use std::f32::consts::PI;
     let a = PI;
     let c = a.cos();
@@ -107,18 +108,19 @@ fn rotation_z_180_then_again_round_trips() {
 #[test]
 fn translation_shifts_origin() {
     let m = Arc::new(generate_box(1.0, 1.0, 1.0));
-    let outs = TransformNode.evaluate(
-        &input_with(m.clone()),
-        &props_with(&[
+    let (inst, inputs, props) = fixture(
+        m.clone(),
+        &[
             ("tx", 5.0),
             ("ty", -3.0),
             ("tz", 7.0),
             ("sx", 1.0), ("sy", 1.0), ("sz", 1.0),
-        ]),
-    ).unwrap();
+        ],
+    );
+    let ctx = EvalCtx { instance: &inst, properties: &props, inputs: &inputs };
+    let outs = TransformNode.evaluate(&ctx).unwrap();
     match outs.by_name.get("out").unwrap() {
         PortValue::Geometry3d(t) => {
-            // Box is centered at origin; after translate, center is (5, -3, 7).
             let mut sum = [0.0f32; 3];
             for i in 0..num_verts(t) {
                 let p = get_pos(t, i);

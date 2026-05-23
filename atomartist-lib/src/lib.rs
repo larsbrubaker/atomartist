@@ -13,10 +13,14 @@ pub mod registry;
 pub mod serialization;
 pub mod socket_types;
 
-pub use graph::{Edge, Graph, GraphError, NodeId, NodeInstance, PortValue, SocketId};
+pub use graph::{
+    Edge, EdgeEndpoint, Graph, GraphError, NodeId, NodeInstance, PortValue, Socket, SocketUid,
+    SocketUidAlloc,
+};
 pub use registry::{
-    EditorKind, NodeDef, NodeError, NodeFieldAttrs, NodeInputs, NodeOutputs, NodeProperties,
-    NodeRegistry, NumberAttrs, PropDef, SocketDef,
+    ConnectCtx, DisconnectCtx, EditorKind, EvalCtx, InstanceTemplate, NodeDef, NodeError,
+    NodeFieldAttrs, NodeInputs, NodeOutputs, NodeProperties, NodeRegistry, NumberAttrs, PropDef,
+    TemplateBuilder, ValidateCtx,
 };
 pub use socket_types::SocketType;
 

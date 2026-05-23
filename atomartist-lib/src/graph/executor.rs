@@ -5,6 +5,13 @@
 //! caching the resulting outputs back onto the node. The executor is
 //! `Send` so native builds can run it on a background thread.
 //!
+//! Inputs are gathered keyed by the target socket's [`SocketUid`] — stable
+//! identity across renames. Outputs are returned by name and resolved
+//! against the producing node instance's output sockets to find the
+//! corresponding uid for storage in `cached_outputs`. This keeps node
+//! `evaluate` bodies name-keyed (ergonomic) while edges remain uid-keyed
+//! (robust).
+//!
 //! Two modes:
 //!   - `evaluate_all`: walks every node. Used the first time a graph is
 //!     loaded, or after structural changes that invalidate the cache.
@@ -12,16 +19,17 @@
 //!     their newly-computed outputs to downstream nodes.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::graph::graph::{Graph, GraphError};
 use crate::graph::node::{NodeId, NodeInstance, PortValue};
-use crate::registry::{NodeError, NodeInputs, NodeOutputs, NodeProperties, NodeRegistry};
+use crate::registry::{EvalCtx, NodeError, NodeInputs, NodeOutputs, NodeProperties, NodeRegistry};
 
 #[derive(Clone, Debug)]
 pub enum ExecuteError {
     Graph(GraphError),
-    Node { node: NodeId, type_id: &'static str, error: NodeError },
-    UnknownNodeType { node: NodeId, type_id: &'static str },
+    Node { node: NodeId, type_id: Arc<str>, error: NodeError },
+    UnknownNodeType { node: NodeId, type_id: Arc<str> },
     CycleDetected,
 }
 
@@ -93,40 +101,65 @@ fn evaluate_one(
     registry: &NodeRegistry,
     id: NodeId,
 ) -> Result<(), ExecuteError> {
-    // Snapshot the bits we need from immutable borrows so we can take a
-    // mutable borrow later.
-    let (type_id, props_snapshot, inputs) = {
+    // Look up the type_id without holding a long borrow.
+    let type_id = {
         let node = graph
             .get(id)
             .ok_or(ExecuteError::Graph(GraphError::NodeNotFound(id)))?;
-        let type_id = node.type_id;
+        node.type_id.clone()
+    };
+    let def = registry
+        .get(&type_id)
+        .ok_or_else(|| ExecuteError::UnknownNodeType {
+            node: id,
+            type_id: type_id.clone(),
+        })?
+        .clone();
+
+    // Build inputs + property snapshot from immutable graph state.
+    let (inputs, props_snapshot) = {
+        let node = graph
+            .get(id)
+            .ok_or(ExecuteError::Graph(GraphError::NodeNotFound(id)))?;
         let mut inputs = NodeInputs::default();
         for e in graph.edges() {
             if e.to.node != id {
                 continue;
             }
-            // Look up the upstream value from the producer's cached_outputs.
+            // Resolve the upstream cached value by source uid.
             let value = graph
                 .get(e.from.node)
-                .and_then(|src| src.cached_outputs.get(e.from.name).cloned())
+                .and_then(|src| src.cached_outputs.get(&e.from.socket).cloned())
                 .unwrap_or(PortValue::None);
-            inputs.insert(e.to.name, value);
+            inputs.insert(e.to.socket, value);
         }
         let mut props = NodeProperties::default();
         for (k, v) in &node.properties {
-            props.insert(k, v.clone());
+            props.insert(k.clone(), v.clone());
         }
-        (type_id, props, inputs)
+        (inputs, props)
     };
 
-    let def = registry
-        .get(type_id)
-        .ok_or(ExecuteError::UnknownNodeType { node: id, type_id })?;
+    // Call evaluate against an EvalCtx that borrows the instance for
+    // name-keyed accessors. Re-borrow the node read-only for this call.
+    let outputs = {
+        let node = graph
+            .get(id)
+            .ok_or(ExecuteError::Graph(GraphError::NodeNotFound(id)))?;
+        let ctx = EvalCtx {
+            instance: node,
+            properties: &props_snapshot,
+            inputs: &inputs,
+        };
+        def.evaluate(&ctx).map_err(|error| ExecuteError::Node {
+            node: id,
+            type_id: type_id.clone(),
+            error,
+        })?
+    };
 
-    let outputs = def.evaluate(&inputs, &props_snapshot).map_err(|error| {
-        ExecuteError::Node { node: id, type_id, error }
-    })?;
-
+    // Resolve output names against the instance's output sockets to map
+    // them to uids, then store under uid in cached_outputs.
     if let Some(node) = graph.get_mut(id) {
         store_outputs(node, outputs);
     }
@@ -134,9 +167,20 @@ fn evaluate_one(
 }
 
 fn store_outputs(node: &mut NodeInstance, outputs: NodeOutputs) {
+    // Build a name→uid map from the instance's outputs.
+    let name_to_uid: HashMap<Arc<str>, crate::graph::socket::SocketUid> = node
+        .outputs
+        .iter()
+        .map(|s| (s.name.clone(), s.uid))
+        .collect();
     node.cached_outputs.clear();
-    for (k, v) in outputs.by_name {
-        node.cached_outputs.insert(k, v);
+    for (name, value) in outputs.by_name {
+        if let Some(uid) = name_to_uid.get(&name) {
+            node.cached_outputs.insert(*uid, value);
+        }
+        // Outputs the node wrote for a name that isn't on its socket list
+        // are silently dropped. Catches stale node code referring to a
+        // removed output without breaking eval; tests will surface it.
     }
 }
 
@@ -180,26 +224,24 @@ fn topo_sort(graph: &Graph) -> Result<Vec<NodeId>, ExecuteError> {
 mod tests {
     use super::*;
     use crate::graph::graph::Edge;
-    use crate::graph::node::SocketId;
-    use crate::registry::{NodeDef, SocketDef};
+    use crate::graph::socket::SocketUidAlloc;
+    use crate::registry::{InstanceTemplate, NodeDef, NodeOutputs};
     use crate::socket_types::SocketType;
 
     struct AddNode;
     impl NodeDef for AddNode {
         fn type_id(&self) -> &'static str { "Add" }
         fn category(&self) -> &'static str { "Math" }
-        fn input_sockets(&self) -> Vec<SocketDef> {
-            vec![
-                SocketDef::required("a", SocketType::Number),
-                SocketDef::required("b", SocketType::Number),
-            ]
+        fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
+            InstanceTemplate::builder(alloc)
+                .input("a", SocketType::Number)
+                .input("b", SocketType::Number)
+                .output("out", SocketType::Number)
+                .build()
         }
-        fn output_sockets(&self) -> Vec<SocketDef> {
-            vec![SocketDef::required("out", SocketType::Number)]
-        }
-        fn evaluate(&self, inputs: &NodeInputs, _: &NodeProperties) -> Result<NodeOutputs, NodeError> {
-            let a = match inputs.get("a") { PortValue::Number(n) => *n, _ => 0.0 };
-            let b = match inputs.get("b") { PortValue::Number(n) => *n, _ => 0.0 };
+        fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
+            let a = match ctx.input_named("a") { PortValue::Number(n) => *n, _ => 0.0 };
+            let b = match ctx.input_named("b") { PortValue::Number(n) => *n, _ => 0.0 };
             let mut o = NodeOutputs::default();
             o.set("out", PortValue::Number(a + b));
             Ok(o)
@@ -209,12 +251,13 @@ mod tests {
     impl NodeDef for Const {
         fn type_id(&self) -> &'static str { "Const" }
         fn category(&self) -> &'static str { "Math" }
-        fn input_sockets(&self) -> Vec<SocketDef> { vec![] }
-        fn output_sockets(&self) -> Vec<SocketDef> {
-            vec![SocketDef::required("out", SocketType::Number)]
+        fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
+            InstanceTemplate::builder(alloc)
+                .output("out", SocketType::Number)
+                .build()
         }
-        fn evaluate(&self, _: &NodeInputs, p: &NodeProperties) -> Result<NodeOutputs, NodeError> {
-            let v = p.number("value", 0.0);
+        fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
+            let v = ctx.properties.number("value", 0.0);
             let mut o = NodeOutputs::default();
             o.set("out", PortValue::Number(v));
             Ok(o)
@@ -228,29 +271,21 @@ mod tests {
         r
     }
 
-    /// Builds: a=2, b=3, c = a + b. Returns (graph, NodeId of c).
+    /// Builds: a=2, b=3, c = a + b.
     fn three_node_graph() -> (Graph, NodeId, NodeId, NodeId) {
         let reg = registry();
         let mut g = Graph::new();
-        let a = g.allocate_id();
-        let b = g.allocate_id();
-        let c = g.allocate_id();
-        let mut na = NodeInstance::new(a, "Const", [0.0, 0.0]);
-        na.properties.insert("value", PortValue::Number(2.0));
-        let mut nb = NodeInstance::new(b, "Const", [0.0, 0.0]);
-        nb.properties.insert("value", PortValue::Number(3.0));
-        let nc = NodeInstance::new(c, "Add", [0.0, 0.0]);
-        g.add_node(na).unwrap();
-        g.add_node(nb).unwrap();
-        g.add_node(nc).unwrap();
-        g.connect(
-            Edge { from: SocketId { node: a, name: "out" }, to: SocketId { node: c, name: "a" } },
-            &reg,
-        ).unwrap();
-        g.connect(
-            Edge { from: SocketId { node: b, name: "out" }, to: SocketId { node: c, name: "b" } },
-            &reg,
-        ).unwrap();
+        let a = g.add_new_node("Const", [0.0, 0.0], &reg).unwrap();
+        let b = g.add_new_node("Const", [0.0, 0.0], &reg).unwrap();
+        let c = g.add_new_node("Add", [0.0, 0.0], &reg).unwrap();
+        g.set_property(a, "value", PortValue::Number(2.0)).unwrap();
+        g.set_property(b, "value", PortValue::Number(3.0)).unwrap();
+        let out_a = g.get(a).unwrap().output_by_name("out").unwrap().uid;
+        let out_b = g.get(b).unwrap().output_by_name("out").unwrap().uid;
+        let in_a = g.get(c).unwrap().input_by_name("a").unwrap().uid;
+        let in_b = g.get(c).unwrap().input_by_name("b").unwrap().uid;
+        g.connect(Edge::new(a, out_a, c, in_a), &reg).unwrap();
+        g.connect(Edge::new(b, out_b, c, in_b), &reg).unwrap();
         (g, a, b, c)
     }
 
@@ -260,7 +295,8 @@ mod tests {
         let reg = registry();
         let order = evaluate_all(&mut g, &reg).unwrap();
         assert_eq!(order.len(), 3);
-        let result = g.get(c).unwrap().cached_outputs.get("out").cloned().unwrap();
+        let out_c_uid = g.get(c).unwrap().output_by_name("out").unwrap().uid;
+        let result = g.get(c).unwrap().cached_outputs.get(&out_c_uid).cloned().unwrap();
         assert_eq!(result, PortValue::Number(5.0));
     }
 
@@ -269,15 +305,14 @@ mod tests {
         let (mut g, a, _, c) = three_node_graph();
         let reg = registry();
         evaluate_all(&mut g, &reg).unwrap();
-        // All clean now.
         assert!(g.nodes().all(|n| !n.dirty));
-        // Change a's value → a dirty, c dirty (b unchanged).
         g.set_property(a, "value", PortValue::Number(10.0)).unwrap();
         let walked = evaluate_dirty(&mut g, &reg).unwrap();
         assert_eq!(walked.len(), 2, "only a and c should re-eval, not b");
         assert!(walked.contains(&a));
         assert!(walked.contains(&c));
-        let result = g.get(c).unwrap().cached_outputs.get("out").cloned().unwrap();
+        let out_c_uid = g.get(c).unwrap().output_by_name("out").unwrap().uid;
+        let result = g.get(c).unwrap().cached_outputs.get(&out_c_uid).cloned().unwrap();
         assert_eq!(result, PortValue::Number(13.0));
     }
 
@@ -286,8 +321,6 @@ mod tests {
         let (mut g, _, _, _) = three_node_graph();
         let order = topo_sort(&g).unwrap();
         assert_eq!(order.len(), 3);
-        // Manually inserted edges form an acyclic DAG.
-        // Mutating the graph here exercises the &mut path used by evaluate_all.
         let reg = registry();
         evaluate_all(&mut g, &reg).unwrap();
     }

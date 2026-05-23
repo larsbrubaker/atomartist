@@ -5,8 +5,9 @@ use std::sync::Arc;
 
 use crate::geometry::{apply_transform, bounds};
 use crate::graph::node::PortValue;
+use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    NodeDef, NodeError, NodeInputs, NodeOutputs, NodeProperties, NodeRegistry, PropDef, SocketDef,
+    EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeRegistry, PropDef,
 };
 use crate::socket_types::SocketType;
 
@@ -17,11 +18,11 @@ impl NodeDef for FitToBoundsNode {
     fn display_name(&self) -> &'static str { "Fit to Bounds" }
     fn category(&self) -> &'static str { "Operations 3D" }
 
-    fn input_sockets(&self) -> Vec<SocketDef> {
-        vec![SocketDef::required("input", SocketType::Geometry3d)]
-    }
-    fn output_sockets(&self) -> Vec<SocketDef> {
-        vec![SocketDef::required("out", SocketType::Geometry3d)]
+    fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
+        InstanceTemplate::builder(alloc)
+            .input("input", SocketType::Geometry3d)
+            .output("out", SocketType::Geometry3d)
+            .build()
     }
 
     fn properties(&self) -> Vec<PropDef> {
@@ -29,13 +30,12 @@ impl NodeDef for FitToBoundsNode {
             PropDef::new("width",  PortValue::Number(20.0)).with_range(0.001, 10_000.0),
             PropDef::new("height", PortValue::Number(20.0)).with_range(0.001, 10_000.0),
             PropDef::new("depth",  PortValue::Number(20.0)).with_range(0.001, 10_000.0),
-            // 0 = uniform (scale by smallest factor), 1 = stretch
             PropDef::new("uniform", PortValue::Bool(true)),
         ]
     }
 
-    fn evaluate(&self, inputs: &NodeInputs, props: &NodeProperties) -> Result<NodeOutputs, NodeError> {
-        let input = match inputs.get("input") {
+    fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
+        let input = match ctx.input_named("input") {
             PortValue::Geometry3d(m) => m.clone(),
             PortValue::None => return Ok(NodeOutputs::default()),
             other => return Err(NodeError::msg(format!(
@@ -56,23 +56,22 @@ impl NodeDef for FitToBoundsNode {
             (mx[2] - mn[2]).max(1e-6),
         ];
         let target = [
-            props.number("width", 20.0) as f32,
-            props.number("height", 20.0) as f32,
-            props.number("depth", 20.0) as f32,
+            ctx.properties.number("width", 20.0) as f32,
+            ctx.properties.number("height", 20.0) as f32,
+            ctx.properties.number("depth", 20.0) as f32,
         ];
         let factor = [
             target[0] / cur[0],
             target[1] / cur[1],
             target[2] / cur[2],
         ];
-        let uniform = props.bool_("uniform", true);
+        let uniform = ctx.properties.bool_("uniform", true);
         let (sx, sy, sz) = if uniform {
             let s = factor[0].min(factor[1]).min(factor[2]);
             (s, s, s)
         } else {
             (factor[0], factor[1], factor[2])
         };
-        // Scale around the model center.
         let cx = (mn[0] + mx[0]) * 0.5;
         let cy = (mn[1] + mx[1]) * 0.5;
         let cz = (mn[2] + mx[2]) * 0.5;
@@ -85,7 +84,6 @@ impl NodeDef for FitToBoundsNode {
 }
 
 fn scale_about(c: [f32; 3], s: [f32; 3]) -> [f32; 16] {
-    // T(c) · S · T(-c), column-major.
     let tx = c[0] - s[0] * c[0];
     let ty = c[1] - s[1] * c[1];
     let tz = c[2] - s[2] * c[2];

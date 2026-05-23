@@ -39,9 +39,10 @@ use crate::geometry::apply_transform;
 use crate::geometry::mesh3d::{make_mesh, NUM_PROP, STRIDE};
 use crate::geometry::path2d::{is_ccw, CrossSection, Vec2D};
 use crate::graph::node::{identity_matrix, PortValue};
+use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    EditorKind, NodeDef, NodeError, NodeFieldAttrs, NodeInputs, NodeOutputs, NodeProperties,
-    NodeRegistry, NumberAttrs, PropDef, SocketDef,
+    EditorKind, EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeFieldAttrs, NodeOutputs,
+    NodeRegistry, NumberAttrs, PropDef,
 };
 use crate::socket_types::SocketType;
 
@@ -76,39 +77,40 @@ impl Default for ExtrudeProps {
 }
 
 impl ExtrudeProps {
-    /// Read a snapshot from a property bag, applying upstream input
+    /// Read a snapshot from an evaluation context, applying upstream input
     /// overrides first and falling back to the property's stored value
     /// (then to the type default).
-    pub fn resolve(inputs: &NodeInputs, props: &NodeProperties) -> Self {
+    pub fn resolve(ctx: &EvalCtx) -> Self {
         let def = Self::default();
-        let height = match inputs.get("Height") {
+        let props = ctx.properties;
+        let height = match ctx.input_named("Height") {
             PortValue::Number(n) => *n,
             _ => props.number("height", def.height),
         };
-        let bevel_radius = match inputs.get("Radius") {
+        let bevel_radius = match ctx.input_named("Radius") {
             PortValue::Number(n) => *n,
             _ => props.number("bevel_radius", def.bevel_radius),
         };
-        let bevel_segments = match inputs.get("Segments") {
+        let bevel_segments = match ctx.input_named("Segments") {
             PortValue::Number(n) => *n,
             _ => props.number("bevel_segments", def.bevel_segments),
         };
-        let bottom_radius = match inputs.get("Bottom Radius") {
+        let bottom_radius = match ctx.input_named("Bottom Radius") {
             PortValue::Number(n) => *n,
             _ => props.number("bottom_radius", def.bottom_radius),
         };
-        let bottom_segments = match inputs.get("Bottom Segments") {
+        let bottom_segments = match ctx.input_named("Bottom Segments") {
             PortValue::Number(n) => *n,
             _ => props.number("bottom_segments", def.bottom_segments),
         };
-        let color = match inputs.get("Color") {
+        let color = match ctx.input_named("Color") {
             PortValue::Color(c) => *c,
             _ => match props.get("color") {
                 PortValue::Color(c) => *c,
                 _ => def.color,
             },
         };
-        let matrix = match inputs.get("Matrix") {
+        let matrix = match ctx.input_named("Matrix") {
             PortValue::Matrix4x4(m) => *m,
             _ => match props.get("matrix") {
                 PortValue::Matrix4x4(m) => *m,
@@ -217,21 +219,18 @@ impl NodeDef for ExtrudeNode {
     fn display_name(&self) -> &'static str { "Extrude" }
     fn category(&self) -> &'static str { "Operations 3D" }
 
-    fn input_sockets(&self) -> Vec<SocketDef> {
-        vec![
-            SocketDef::required("Paths", SocketType::Path2d).with_label("Paths"),
-            SocketDef::optional("Height", SocketType::Number).with_label("Height"),
-            SocketDef::optional("Radius", SocketType::Number).with_label("Radius"),
-            SocketDef::optional("Segments", SocketType::Number).with_label("Segments"),
-            SocketDef::optional("Bottom Radius", SocketType::Number).with_label("Bottom Radius"),
-            SocketDef::optional("Bottom Segments", SocketType::Number).with_label("Bottom Segments"),
-            SocketDef::optional("Color", SocketType::Color).with_label("Color"),
-            SocketDef::optional("Matrix", SocketType::Matrix4x4).with_label("Matrix"),
-        ]
-    }
-
-    fn output_sockets(&self) -> Vec<SocketDef> {
-        vec![SocketDef::required("Geometry", SocketType::Geometry3d).with_label("Geometry")]
+    fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
+        InstanceTemplate::builder(alloc)
+            .input_with_label("Paths", "Paths", SocketType::Path2d, false)
+            .input_with_label("Height", "Height", SocketType::Number, true)
+            .input_with_label("Radius", "Radius", SocketType::Number, true)
+            .input_with_label("Segments", "Segments", SocketType::Number, true)
+            .input_with_label("Bottom Radius", "Bottom Radius", SocketType::Number, true)
+            .input_with_label("Bottom Segments", "Bottom Segments", SocketType::Number, true)
+            .input_with_label("Color", "Color", SocketType::Color, true)
+            .input_with_label("Matrix", "Matrix", SocketType::Matrix4x4, true)
+            .output_with_label("Geometry", "Geometry", SocketType::Geometry3d)
+            .build()
     }
 
     fn properties(&self) -> Vec<PropDef> {
@@ -241,15 +240,15 @@ impl NodeDef for ExtrudeNode {
             .collect()
     }
 
-    fn evaluate(&self, inputs: &NodeInputs, props: &NodeProperties) -> Result<NodeOutputs, NodeError> {
-        let cross_section = match inputs.get("Paths") {
+    fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
+        let cross_section = match ctx.input_named("Paths") {
             PortValue::Path2d(p) => p.clone(),
             PortValue::None => return Ok(NodeOutputs::default()),
             other => return Err(NodeError::msg(format!(
                 "Extrude: expected Path2d on 'Paths', got {:?}", other.socket_type()
             ))),
         };
-        let resolved = ExtrudeProps::resolve(inputs, props);
+        let resolved = ExtrudeProps::resolve(ctx);
         let height = resolved.height.max(1e-6);
         let mut mesh = extrude_cross_section(&cross_section, height as f32)
             .map_err(|e| NodeError::msg(e))?;
@@ -388,7 +387,32 @@ pub fn extrude_cross_section(cs: &CrossSection, height: f32) -> Result<MeshGL, S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::node::{NodeId, NodeInstance};
+    use crate::registry::{NodeInputs, NodeProperties};
     use manifold_rust::cross_section::CrossSection as CS;
+
+    /// Build a populated (NodeInstance, NodeInputs) pair for ExtrudeNode,
+    /// with the given by-name input overrides + properties.
+    fn make_ctx_fixture(
+        named_inputs: &[(&str, PortValue)],
+        named_props: &[(&str, PortValue)],
+    ) -> (NodeInstance, NodeInputs, NodeProperties) {
+        let mut alloc = SocketUidAlloc::new();
+        let tpl = ExtrudeNode.instantiate(&mut alloc);
+        let mut inst = NodeInstance::new(NodeId(1), "Extrude", [0.0, 0.0]);
+        inst.inputs = tpl.inputs;
+        inst.outputs = tpl.outputs;
+        let mut inputs = NodeInputs::default();
+        for (name, value) in named_inputs {
+            let uid = inst.input_by_name(name).unwrap().uid;
+            inputs.insert(uid, value.clone());
+        }
+        let mut props = NodeProperties::default();
+        for (name, value) in named_props {
+            props.insert(*name, value.clone());
+        }
+        (inst, inputs, props)
+    }
 
     #[test]
     fn extrude_unit_square_produces_solid_box() {
@@ -433,8 +457,9 @@ mod tests {
 
     #[test]
     fn schema_matches_nodedesigner_inputs() {
-        let n = ExtrudeNode;
-        let inputs: Vec<&str> = n.input_sockets().iter().map(|s| s.name).collect();
+        let mut alloc = SocketUidAlloc::new();
+        let tpl = ExtrudeNode.instantiate(&mut alloc);
+        let inputs: Vec<&str> = tpl.inputs.iter().map(|s| s.name.as_ref()).collect();
         assert_eq!(
             inputs,
             vec![
@@ -448,22 +473,25 @@ mod tests {
                 "Matrix",
             ]
         );
-        let outputs: Vec<&str> = n.output_sockets().iter().map(|s| s.name).collect();
+        let outputs: Vec<&str> = tpl.outputs.iter().map(|s| s.name.as_ref()).collect();
         assert_eq!(outputs, vec!["Geometry"]);
     }
 
     #[test]
     fn every_optional_input_has_a_bound_property() {
-        let n = ExtrudeNode;
-        let optional_inputs: Vec<&str> = n
-            .input_sockets()
+        let mut alloc = SocketUidAlloc::new();
+        let tpl = ExtrudeNode.instantiate(&mut alloc);
+        let optional_inputs: Vec<String> = tpl
+            .inputs
             .iter()
             .filter(|s| s.optional)
-            .map(|s| s.name)
+            .map(|s| s.name.to_string())
             .collect();
-        let props = n.properties();
+        let props = ExtrudeNode.properties();
         for input in optional_inputs {
-            let matched = props.iter().any(|p| p.bound_input == Some(input));
+            let matched = props
+                .iter()
+                .any(|p| p.bound_input.as_ref().map(|b| b.as_ref()) == Some(input.as_str()));
             assert!(matched, "no property bound to input '{}'", input);
         }
     }
@@ -472,22 +500,25 @@ mod tests {
     fn height_property_defaults_to_5_with_node_designer_range() {
         let n = ExtrudeNode;
         let props = n.properties();
-        let height = props.iter().find(|p| p.name == "height").unwrap();
+        let height = props.iter().find(|p| p.name.as_ref() == "height").unwrap();
         match &height.default {
             PortValue::Number(v) => assert!((v - 5.0).abs() < 1e-9),
             _ => panic!("height default should be a Number"),
         }
         assert_eq!(height.min, Some(0.1));
         assert_eq!(height.max, Some(40.0));
-        assert_eq!(height.bound_input, Some("Height"));
-        assert_eq!(height.label, Some("Height"));
+        assert_eq!(
+            height.bound_input.as_ref().map(|s| s.as_ref()),
+            Some("Height"),
+        );
+        assert_eq!(height.label.as_ref().map(|s| s.as_ref()), Some("Height"));
     }
 
     #[test]
     fn segments_property_marked_integer() {
         let n = ExtrudeNode;
         let props = n.properties();
-        let segments = props.iter().find(|p| p.name == "bevel_segments").unwrap();
+        let segments = props.iter().find(|p| p.name.as_ref() == "bevel_segments").unwrap();
         let attrs = segments
             .editor
             .number_attrs()
@@ -499,7 +530,7 @@ mod tests {
     fn color_default_is_white() {
         let n = ExtrudeNode;
         let props = n.properties();
-        let color = props.iter().find(|p| p.name == "color").unwrap();
+        let color = props.iter().find(|p| p.name.as_ref() == "color").unwrap();
         match &color.default {
             PortValue::Color(c) => assert_eq!(*c, [1.0, 1.0, 1.0, 1.0]),
             _ => panic!("color default should be a Color"),
@@ -511,7 +542,7 @@ mod tests {
     fn matrix_default_is_identity() {
         let n = ExtrudeNode;
         let props = n.properties();
-        let m = props.iter().find(|p| p.name == "matrix").unwrap();
+        let m = props.iter().find(|p| p.name.as_ref() == "matrix").unwrap();
         match &m.default {
             PortValue::Matrix4x4(mat) => assert_eq!(*mat, identity_matrix()),
             _ => panic!("matrix default should be a Matrix4x4"),
@@ -521,28 +552,29 @@ mod tests {
 
     #[test]
     fn resolve_prefers_connected_input_over_property() {
-        let mut inputs = NodeInputs::default();
-        inputs.insert("Height", PortValue::Number(12.5));
-        let mut props = NodeProperties::default();
-        props.insert("height", PortValue::Number(3.0));
-        let resolved = ExtrudeProps::resolve(&inputs, &props);
+        let (inst, inputs, props) = make_ctx_fixture(
+            &[("Height", PortValue::Number(12.5))],
+            &[("height", PortValue::Number(3.0))],
+        );
+        let ctx = EvalCtx { instance: &inst, properties: &props, inputs: &inputs };
+        let resolved = ExtrudeProps::resolve(&ctx);
         assert!((resolved.height - 12.5).abs() < 1e-9);
     }
 
     #[test]
     fn resolve_falls_back_to_property_when_input_unconnected() {
-        let inputs = NodeInputs::default();
-        let mut props = NodeProperties::default();
-        props.insert("height", PortValue::Number(7.5));
-        let resolved = ExtrudeProps::resolve(&inputs, &props);
+        let (inst, inputs, props) =
+            make_ctx_fixture(&[], &[("height", PortValue::Number(7.5))]);
+        let ctx = EvalCtx { instance: &inst, properties: &props, inputs: &inputs };
+        let resolved = ExtrudeProps::resolve(&ctx);
         assert!((resolved.height - 7.5).abs() < 1e-9);
     }
 
     #[test]
     fn resolve_falls_back_to_default_when_property_missing() {
-        let inputs = NodeInputs::default();
-        let props = NodeProperties::default();
-        let resolved = ExtrudeProps::resolve(&inputs, &props);
+        let (inst, inputs, props) = make_ctx_fixture(&[], &[]);
+        let ctx = EvalCtx { instance: &inst, properties: &props, inputs: &inputs };
+        let resolved = ExtrudeProps::resolve(&ctx);
         let def = ExtrudeProps::default();
         assert!((resolved.height - def.height).abs() < 1e-9);
         assert!((resolved.bevel_radius - def.bevel_radius).abs() < 1e-9);
@@ -553,19 +585,21 @@ mod tests {
     #[test]
     fn evaluate_applies_matrix_input_to_output_mesh() {
         let cs = CS::square(2.0);
-        let mut inputs = NodeInputs::default();
-        inputs.insert("Paths", PortValue::Path2d(Arc::new(cs)));
-        // Translate the result by (0, 0, 10).
         let translate_z10: [f32; 16] = [
             1.0, 0.0, 0.0, 0.0,
             0.0, 1.0, 0.0, 0.0,
             0.0, 0.0, 1.0, 0.0,
             0.0, 0.0, 10.0, 1.0,
         ];
-        inputs.insert("Matrix", PortValue::Matrix4x4(translate_z10));
-        let mut props = NodeProperties::default();
-        props.insert("height", PortValue::Number(2.0));
-        let out = ExtrudeNode.evaluate(&inputs, &props).unwrap();
+        let (inst, inputs, props) = make_ctx_fixture(
+            &[
+                ("Paths", PortValue::Path2d(Arc::new(cs))),
+                ("Matrix", PortValue::Matrix4x4(translate_z10)),
+            ],
+            &[("height", PortValue::Number(2.0))],
+        );
+        let ctx = EvalCtx { instance: &inst, properties: &props, inputs: &inputs };
+        let out = ExtrudeNode.evaluate(&ctx).unwrap();
         match out.by_name.get("Geometry").unwrap() {
             PortValue::Geometry3d(m) => {
                 let stride = m.num_prop as usize;
@@ -577,7 +611,6 @@ mod tests {
                     if z < z_min { z_min = z; }
                     if z > z_max { z_max = z; }
                 }
-                // Original mesh spans z in [-1, 1]; translated by +10.
                 assert!((z_min - 9.0).abs() < 1e-4, "z_min was {}", z_min);
                 assert!((z_max - 11.0).abs() < 1e-4, "z_max was {}", z_max);
             }

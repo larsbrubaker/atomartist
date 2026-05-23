@@ -2,9 +2,11 @@
 //! One node type per operation so the user picks from the menu rather
 //! than wading through a property enum.
 
-use crate::graph::node::PortValue;
+use crate::graph::node::{NodeId, NodeInstance, PortValue};
+use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    NodeDef, NodeError, NodeInputs, NodeOutputs, NodeProperties, NodeRegistry, SocketDef,
+    EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeInputs, NodeOutputs, NodeProperties,
+    NodeRegistry,
 };
 use crate::socket_types::SocketType;
 
@@ -31,19 +33,17 @@ impl NodeDef for BinaryOpNode {
     fn display_name(&self) -> &'static str { self.display_name }
     fn category(&self) -> &'static str { "Math" }
 
-    fn input_sockets(&self) -> Vec<SocketDef> {
-        vec![
-            SocketDef::required("a", SocketType::Number),
-            SocketDef::required("b", SocketType::Number),
-        ]
-    }
-    fn output_sockets(&self) -> Vec<SocketDef> {
-        vec![SocketDef::required("out", SocketType::Number)]
+    fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
+        InstanceTemplate::builder(alloc)
+            .input("a", SocketType::Number)
+            .input("b", SocketType::Number)
+            .output("out", SocketType::Number)
+            .build()
     }
 
-    fn evaluate(&self, inputs: &NodeInputs, _props: &NodeProperties) -> Result<NodeOutputs, NodeError> {
-        let a = pull_number(inputs.get("a"), 0.0);
-        let b = pull_number(inputs.get("b"), 0.0);
+    fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
+        let a = pull_number(ctx.input_named("a"), 0.0);
+        let b = pull_number(ctx.input_named("b"), 0.0);
         let r = (self.op)(a, b);
         let mut out = NodeOutputs::default();
         out.set("out", PortValue::Number(r));
@@ -63,10 +63,21 @@ mod tests {
     use super::*;
 
     fn run(node: &impl NodeDef, a: f64, b: f64) -> f64 {
+        // Build a NodeInstance reflecting what `instantiate` would produce,
+        // then build an EvalCtx with values keyed by socket uid.
+        let mut alloc = SocketUidAlloc::new();
+        let tpl = node.instantiate(&mut alloc);
+        let mut inst = NodeInstance::new(NodeId(1), node.type_id().to_string(), [0.0, 0.0]);
+        inst.inputs = tpl.inputs;
+        inst.outputs = tpl.outputs;
+        let uid_a = inst.input_by_name("a").unwrap().uid;
+        let uid_b = inst.input_by_name("b").unwrap().uid;
         let mut inputs = NodeInputs::default();
-        inputs.insert("a", PortValue::Number(a));
-        inputs.insert("b", PortValue::Number(b));
-        let outs = node.evaluate(&inputs, &NodeProperties::default()).unwrap();
+        inputs.insert(uid_a, PortValue::Number(a));
+        inputs.insert(uid_b, PortValue::Number(b));
+        let props = NodeProperties::default();
+        let ctx = EvalCtx { instance: &inst, properties: &props, inputs: &inputs };
+        let outs = node.evaluate(&ctx).unwrap();
         match outs.by_name.get("out").unwrap() {
             PortValue::Number(n) => *n,
             _ => panic!(),

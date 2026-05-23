@@ -28,8 +28,9 @@ use std::sync::Arc;
 
 use crate::graph::graph::Graph;
 use crate::graph::node::PortValue;
+use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    NodeDef, NodeError, NodeInputs, NodeOutputs, NodeProperties, NodeRegistry, PropDef, SocketDef,
+    EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeRegistry, PropDef,
 };
 use crate::serialization::asset_store::{AssetRef, AssetStore};
 use crate::serialization::mesh_3mf::import_3mf;
@@ -59,11 +60,10 @@ impl NodeDef for MeshNode {
         "Mesh"
     }
 
-    fn input_sockets(&self) -> Vec<SocketDef> {
-        vec![]
-    }
-    fn output_sockets(&self) -> Vec<SocketDef> {
-        vec![SocketDef::required("out", SocketType::Geometry3d)]
+    fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
+        InstanceTemplate::builder(alloc)
+            .output("out", SocketType::Geometry3d)
+            .build()
     }
 
     fn properties(&self) -> Vec<PropDef> {
@@ -73,18 +73,11 @@ impl NodeDef for MeshNode {
         ]
     }
 
-    fn evaluate(
-        &self,
-        _inputs: &NodeInputs,
-        props: &NodeProperties,
-    ) -> Result<NodeOutputs, NodeError> {
+    fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
         let mut out = NodeOutputs::default();
-        if let PortValue::Geometry3d(mesh) = props.get(MESH_CACHE_KEY) {
+        if let PortValue::Geometry3d(mesh) = ctx.properties.get(MESH_CACHE_KEY) {
             out.set("out", PortValue::Geometry3d(Arc::clone(mesh)));
         }
-        // Empty output is the right behaviour when the asset hasn't
-        // been resolved yet (just-loaded project before
-        // `resolve_mesh_assets` ran, or a dangling reference).
         Ok(out)
     }
 }
@@ -94,19 +87,12 @@ pub fn register(reg: &mut NodeRegistry) {
 }
 
 /// Walk `graph` and populate every `MeshNode`'s runtime mesh cache from
-/// `assets`. Call this after loading a project. Nodes whose `asset`
-/// reference is missing from the store are left untouched — their
-/// `evaluate` will return an empty output until the user re-imports.
-///
-/// Returns a list of warnings for asset references that didn't
-/// resolve, so callers can surface them in the UI without aborting
-/// the whole load.
+/// `assets`. Call this after loading a project.
 pub fn resolve_mesh_assets(graph: &mut Graph, assets: &AssetStore) -> Vec<String> {
     let mut warnings = Vec::new();
-    // Collect node ids first to avoid borrow conflict with the mutating loop.
     let ids: Vec<_> = graph
         .nodes()
-        .filter(|n| n.type_id == TYPE_ID)
+        .filter(|n| n.type_id.as_ref() == TYPE_ID)
         .map(|n| n.id)
         .collect();
     for id in ids {
@@ -137,8 +123,10 @@ pub fn resolve_mesh_assets(graph: &mut Graph, assets: &AssetStore) -> Vec<String
         match decode_mesh(&entry.bytes, &entry.extension) {
             Ok(mesh) => {
                 if let Some(n) = graph.get_mut(id) {
-                    n.properties
-                        .insert(MESH_CACHE_KEY, PortValue::Geometry3d(Arc::new(mesh)));
+                    n.properties.insert(
+                        Arc::from(MESH_CACHE_KEY),
+                        PortValue::Geometry3d(Arc::new(mesh)),
+                    );
                     n.dirty = true;
                 }
             }
@@ -151,14 +139,7 @@ pub fn resolve_mesh_assets(graph: &mut Graph, assets: &AssetStore) -> Vec<String
     warnings
 }
 
-/// Import a mesh from any supported file extension. Used both by the
-/// drag-drop handler (when the user drops a `.stl`/`.obj`/`.3mf` onto
-/// the app) and by [`resolve_mesh_assets`] when materialising a node
-/// from its in-bundle bytes.
-///
-/// AtomArtist always persists meshes as `.3mf`, so on the load side
-/// the extension is normally `3mf`; the other branches are kept for
-/// import and for legacy projects that may have stored other formats.
+/// Import a mesh from any supported file extension.
 pub fn decode_mesh(bytes: &[u8], extension: &str) -> Result<manifold_rust::types::MeshGL, String> {
     match extension.to_ascii_lowercase().as_str() {
         "stl" => import_stl(bytes).map_err(|e| format!("STL parse: {}", e)),
@@ -173,6 +154,7 @@ mod tests {
     use super::*;
     use crate::geometry::generate_box;
     use crate::graph::node::NodeInstance;
+    use crate::registry::{NodeInputs, NodeProperties};
     use crate::serialization::mesh_3mf::export_3mf;
 
     fn make_node(id: u64, asset_ref: &str) -> NodeInstance {
@@ -182,27 +164,38 @@ mod tests {
             [0.0, 0.0],
         );
         n.properties.insert(
-            "asset",
+            Arc::from("asset"),
             PortValue::StringVal(Arc::new(asset_ref.to_string())),
         );
         n
     }
 
+    fn make_ctx(props: NodeProperties) -> (NodeInstance, NodeInputs, NodeProperties) {
+        let mut alloc = SocketUidAlloc::new();
+        let tpl = MeshNode.instantiate(&mut alloc);
+        let mut inst = NodeInstance::new(crate::graph::node::NodeId(1), TYPE_ID, [0.0, 0.0]);
+        inst.inputs = tpl.inputs;
+        inst.outputs = tpl.outputs;
+        let inputs = NodeInputs::default();
+        (inst, inputs, props)
+    }
+
     #[test]
     fn evaluate_emits_empty_when_no_cache() {
-        let n = MeshNode;
-        let props = NodeProperties::default();
-        let out = n.evaluate(&NodeInputs::default(), &props).unwrap();
+        let (inst, inputs, props) = make_ctx(NodeProperties::default());
+        let ctx = EvalCtx { instance: &inst, properties: &props, inputs: &inputs };
+        let out = MeshNode.evaluate(&ctx).unwrap();
         assert!(out.by_name.get("out").is_none());
     }
 
     #[test]
     fn evaluate_returns_cached_mesh() {
         let mesh = generate_box(1.0, 2.0, 3.0);
-        let n = MeshNode;
         let mut props = NodeProperties::default();
         props.insert(MESH_CACHE_KEY, PortValue::Geometry3d(Arc::new(mesh)));
-        let out = n.evaluate(&NodeInputs::default(), &props).unwrap();
+        let (inst, inputs, props) = make_ctx(props);
+        let ctx = EvalCtx { instance: &inst, properties: &props, inputs: &inputs };
+        let out = MeshNode.evaluate(&ctx).unwrap();
         match out.by_name.get("out").unwrap() {
             PortValue::Geometry3d(m) => assert_eq!(m.tri_verts.len() / 3, 12),
             _ => panic!("expected Geometry3d output"),
@@ -232,7 +225,6 @@ mod tests {
     #[test]
     fn resolve_emits_warning_for_missing_asset() {
         let mut graph = Graph::new();
-        // Reference a valid-looking but non-existent asset.
         let dangling = AssetRef::from_bytes(b"phantom");
         graph
             .add_node(make_node(1, dangling.as_str()))

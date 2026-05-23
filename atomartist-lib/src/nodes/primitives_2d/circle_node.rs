@@ -5,8 +5,9 @@ use std::sync::Arc;
 use manifold_rust::cross_section::CrossSection;
 
 use crate::graph::node::PortValue;
+use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    NodeDef, NodeError, NodeInputs, NodeOutputs, NodeProperties, NodeRegistry, PropDef, SocketDef,
+    EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeRegistry, PropDef,
 };
 use crate::socket_types::SocketType;
 
@@ -17,9 +18,10 @@ impl NodeDef for CircleNode {
     fn display_name(&self) -> &'static str { "Circle" }
     fn category(&self) -> &'static str { "Primitives 2D" }
 
-    fn input_sockets(&self) -> Vec<SocketDef> { vec![] }
-    fn output_sockets(&self) -> Vec<SocketDef> {
-        vec![SocketDef::required("out", SocketType::Path2d)]
+    fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
+        InstanceTemplate::builder(alloc)
+            .output("out", SocketType::Path2d)
+            .build()
     }
 
     fn properties(&self) -> Vec<PropDef> {
@@ -29,9 +31,9 @@ impl NodeDef for CircleNode {
         ]
     }
 
-    fn evaluate(&self, _inputs: &NodeInputs, props: &NodeProperties) -> Result<NodeOutputs, NodeError> {
-        let r = props.number("radius", 10.0);
-        let segs = props.number("segments", 32.0).round().clamp(3.0, 256.0) as i32;
+    fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
+        let r = ctx.properties.number("radius", 10.0);
+        let segs = ctx.properties.number("segments", 32.0).round().clamp(3.0, 256.0) as i32;
         let cs = CrossSection::circle(r, segs);
         let mut out = NodeOutputs::default();
         out.set("out", PortValue::Path2d(Arc::new(cs)));

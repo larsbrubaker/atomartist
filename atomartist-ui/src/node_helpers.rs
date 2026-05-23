@@ -4,31 +4,25 @@
 //! [`add_node_with_defaults`] to insert a node with property defaults
 //! filled from the registry.
 
-use atomartist_lib::graph::node::{NodeId, NodeInstance};
+use atomartist_lib::graph::node::NodeId;
 use atomartist_lib::registry::NodeRegistry;
 use atomartist_lib::Graph;
 
 /// Add a node of `type_id` at `position` with all properties seeded
-/// from the type's `PropDef` defaults.  Returns the new node's id, or
-/// `None` if the type isn't registered.
+/// from the type's `PropDef` defaults and sockets minted via
+/// `NodeDef::instantiate`. Returns the new node's id, or `None` if the
+/// type isn't registered.
 ///
-/// Lives here (rather than inside the canvas widget) so callers that
-/// don't depend on the widget tree — file loaders, the top menu's
-/// add-node action, integration tests — can still use it.
+/// Thin wrapper around [`Graph::add_new_node`]. Kept as a free function
+/// so callers (file loaders, the top menu's add-node action,
+/// integration tests) can stay independent of the canvas widget.
 pub fn add_node_with_defaults(
     graph: &mut Graph,
     registry: &NodeRegistry,
-    type_id: &'static str,
+    type_id: &str,
     position: [f64; 2],
 ) -> Option<NodeId> {
-    let def = registry.get(type_id)?;
-    let id = graph.allocate_id();
-    let mut node = NodeInstance::new(id, type_id, position);
-    for prop in def.properties() {
-        node.properties.insert(prop.name, prop.default);
-    }
-    graph.add_node(node).ok()?;
-    Some(id)
+    graph.add_new_node(type_id, position, registry).ok()
 }
 
 #[cfg(test)]
@@ -43,7 +37,10 @@ mod tests {
         let mut g = Graph::new();
         let id = add_node_with_defaults(&mut g, &reg, "Box", [10.0, 20.0]).unwrap();
         let n = g.get(id).unwrap();
-        assert_eq!(n.type_id, "Box");
+        assert_eq!(n.type_id.as_ref(), "Box");
         assert!(n.properties.contains_key("width"));
+        // Sockets minted via instantiate(): Box has one Geometry3d output.
+        assert_eq!(n.outputs.len(), 1);
+        assert_eq!(n.outputs[0].name.as_ref(), "out");
     }
 }

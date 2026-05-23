@@ -6,8 +6,9 @@ use manifold_rust::cross_section::CrossSection;
 use manifold_rust::linalg::Vec2;
 
 use crate::graph::node::PortValue;
+use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    NodeDef, NodeError, NodeInputs, NodeOutputs, NodeProperties, NodeRegistry, PropDef, SocketDef,
+    EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeRegistry, PropDef,
 };
 use crate::socket_types::SocketType;
 
@@ -18,9 +19,10 @@ impl NodeDef for RectangleNode {
     fn display_name(&self) -> &'static str { "Rectangle" }
     fn category(&self) -> &'static str { "Primitives 2D" }
 
-    fn input_sockets(&self) -> Vec<SocketDef> { vec![] }
-    fn output_sockets(&self) -> Vec<SocketDef> {
-        vec![SocketDef::required("out", SocketType::Path2d)]
+    fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
+        InstanceTemplate::builder(alloc)
+            .output("out", SocketType::Path2d)
+            .build()
     }
 
     fn properties(&self) -> Vec<PropDef> {
@@ -30,12 +32,11 @@ impl NodeDef for RectangleNode {
         ]
     }
 
-    fn evaluate(&self, _inputs: &NodeInputs, props: &NodeProperties) -> Result<NodeOutputs, NodeError> {
-        let w = props.number("width", 20.0);
-        let h = props.number("height", 20.0);
+    fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
+        let w = ctx.properties.number("width", 20.0);
+        let h = ctx.properties.number("height", 20.0);
         let half_w = w * 0.5;
         let half_h = h * 0.5;
-        // CCW from outside (looking down -Z toward XY plane).
         let contour = vec![
             Vec2::new(-half_w, -half_h),
             Vec2::new( half_w, -half_h),

@@ -9,8 +9,9 @@ use std::sync::Arc;
 
 use crate::geometry::path2d::CrossSection;
 use crate::graph::node::PortValue;
+use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    NodeDef, NodeError, NodeInputs, NodeOutputs, NodeProperties, NodeRegistry, PropDef, SocketDef,
+    EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeRegistry, PropDef,
 };
 use crate::socket_types::SocketType;
 
@@ -21,11 +22,11 @@ impl NodeDef for StrokeNode {
     fn display_name(&self) -> &'static str { "Stroke" }
     fn category(&self) -> &'static str { "Operations 2D" }
 
-    fn input_sockets(&self) -> Vec<SocketDef> {
-        vec![SocketDef::required("input", SocketType::Path2d)]
-    }
-    fn output_sockets(&self) -> Vec<SocketDef> {
-        vec![SocketDef::required("out", SocketType::Path2d)]
+    fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
+        InstanceTemplate::builder(alloc)
+            .input("input", SocketType::Path2d)
+            .output("out", SocketType::Path2d)
+            .build()
     }
 
     fn properties(&self) -> Vec<PropDef> {
@@ -34,15 +35,15 @@ impl NodeDef for StrokeNode {
         ]
     }
 
-    fn evaluate(&self, inputs: &NodeInputs, props: &NodeProperties) -> Result<NodeOutputs, NodeError> {
-        let input = match inputs.get("input") {
+    fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
+        let input = match ctx.input_named("input") {
             PortValue::Path2d(p) => p.clone(),
             PortValue::None => return Ok(NodeOutputs::default()),
             other => return Err(NodeError::msg(format!(
                 "Stroke: expected Path2d, got {:?}", other.socket_type()
             ))),
         };
-        let w = props.number("width", 1.0).max(1e-6);
+        let w = ctx.properties.number("width", 1.0).max(1e-6);
         let outer: CrossSection = input.offset(w * 0.5);
         let inner: CrossSection = input.offset(-w * 0.5);
         let ring = outer.difference(&inner);

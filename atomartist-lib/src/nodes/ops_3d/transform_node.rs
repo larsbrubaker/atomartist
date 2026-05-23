@@ -9,8 +9,10 @@ use std::sync::Arc;
 
 use crate::geometry::apply_transform;
 use crate::graph::node::PortValue;
+use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    NodeDef, NodeError, NodeInputs, NodeOutputs, NodeProperties, NodeRegistry, PropDef, SocketDef,
+    EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeProperties, NodeRegistry,
+    PropDef,
 };
 use crate::socket_types::SocketType;
 
@@ -28,16 +30,12 @@ impl TransformNode {
         let sy = props.number("sy", 1.0) as f32;
         let sz = props.number("sz", 1.0) as f32;
 
-        // Apply S first, then Rx, Ry, Rz, then T. Equivalent matrix:
-        //   M = T · Rz · Ry · Rx · S
-        // where Rx etc. are the standard rotation matrices.
         let s = mat_scale(sx, sy, sz);
         let rxm = mat_rot_x(rx);
         let rym = mat_rot_y(ry);
         let rzm = mat_rot_z(rz);
         let tm = mat_translate(tx, ty, tz);
 
-        // Multiply right-to-left: result = T * Rz * Ry * Rx * S
         let m1 = mat_mul(rxm, s);
         let m2 = mat_mul(rym, m1);
         let m3 = mat_mul(rzm, m2);
@@ -50,12 +48,11 @@ impl NodeDef for TransformNode {
     fn display_name(&self) -> &'static str { "Transform" }
     fn category(&self) -> &'static str { "Operations 3D" }
 
-    fn input_sockets(&self) -> Vec<SocketDef> {
-        vec![SocketDef::required("input", SocketType::Geometry3d)]
-    }
-
-    fn output_sockets(&self) -> Vec<SocketDef> {
-        vec![SocketDef::required("out", SocketType::Geometry3d)]
+    fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
+        InstanceTemplate::builder(alloc)
+            .input("input", SocketType::Geometry3d)
+            .output("out", SocketType::Geometry3d)
+            .build()
     }
 
     fn properties(&self) -> Vec<PropDef> {
@@ -72,15 +69,15 @@ impl NodeDef for TransformNode {
         ]
     }
 
-    fn evaluate(&self, inputs: &NodeInputs, props: &NodeProperties) -> Result<NodeOutputs, NodeError> {
-        let input = match inputs.get("input") {
+    fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
+        let input = match ctx.input_named("input") {
             PortValue::Geometry3d(m) => m.clone(),
             PortValue::None => return Ok(NodeOutputs::default()),
             other => return Err(NodeError::msg(format!(
                 "Transform: expected Geometry3d input, got {:?}", other.socket_type()
             ))),
         };
-        let matrix = Self::build_matrix(props);
+        let matrix = Self::build_matrix(ctx.properties);
         let out_mesh = apply_transform(&input, &matrix);
         let mut out = NodeOutputs::default();
         out.set("out", PortValue::Geometry3d(Arc::new(out_mesh)));
@@ -164,29 +161,38 @@ fn mat_mul(a: [f32; 16], b: [f32; 16]) -> [f32; 16] {
 mod tests {
     use super::*;
     use crate::geometry::{generate_box, get_pos, num_verts};
+    use crate::graph::node::{NodeId, NodeInstance};
+    use crate::registry::NodeInputs;
 
     fn props_with(values: &[(&'static str, f64)]) -> NodeProperties {
         let mut p = NodeProperties::default();
         for (k, v) in values {
-            p.insert(k, PortValue::Number(*v));
+            p.insert(*k, PortValue::Number(*v));
         }
         p
     }
 
-    fn make_inputs(mesh: Arc<manifold_rust::types::MeshGL>) -> NodeInputs {
-        let mut i = NodeInputs::default();
-        i.insert("input", PortValue::Geometry3d(mesh));
-        i
+    fn setup(mesh: Arc<manifold_rust::types::MeshGL>) -> (NodeInstance, NodeInputs) {
+        let n = TransformNode;
+        let mut alloc = SocketUidAlloc::new();
+        let tpl = n.instantiate(&mut alloc);
+        let mut inst = NodeInstance::new(NodeId(1), "Transform", [0.0, 0.0]);
+        inst.inputs = tpl.inputs;
+        inst.outputs = tpl.outputs;
+        let mut inputs = NodeInputs::default();
+        let uid = inst.input_by_name("input").unwrap().uid;
+        inputs.insert(uid, PortValue::Geometry3d(mesh));
+        (inst, inputs)
     }
 
     #[test]
     fn translate_shifts_all_y_by_5() {
         let n = TransformNode;
         let m = Arc::new(generate_box(1.0, 1.0, 1.0));
-        let outs = n.evaluate(
-            &make_inputs(m.clone()),
-            &props_with(&[("ty", 5.0), ("sx", 1.0), ("sy", 1.0), ("sz", 1.0)]),
-        ).unwrap();
+        let (inst, inputs) = setup(m.clone());
+        let props = props_with(&[("ty", 5.0), ("sx", 1.0), ("sy", 1.0), ("sz", 1.0)]);
+        let ctx = EvalCtx { instance: &inst, properties: &props, inputs: &inputs };
+        let outs = n.evaluate(&ctx).unwrap();
         match outs.by_name.get("out").unwrap() {
             PortValue::Geometry3d(t) => {
                 for i in 0..num_verts(t) {
@@ -205,10 +211,10 @@ mod tests {
     fn scale_doubles_x_dimension() {
         let n = TransformNode;
         let m = Arc::new(generate_box(2.0, 2.0, 2.0));
-        let outs = n.evaluate(
-            &make_inputs(m.clone()),
-            &props_with(&[("sx", 2.0), ("sy", 1.0), ("sz", 1.0)]),
-        ).unwrap();
+        let (inst, inputs) = setup(m.clone());
+        let props = props_with(&[("sx", 2.0), ("sy", 1.0), ("sz", 1.0)]);
+        let ctx = EvalCtx { instance: &inst, properties: &props, inputs: &inputs };
+        let outs = n.evaluate(&ctx).unwrap();
         match outs.by_name.get("out").unwrap() {
             PortValue::Geometry3d(t) => {
                 for i in 0..num_verts(t) {

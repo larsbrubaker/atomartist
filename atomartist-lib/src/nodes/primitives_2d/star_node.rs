@@ -6,8 +6,9 @@ use manifold_rust::cross_section::CrossSection;
 use manifold_rust::linalg::Vec2;
 
 use crate::graph::node::PortValue;
+use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    NodeDef, NodeError, NodeInputs, NodeOutputs, NodeProperties, NodeRegistry, PropDef, SocketDef,
+    EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeRegistry, PropDef,
 };
 use crate::socket_types::SocketType;
 
@@ -18,9 +19,10 @@ impl NodeDef for StarNode {
     fn display_name(&self) -> &'static str { "Star" }
     fn category(&self) -> &'static str { "Primitives 2D" }
 
-    fn input_sockets(&self) -> Vec<SocketDef> { vec![] }
-    fn output_sockets(&self) -> Vec<SocketDef> {
-        vec![SocketDef::required("out", SocketType::Path2d)]
+    fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
+        InstanceTemplate::builder(alloc)
+            .output("out", SocketType::Path2d)
+            .build()
     }
 
     fn properties(&self) -> Vec<PropDef> {
@@ -31,10 +33,10 @@ impl NodeDef for StarNode {
         ]
     }
 
-    fn evaluate(&self, _inputs: &NodeInputs, props: &NodeProperties) -> Result<NodeOutputs, NodeError> {
-        let n = props.number("points", 5.0).round().clamp(3.0, 64.0) as usize;
-        let r_out = props.number("outer_radius", 10.0);
-        let r_in = props.number("inner_radius", 4.0).min(r_out);
+    fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
+        let n = ctx.properties.number("points", 5.0).round().clamp(3.0, 64.0) as usize;
+        let r_out = ctx.properties.number("outer_radius", 10.0);
+        let r_in = ctx.properties.number("inner_radius", 4.0).min(r_out);
         let total = n * 2;
         let mut contour = Vec::with_capacity(total);
         for i in 0..total {

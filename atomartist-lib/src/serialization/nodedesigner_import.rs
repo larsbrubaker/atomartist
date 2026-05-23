@@ -16,10 +16,10 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
+use crate::graph::graph::{Edge, Graph};
+use crate::graph::node::PortValue;
 use crate::registry::NodeRegistry;
-use crate::serialization::graph_json::{
-    load_graph, EdgeFile, GraphFile, JsonPortValue, LoadResult, NodeFile, SCHEMA_VERSION,
-};
+use crate::serialization::graph_json::{JsonPortValue, LoadResult};
 
 #[derive(Deserialize, Debug)]
 struct NdScene {
@@ -287,13 +287,16 @@ pub fn import_nodedesigner_scene_str(
 
 fn import_scene(scene: NdScene, registry: &NodeRegistry) -> LoadResult {
     let mut warnings = Vec::new();
+    let mut graph = Graph::new();
 
-    // Pass 1: collect translatable nodes + socket UUID tables.
-    // socket_lookup[node_id][socket_id_uuid] = (socket_name, is_output)
+    // Map NodeDesigner node ids → freshly-allocated AtomArtist NodeIds,
+    // and (id, socket_uuid) → (atomartist socket name, is_output) so
+    // edges can resolve target sockets by uid later.
+    let mut nd_to_am: HashMap<u64, crate::graph::node::NodeId> = HashMap::new();
+    let mut node_atype: HashMap<u64, &'static str> = HashMap::new();
     let mut socket_lookup: HashMap<u64, HashMap<String, (String, bool)>> = HashMap::new();
-    let mut node_translation: HashMap<u64, &'static str> = HashMap::new();
-    let mut nodes_out = Vec::new();
 
+    // Pass 1: create the live nodes.
     for nd_node in &scene.nodes {
         let nid = nd_node.id.to_u64();
         let am_type = match nd_type_to_atomartist(&nd_node.type_id) {
@@ -306,9 +309,27 @@ fn import_scene(scene: NdScene, registry: &NodeRegistry) -> LoadResult {
                 continue;
             }
         };
-        node_translation.insert(nid, am_type);
+        let pos = nd_node.pos.xy();
+        let new_id = match graph.add_new_node(am_type, [pos[0], -pos[1]], registry) {
+            Ok(id) => id,
+            Err(e) => {
+                warnings.push(format!("failed to create node '{}': {}", am_type, e));
+                continue;
+            }
+        };
+        nd_to_am.insert(nid, new_id);
+        node_atype.insert(nid, am_type);
 
-        // Build socket UUID lookup.
+        // Translate + apply properties.
+        for (k, v) in &nd_node.properties {
+            if let Some(name) = map_property_name(am_type, k) {
+                if let Some(jv) = translate_property(v) {
+                    let _ = graph.set_property(new_id, name, jv.into_port_value());
+                }
+            }
+        }
+
+        // Record the socket-UUID lookup for the edge pass.
         let mut sockets: HashMap<String, (String, bool)> = HashMap::new();
         for s in &nd_node.input_sockets {
             sockets.insert(s.socket_id.clone(), (s.name.clone(), false));
@@ -317,55 +338,36 @@ fn import_scene(scene: NdScene, registry: &NodeRegistry) -> LoadResult {
             sockets.insert(s.socket_id.clone(), (s.name.clone(), true));
         }
         socket_lookup.insert(nid, sockets);
-
-        // Translate properties.
-        let mut props = HashMap::new();
-        for (k, v) in &nd_node.properties {
-            // NodeDesigner sometimes nests properties like
-            // `properties.inputSockets`. Skip non-leaf entries.
-            if let Some(name) = map_property_name(am_type, k) {
-                if let Some(jv) = translate_property(v) {
-                    props.insert(name, jv);
-                }
-            }
-        }
-
-        // Convert canvas position. NodeDesigner is Y-down; our canvas
-        // is Y-up. Negate Y so the visual layout reads top-to-bottom.
-        let pos = nd_node.pos.xy();
-        nodes_out.push(NodeFile {
-            id: nid,
-            type_id: am_type.to_string(),
-            position: [pos[0], -pos[1]],
-            properties: props,
-        });
     }
 
-    // Pass 2: translate edges.
-    let mut edges_out: Vec<EdgeFile> = Vec::new();
+    // Pass 2: translate edges. NodeDesigner edges reference sockets by
+    // UUID inside the original scene; we resolve UUID → NodeDesigner
+    // socket name → AtomArtist socket name → uid on the live instance.
     for noodle in &scene.noodles {
         let (_link_id, src_node, src_uuid, dst_node, dst_uuid, _kind) = noodle;
-        let src_id = src_node.to_u64();
-        let dst_id = dst_node.to_u64();
-        let src_type = match node_translation.get(&src_id) {
-            Some(t) => *t,
+        let src_nd_id = src_node.to_u64();
+        let dst_nd_id = dst_node.to_u64();
+        let src_id = match nd_to_am.get(&src_nd_id) {
+            Some(n) => *n,
             None => continue,
         };
-        let dst_type = match node_translation.get(&dst_id) {
-            Some(t) => *t,
+        let dst_id = match nd_to_am.get(&dst_nd_id) {
+            Some(n) => *n,
             None => continue,
         };
-        // Resolve socket names from UUIDs.
-        let src_socket_nd = match socket_lookup.get(&src_id).and_then(|m| m.get(src_uuid)) {
-            Some((name, _is_output)) => name.clone(),
+        let src_type = *node_atype.get(&src_nd_id).unwrap_or(&"");
+        let dst_type = *node_atype.get(&dst_nd_id).unwrap_or(&"");
+
+        let src_socket_nd = match socket_lookup.get(&src_nd_id).and_then(|m| m.get(src_uuid)) {
+            Some((name, _)) => name.clone(),
             None => continue,
         };
-        let dst_socket_nd = match socket_lookup.get(&dst_id).and_then(|m| m.get(dst_uuid)) {
-            Some((name, _is_output)) => name.clone(),
+        let dst_socket_nd = match socket_lookup.get(&dst_nd_id).and_then(|m| m.get(dst_uuid)) {
+            Some((name, _)) => name.clone(),
             None => continue,
         };
         let src_socket = match map_socket_name(src_type, &src_socket_nd, true) {
-            Some(s) => s.to_string(),
+            Some(s) => s,
             None => {
                 warnings.push(format!(
                     "edge source socket '{}.{}' has no AtomArtist analogue",
@@ -375,7 +377,7 @@ fn import_scene(scene: NdScene, registry: &NodeRegistry) -> LoadResult {
             }
         };
         let dst_socket = match map_socket_name(dst_type, &dst_socket_nd, false) {
-            Some(s) => s.to_string(),
+            Some(s) => s,
             None => {
                 warnings.push(format!(
                     "edge target socket '{}.{}' has no AtomArtist analogue",
@@ -384,25 +386,38 @@ fn import_scene(scene: NdScene, registry: &NodeRegistry) -> LoadResult {
                 continue;
             }
         };
-        edges_out.push(EdgeFile {
-            from_node: src_id,
-            from_socket: src_socket,
-            to_node: dst_id,
-            to_socket: dst_socket,
-        });
+
+        let src_uid = match graph.get(src_id).and_then(|n| n.output_by_name(src_socket)) {
+            Some(s) => s.uid,
+            None => {
+                warnings.push(format!(
+                    "source socket '{}' not found on imported {} node",
+                    src_socket, src_type
+                ));
+                continue;
+            }
+        };
+        let dst_uid = match graph.get(dst_id).and_then(|n| n.input_by_name(dst_socket)) {
+            Some(s) => s.uid,
+            None => {
+                warnings.push(format!(
+                    "target socket '{}' not found on imported {} node",
+                    dst_socket, dst_type
+                ));
+                continue;
+            }
+        };
+
+        if let Err(e) = graph.connect(Edge::new(src_id, src_uid, dst_id, dst_uid), registry) {
+            warnings.push(format!("edge {}→{}: {}", src_type, dst_type, e));
+        }
     }
 
-    let file = GraphFile {
-        version: SCHEMA_VERSION,
-        nodes: nodes_out,
-        edges: edges_out,
-    };
+    // Help the borrow checker: silence "unused" on PortValue import in
+    // the conversion path above.
+    let _ = PortValue::None;
 
-    // Hand off to the regular loader. It'll surface its own warnings
-    // (unknown sockets, etc.) — concat them onto ours.
-    let mut result = load_graph(file, registry);
-    result.warnings.splice(0..0, warnings);
-    result
+    LoadResult { graph, warnings }
 }
 
 #[cfg(test)]
