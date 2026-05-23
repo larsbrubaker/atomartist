@@ -28,6 +28,76 @@ fn save_then_load_round_trips_starter_graph_topology() {
 }
 
 #[test]
+fn save_then_load_atmr_round_trips_through_app_state() {
+    // Exercises the public `AppState::save_graph_to_path` →
+    // `AppState::load_graph_from_path` pipeline through the new ATMR
+    // (zip) container. Confirms `current_file` is updated, the on-disk
+    // file is a real zip (PK header), and the round-tripped graph
+    // preserves node + edge counts.
+    let h = TestHarness::with_starter_graph();
+    let nodes_before = h.state().graph.lock().unwrap().nodes().count();
+    let edges_before = h.state().graph.lock().unwrap().edges().len();
+
+    // Unique name avoids cross-test interference when run in parallel.
+    let path = std::env::temp_dir().join(format!(
+        "atomartist_ui_test_{}.atmr",
+        std::process::id()
+    ));
+
+    h.state()
+        .save_graph_to_path(&path)
+        .expect("save_graph_to_path");
+    assert_eq!(
+        h.state().current_file.lock().unwrap().as_deref(),
+        Some(path.as_path()),
+        "save should record the path on AppState.current_file",
+    );
+
+    // Quick smoke check that we wrote a real zip: every zip starts
+    // with the local-file-header signature `PK\x03\x04`.
+    let bytes = std::fs::read(&path).expect("read saved atmr");
+    assert!(bytes.len() >= 4 && &bytes[..4] == b"PK\x03\x04", "expected zip magic");
+
+    // Wipe the in-memory graph, then load back from disk and assert
+    // the topology survived the round trip.
+    h.state().new_empty_project();
+    assert_eq!(h.state().graph.lock().unwrap().nodes().count(), 0);
+    h.state()
+        .load_graph_from_path(&path)
+        .expect("load_graph_from_path");
+    let nodes_after = h.state().graph.lock().unwrap().nodes().count();
+    let edges_after = h.state().graph.lock().unwrap().edges().len();
+    assert_eq!(nodes_before, nodes_after);
+    assert_eq!(edges_before, edges_after);
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn ui_settings_surface_current_file_as_last_project_path() {
+    // The shell's AutoSave loop snapshots `AppState::ui_settings()` on
+    // every paint and writes it to disk. The auto-reopen path on next
+    // launch reads `last_project_path` back from there, so this is
+    // the contract that lets the user resume where they left off.
+    let h = TestHarness::with_starter_graph();
+    // Before any save, no project path is associated.
+    assert_eq!(h.state().ui_settings().last_project_path, None);
+
+    let path = std::env::temp_dir().join(format!(
+        "atomartist_ui_test_settings_{}.atmr",
+        std::process::id()
+    ));
+    h.state()
+        .save_graph_to_path(&path)
+        .expect("save_graph_to_path");
+
+    let surfaced = h.state().ui_settings().last_project_path;
+    assert_eq!(surfaced.as_deref(), Some(path.as_path()));
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn new_empty_project_clears_graph_and_selection() {
     let h = TestHarness::with_starter_graph();
     h.state().set_selection(Some(atomartist_lib::graph::node::NodeId(1)));

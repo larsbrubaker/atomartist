@@ -17,7 +17,7 @@ use agg_gui::{
 };
 use atomartist_ui::{
     build_app, fresh_state_with_starter_graph, top_menu_bar::FileDialogProvider,
-    MainWindowState, UiSettings,
+    MainWindowState, UiSettings, WindowPlacement,
 };
 use demo_wgpu::WgpuGfxCtx;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
@@ -132,20 +132,22 @@ fn current_main_window_state(window: &Window) -> MainWindowState {
 }
 
 /// Pick the initial value for the live "last normal bounds" cache.
-/// Prefers the persisted bounds (so the user's pre-maximization
-/// size is preserved across launches) and falls back to whatever
-/// the OS gave us when neither side has anything sensible.
-fn initial_normal_bounds(window: &Window, restored: Option<MainWindowState>) -> MainWindowState {
-    if let Some(r) = restored {
-        // Keep the maximized flag the OS just applied — `restored`
-        // already represents the bounds we asked for, including
-        // the user's last non-maximized geometry.
-        MainWindowState {
+///
+/// We always prefer the saved bounds (with the recentered position
+/// if the saved one was off-screen now) over reading the live
+/// window — when the shell has just called `set_maximized(true)`,
+/// `outer_position()` and `inner_size()` report the maximized
+/// monitor-fill geometry, which is exactly the wrong thing to seed
+/// the "last non-maximized bounds" cache with. Falling back to the
+/// live window is reserved for the genuine first-launch case where
+/// no saved bounds exist at all.
+fn initial_normal_bounds(window: &Window, saved: Option<MainWindowState>) -> MainWindowState {
+    match saved {
+        Some(s) if s.has_valid_geometry() => MainWindowState {
             maximized: window.is_maximized(),
-            ..r
-        }
-    } else {
-        current_main_window_state(window)
+            ..s
+        },
+        _ => current_main_window_state(window),
     }
 }
 
@@ -307,36 +309,55 @@ fn main() {
     );
     agg_gui::set_device_scale(window.scale_factor());
 
-    // Now that the window exists we have access to the monitor
-    // list. If the saved position doesn't overlap any attached
-    // monitor by at least a draggable patch of title bar, snap
-    // back to the OS-chosen default so the window never opens
-    // invisible. We do this *before* the window becomes visible
-    // so the user sees the corrected placement on the very first
-    // frame.
-    let restored_main = saved_main
-        .filter(|w| {
-            w.has_valid_geometry()
-                && w.fits_on_monitors(window.available_monitors().map(monitor_to_rect))
-        });
-    if restored_main.is_none() && saved_main.is_some_and(|w| w.has_valid_geometry()) {
-        // Saved position is off-screen now — drop it and let the
-        // OS centre the window at the size we restored. The
-        // documented default `LogicalSize(1280, 720)` was already
-        // applied up top, so just clear the user-supplied
-        // position by recentring on the primary monitor.
-        if let Some(primary) = window.available_monitors().next() {
-            let mon = primary.position();
-            let size = primary.size();
-            let centred_x = mon.x + (size.width as i32 - window.inner_size().width as i32) / 2;
-            let centred_y = mon.y + (size.height as i32 - window.inner_size().height as i32) / 2;
-            window.set_outer_position(PhysicalPosition::new(centred_x, centred_y));
+    // Decide what the saved bounds map to now that we know the live
+    // monitor layout. Three outcomes — see `WindowPlacement`:
+    //   - Default: no usable save → keep the OS-chosen defaults.
+    //   - Restore: use saved position + size + maximized as-is.
+    //   - Recenter: keep saved size + maximized but pick a new
+    //     centred position on the primary monitor (saved one is
+    //     off-screen now).
+    //
+    // The maximized flag is applied unconditionally below so a user
+    // who closed the app while maximized comes back to a maximized
+    // window even when the un-maximized position needed adjustment.
+    let placement = saved_main
+        .unwrap_or_default()
+        .placement(window.available_monitors().map(monitor_to_rect));
+    let placement_record = match placement {
+        WindowPlacement::Restore { bounds } => Some(bounds),
+        WindowPlacement::Recenter { width, height, maximized } => {
+            // Recentre on the primary monitor. The window already
+            // has the saved size from `with_inner_size` above; only
+            // the position needs fixing here.
+            let recentred = window
+                .available_monitors()
+                .next()
+                .map(|primary| {
+                    let mon = primary.position();
+                    let size = primary.size();
+                    let cx = mon.x + (size.width as i32 - width as i32) / 2;
+                    let cy = mon.y + (size.height as i32 - height as i32) / 2;
+                    window.set_outer_position(PhysicalPosition::new(cx, cy));
+                    (cx, cy)
+                })
+                .unwrap_or((0, 0));
+            Some(MainWindowState {
+                x: recentred.0,
+                y: recentred.1,
+                width,
+                height,
+                maximized,
+            })
         }
-    }
-    if let Some(w) = restored_main {
-        if w.maximized {
-            window.set_maximized(true);
-        }
+        WindowPlacement::Default { .. } => None,
+    };
+    if matches!(
+        placement,
+        WindowPlacement::Restore { bounds: MainWindowState { maximized: true, .. } }
+            | WindowPlacement::Recenter { maximized: true, .. }
+            | WindowPlacement::Default { maximized: true }
+    ) {
+        window.set_maximized(true);
     }
     window.set_visible(true);
 
@@ -344,9 +365,14 @@ fn main() {
     // and size — pulled from `WindowEvent::Moved/Resized` so a
     // user that maximizes mid-session still restores to the right
     // bounds on next launch. Maximized flag is sampled directly
-    // off the window on save.
+    // off the window on save. We seed it from the placement record
+    // (post-recenter) rather than `current_main_window_state`,
+    // because `set_maximized(true)` above turns the live window's
+    // `outer_position()` / `inner_size()` into the maximized
+    // monitor-fill geometry — exactly the wrong thing for a
+    // "remember last un-maximized bounds" cache.
     let normal_bounds: std::rc::Rc<std::cell::Cell<MainWindowState>> = std::rc::Rc::new(
-        std::cell::Cell::new(initial_normal_bounds(&window, restored_main)),
+        std::cell::Cell::new(initial_normal_bounds(&window, placement_record)),
     );
     let normal_bounds_for_save = normal_bounds.clone();
     let normal_bounds_for_events = normal_bounds.clone();
