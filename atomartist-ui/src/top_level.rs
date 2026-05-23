@@ -43,6 +43,12 @@ pub fn build_app(
     dialogs: Arc<dyn FileDialogProvider>,
     saved_ui: Option<UiSettings>,
 ) -> (Box<dyn Widget>, DebugWindowHandles) {
+    // Window / node snap-layout default — ON for AtomArtist so the
+    // PowerPoint-style alignment + spacing guides engage as soon as
+    // the user drags a node.  Users can wire a menu toggle later;
+    // the framework's `agg_gui::snap::set_enabled` flips the thread-
+    // local at any time.
+    agg_gui::snap::set_enabled(true);
     let saved_windows = saved_ui.map(|s| s.debug_windows).unwrap_or_default();
     let debug = DebugWindowHandles::new(saved_windows);
 

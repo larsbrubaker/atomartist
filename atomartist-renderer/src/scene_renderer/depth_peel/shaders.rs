@@ -69,8 +69,8 @@ const PEEL_BIAS: f32 = 1e-3;
 
 @fragment
 fn fs(in: VOut) -> @location(0) vec4<f32> {
-    let screen_uv = in.clip.xy / u.resolution.xy;
-    let opaque_z = textureSample(opaque_depth, depth_sampler, screen_uv);
+    let pixel = vec2<i32>(clamp(in.clip.xy, vec2<f32>(0.0), u.resolution.xy - vec2<f32>(1.0)));
+    let opaque_z = textureLoad(opaque_depth, pixel, 0);
     if (opaque_z < in.clip.z - PEEL_BIAS) {
         discard;
     }
@@ -136,13 +136,13 @@ fn shade(world_normal: vec3<f32>) -> vec4<f32> {
 
 @fragment
 fn fs(in: VOut) -> PeelOut {
-    let screen_uv = in.clip.xy / u.resolution.xy;
-    let opaque_z = textureSample(opaque_depth, depth_sampler, screen_uv);
+    let pixel = vec2<i32>(clamp(in.clip.xy, vec2<f32>(0.0), u.resolution.xy - vec2<f32>(1.0)));
+    let opaque_z = textureLoad(opaque_depth, pixel, 0);
     if (opaque_z < in.clip.z - PEEL_BIAS) {
         discard;
     }
 
-    let previous = textureSampleLevel(src_dual_depth, depth_sampler, screen_uv, 0.0).rg;
+    let previous = textureLoad(src_dual_depth, pixel, 0).rg;
     let front_z = -previous.x;
     let back_z = previous.y;
     let cur_z = in.clip.z;

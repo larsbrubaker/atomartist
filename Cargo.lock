@@ -37,7 +37,7 @@ dependencies = [
  "png",
  "pulldown-cmark",
  "rustybuzz",
- "tess2-rust 1.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tess2-rust 1.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "ttf-parser",
  "usvg",
  "wasm-bindgen",
@@ -345,7 +345,7 @@ dependencies = [
  "quick-xml",
  "serde",
  "serde_json",
- "tess2-rust 1.1.0",
+ "tess2-rust 1.1.1",
  "zip",
 ]
 
@@ -3069,13 +3069,13 @@ dependencies = [
 
 [[package]]
 name = "tess2-rust"
-version = "1.1.0"
+version = "1.1.1"
 
 [[package]]
 name = "tess2-rust"
-version = "1.1.0"
+version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6bfd7cd37bd4442708d20a99d527cc9ab8a1cec71793c0a59c903bbb3a5dbae5"
+checksum = "0663b06561721b515c6233e75dfedcb4ea03481f4606ac0ed7d58be4707464a3"
 
 [[package]]
 name = "thiserror"
