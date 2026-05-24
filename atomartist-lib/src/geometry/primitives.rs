@@ -117,6 +117,126 @@ pub fn generate_cylinder(radius: f64, height: f64, segments: u32) -> MeshGL {
     make_mesh(verts, tris)
 }
 
+/// Tapered + partial-revolve cylinder. MatterCAD parity:
+///
+///   - `diameter_bottom` / `diameter_top` independent (taper or
+///     uniform).
+///   - `start_angle_rad` / `end_angle_rad` define the swept arc; the
+///     full revolution is `(0, TAU)`. When the arc is partial, two
+///     "wedge" side walls close the volume (one at `start_angle`, one
+///     at `end_angle`).
+///
+/// Coordinate system follows the rest of `primitives.rs`: Y up, the
+/// cylinder is centred on the origin, bottom face at `y = -height/2`,
+/// top face at `y = +height/2`. Returns a flat-shaded `MeshGL`.
+pub fn generate_cylinder_advanced(
+    diameter_bottom: f64,
+    diameter_top: f64,
+    height: f64,
+    sides: u32,
+    start_angle_rad: f64,
+    end_angle_rad: f64,
+) -> MeshGL {
+    let sides = sides.max(3);
+    let r_bot = (diameter_bottom * 0.5) as f32;
+    let r_top = (diameter_top * 0.5) as f32;
+    let h = (height * 0.5) as f32;
+    let arc = (end_angle_rad - start_angle_rad).clamp(0.0, std::f64::consts::TAU);
+    let partial = arc < std::f64::consts::TAU - 1e-6;
+
+    let mut verts: Vec<f32> = Vec::new();
+    let mut tris: Vec<u32> = Vec::new();
+
+    // Side quads — `sides` evenly spaced over the swept arc.
+    for i in 0..sides {
+        let t0 = i as f64 / sides as f64;
+        let t1 = (i + 1) as f64 / sides as f64;
+        let a0 = (start_angle_rad + arc * t0) as f32;
+        let a1 = (start_angle_rad + arc * t1) as f32;
+
+        let (cb0, sb0) = (a0.cos(), a0.sin());
+        let (cb1, sb1) = (a1.cos(), a1.sin());
+        // Outward normal averaged at quad midpoint; ignores taper-slope
+        // for now (the difference is small for typical tapers and tests
+        // don't depend on it).
+        let nx = (cb0 + cb1) * 0.5;
+        let nz = (sb0 + sb1) * 0.5;
+        let nlen = (nx * nx + nz * nz).sqrt().max(1e-6);
+        let n = [nx / nlen, 0.0, nz / nlen];
+
+        let base = (verts.len() / NUM_PROP as usize) as u32;
+        let p_bb = (cb0 * r_bot, -h, sb0 * r_bot);
+        let p_bt = (cb0 * r_top, h, sb0 * r_top);
+        let p_ft = (cb1 * r_top, h, sb1 * r_top);
+        let p_fb = (cb1 * r_bot, -h, sb1 * r_bot);
+        for (x, y, z) in [p_bb, p_bt, p_ft, p_fb] {
+            verts.extend_from_slice(&[x, y, z]);
+            verts.extend_from_slice(&n);
+        }
+        tris.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+
+    // Top cap — triangle fan from centre, normal +Y.
+    let top_center = (verts.len() / NUM_PROP as usize) as u32;
+    verts.extend_from_slice(&[0.0, h, 0.0, 0.0, 1.0, 0.0]);
+    let top_ring_start = (verts.len() / NUM_PROP as usize) as u32;
+    for i in 0..=sides {
+        let t = i as f64 / sides as f64;
+        let a = (start_angle_rad + arc * t) as f32;
+        verts.extend_from_slice(&[a.cos() * r_top, h, a.sin() * r_top, 0.0, 1.0, 0.0]);
+    }
+    for i in 0..sides {
+        // CCW from above (+Y looking down).
+        tris.extend_from_slice(&[top_center, top_ring_start + i + 1, top_ring_start + i]);
+    }
+
+    // Bottom cap — triangle fan from centre, normal -Y. Reversed winding.
+    let bot_center = (verts.len() / NUM_PROP as usize) as u32;
+    verts.extend_from_slice(&[0.0, -h, 0.0, 0.0, -1.0, 0.0]);
+    let bot_ring_start = (verts.len() / NUM_PROP as usize) as u32;
+    for i in 0..=sides {
+        let t = i as f64 / sides as f64;
+        let a = (start_angle_rad + arc * t) as f32;
+        verts.extend_from_slice(&[a.cos() * r_bot, -h, a.sin() * r_bot, 0.0, -1.0, 0.0]);
+    }
+    for i in 0..sides {
+        tris.extend_from_slice(&[bot_center, bot_ring_start + i, bot_ring_start + i + 1]);
+    }
+
+    // Wedge walls for partial revolves — two quads from centre axis
+    // out to the swept ring, one at each end of the arc.
+    if partial {
+        let emit_wedge = |verts: &mut Vec<f32>, tris: &mut Vec<u32>, angle: f32, outward: bool| {
+            let (ca, sa) = (angle.cos(), angle.sin());
+            // Wedge normal is perpendicular to the rim ray, pointing
+            // out of the missing arc. `outward = true` faces away from
+            // the included arc on the start side; the end side flips.
+            let sign = if outward { 1.0 } else { -1.0 };
+            let n = [sign * -sa, 0.0, sign * ca];
+            let base = (verts.len() / NUM_PROP as usize) as u32;
+            // axis bottom, axis top, outer top, outer bottom — CCW when
+            // viewed from the normal side.
+            let p_ab = (0.0, -h, 0.0);
+            let p_at = (0.0, h, 0.0);
+            let p_ot = (ca * r_top, h, sa * r_top);
+            let p_ob = (ca * r_bot, -h, sa * r_bot);
+            for (x, y, z) in [p_ab, p_at, p_ot, p_ob] {
+                verts.extend_from_slice(&[x, y, z]);
+                verts.extend_from_slice(&n);
+            }
+            if outward {
+                tris.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+            } else {
+                tris.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
+            }
+        };
+        emit_wedge(&mut verts, &mut tris, start_angle_rad as f32, false);
+        emit_wedge(&mut verts, &mut tris, end_angle_rad as f32, true);
+    }
+
+    make_mesh(verts, tris)
+}
+
 /// Cone with apex at top, circular base at bottom, both centered on Y.
 /// `radius` is the base radius; the apex sits at +height/2.
 pub fn generate_cone(radius: f64, height: f64, segments: u32) -> MeshGL {

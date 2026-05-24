@@ -197,6 +197,26 @@ impl NodeDef for BareNode {
     }
 }
 
+/// Source with three differently-typed outputs. Mirrors the JS test
+/// fixture `test/multi-output` so the Output-node ports cover
+/// "connect each of three source outputs into separate slots, then
+/// disconnect one and verify the right slot collapses."
+pub struct MultiOutputSource;
+impl NodeDef for MultiOutputSource {
+    fn type_id(&self) -> &'static str { "test::MultiOutputSource" }
+    fn category(&self) -> &'static str { "Test" }
+    fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
+        InstanceTemplate::builder(alloc)
+            .output("Geometry", SocketType::Geometry3d)
+            .output("Paths", SocketType::Path2d)
+            .output("Color", SocketType::Color)
+            .build()
+    }
+    fn evaluate(&self, _ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
+        Ok(NodeOutputs::default())
+    }
+}
+
 /// Build a registry pre-populated with every test fixture node.
 pub fn registry() -> NodeRegistry {
     let mut r = NodeRegistry::new();
@@ -208,6 +228,11 @@ pub fn registry() -> NodeRegistry {
     r.register(BlockingConsumer);
     r.register(CountingConsumer);
     r.register(BareNode);
+    r.register(MultiOutputSource);
+    // Register all built-in atomartist node types so tests that
+    // exercise dynamic-input nodes (Output, Combine, …) can spawn
+    // them by `type_id`.
+    atomartist_lib::nodes::register_all(&mut r);
     r
 }
 

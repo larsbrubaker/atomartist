@@ -15,6 +15,6 @@ pub use mesh3d::{
     num_tris, num_verts, NUM_PROP, STRIDE,
 };
 pub use primitives::{
-    generate_box, generate_cone, generate_cylinder, generate_pyramid, generate_sphere,
-    generate_torus, generate_wedge,
+    generate_box, generate_cone, generate_cylinder, generate_cylinder_advanced,
+    generate_pyramid, generate_sphere, generate_torus, generate_wedge,
 };
