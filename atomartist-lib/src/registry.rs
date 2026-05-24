@@ -37,7 +37,7 @@ pub use geometry_props_mod::{geometry_props, wrap_mesh};
 
 #[path = "registry/editor.rs"]
 mod editor;
-pub use editor::{EditorKind, NodeFieldAttrs, NumberAttrs, PropDef};
+pub use editor::{EditorKind, NodeFieldAttrs, NumberAttrs, PropDef, VisibleWhen};
 
 
 /// Initial socket + property layout for a new node instance — what

@@ -33,7 +33,8 @@ impl NodeDef for FitToBoundsNode {
             PropDef::new("depth",  PortValue::Number(20.0)).with_range(0.001, 10_000.0),
             PropDef::new("uniform", PortValue::Bool(true)),
         ];
-        p.extend(geometry_props());
+        // Prepend color + matrix so they render as the first two rows.
+        let mut p = { let mut g = geometry_props(); g.extend(p); g };
         p
     }
 

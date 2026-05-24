@@ -67,7 +67,8 @@ impl NodeDef for TransformNode {
             PropDef::new("sy", PortValue::Number(1.0)).with_range(0.001, 1000.0),
             PropDef::new("sz", PortValue::Number(1.0)).with_range(0.001, 1000.0),
         ];
-        p.extend(geometry_props());
+        // Prepend color + matrix so they render as the first two rows.
+        let mut p = { let mut g = geometry_props(); g.extend(p); g };
         p
     }
 

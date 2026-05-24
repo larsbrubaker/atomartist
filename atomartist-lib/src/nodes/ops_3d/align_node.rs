@@ -38,7 +38,8 @@ impl NodeDef for AlignNode {
             PropDef::new("align_y", PortValue::Number(-1.0)).with_range(-1.0, 1.0),
             PropDef::new("align_z", PortValue::Number(0.0)).with_range(-1.0, 1.0),
         ];
-        p.extend(geometry_props());
+        // Prepend color + matrix so they render as the first two rows.
+        let mut p = { let mut g = geometry_props(); g.extend(p); g };
         p
     }
 

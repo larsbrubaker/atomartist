@@ -77,7 +77,8 @@ impl NodeDef for MeshNode {
         // every other geometry-producing node so users can transform /
         // tint the embedded mesh from the inspector and the
         // (eventually) gizmos.
-        p.extend(geometry_props());
+        // Prepend color + matrix so they render as the first two rows.
+        let mut p = { let mut g = geometry_props(); g.extend(p); g };
         p
     }
 

@@ -19,7 +19,7 @@
 
 use std::sync::Arc;
 
-pub use agg_gui::widgets::{EditorKind, NodeFieldAttrs, NumberAttrs};
+pub use agg_gui::widgets::{EditorKind, NodeFieldAttrs, NumberAttrs, VisibleWhen};
 
 use crate::graph::node::PortValue;
 
@@ -56,12 +56,11 @@ pub struct PropDef {
     /// Free-text description shown in tooltips. MatterCAD's
     /// `[Description]`.
     pub description: Option<Arc<str>>,
-    /// Whether this property belongs to the "Advanced" section — only
-    /// shown when the node's `Advanced` toggle is on.
-    pub advanced: bool,
-    /// Hidden from the property panel entirely. MatterCAD's
-    /// `[HideFromEditor]`.
-    pub hidden: bool,
+    /// Visibility gate against the node's "advanced" toggle. Matches
+    /// the [`NodeFieldAttrs::visible_when`] gate; the UI filter reads
+    /// this combined with the live `advanced` bool to decide whether
+    /// to mount the row.
+    pub visible_when: VisibleWhen,
 }
 
 impl PropDef {
@@ -75,8 +74,7 @@ impl PropDef {
             editor: EditorKind::default(),
             bound_input: None,
             description: None,
-            advanced: false,
-            hidden: false,
+            visible_when: VisibleWhen::Always,
         }
     }
 
@@ -128,15 +126,28 @@ impl PropDef {
         self
     }
 
-    /// Mark this property as belonging to the Advanced section.
-    pub fn advanced(mut self) -> Self {
-        self.advanced = true;
+    /// Set the conditional visibility gate.
+    pub fn visible_when(mut self, when: VisibleWhen) -> Self {
+        self.visible_when = when;
         self
     }
 
-    /// Hide from the property panel.
+    /// Shorthand for `visible_when(VisibleWhen::AdvancedOn)`.
+    pub fn advanced(mut self) -> Self {
+        self.visible_when = VisibleWhen::AdvancedOn;
+        self
+    }
+
+    /// Shorthand for `visible_when(VisibleWhen::AdvancedOff)` —
+    /// easy-mode-only rows like the cylinder's hint message.
+    pub fn easy_only(mut self) -> Self {
+        self.visible_when = VisibleWhen::AdvancedOff;
+        self
+    }
+
+    /// Hide from the property panel entirely.
     pub fn hidden(mut self) -> Self {
-        self.hidden = true;
+        self.visible_when = VisibleWhen::Never;
         self
     }
 
@@ -165,12 +176,7 @@ impl PropDef {
         if let Some(s) = &attrs.bound_input {
             p = p.bind_input(s.clone());
         }
-        if attrs.advanced {
-            p = p.advanced();
-        }
-        if attrs.hidden {
-            p = p.hidden();
-        }
+        p = p.visible_when(attrs.visible_when);
         p
     }
 }

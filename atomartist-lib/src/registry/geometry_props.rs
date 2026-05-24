@@ -19,23 +19,25 @@ use super::{EditorKind, EvalCtx, PropDef};
 /// carries a transform and a colour" model so handles and gizmos can
 /// drive them without per-node plumbing.
 ///
-/// Fold these into a node's `properties()` return value:
+/// Convention is to **prepend** these to a node's `properties()`
+/// return value so `Color` is the first row and `Matrix` the second —
+/// matching the MatterCAD-inspired property panel ordering:
 ///
 /// ```ignore
 /// fn properties(&self) -> Vec<PropDef> {
-///     let mut props = vec![PropDef::new("size", PortValue::Number(10.0))];
-///     props.extend(geometry_props());
+///     let mut props = geometry_props();
+///     props.push(PropDef::new("size", PortValue::Number(10.0)));
 ///     props
 /// }
 /// ```
 pub fn geometry_props() -> Vec<PropDef> {
     vec![
-        PropDef::new("matrix", PortValue::Matrix4x4(identity_matrix()))
-            .with_editor(EditorKind::Matrix)
-            .with_label("Transform"),
         PropDef::new("color", PortValue::Color(DEFAULT_GEOMETRY_COLOR))
             .with_editor(EditorKind::ColorPicker)
             .with_label("Color"),
+        PropDef::new("matrix", PortValue::Matrix4x4(identity_matrix()))
+            .with_editor(EditorKind::Matrix)
+            .with_label("Matrix"),
     ]
 }
 

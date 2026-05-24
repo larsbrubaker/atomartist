@@ -27,7 +27,7 @@ use agg_gui_node_editor as ne;
 use atomartist_lib::graph::graph::{Noodle, GraphError};
 use atomartist_lib::graph::node::{NodeId as DomainNodeId, PortValue};
 use atomartist_lib::graph::socket::SocketUid;
-use atomartist_lib::registry::EditorKind;
+use atomartist_lib::registry::{EditorKind, VisibleWhen};
 use atomartist_lib::SocketType;
 
 use crate::app_state::AppState;
@@ -102,8 +102,15 @@ impl AppStateModel {
             PortValue::StringVal(s) => ne::PropertyValue::Other {
                 display: s.as_str().to_string(),
             },
-            PortValue::Matrix4x4(_) => ne::PropertyValue::Other {
-                display: "Matrix".into(),
+            PortValue::Matrix4x4(m) => ne::PropertyValue::Other {
+                // MatterCAD shows "Identity" when the transform is the
+                // identity matrix; any other transform shows nothing
+                // (the matrix popup carries the detail).
+                display: if *m == atomartist_lib::graph::node::identity_matrix() {
+                    "Identity".into()
+                } else {
+                    "Matrix".into()
+                },
             },
             PortValue::Path2d(_) => ne::PropertyValue::Other {
                 display: "Path2d".into(),
@@ -143,9 +150,22 @@ impl ne::NodeGraphModel for AppStateModel {
                         display_label: s.display_label.as_ref().map(|l| l.to_string()),
                     })
                     .collect();
+                // Live "advanced" toggle value drives `VisibleWhen`
+                // gating. MatterCAD's `IPropertyGridModifier.UpdateControls`
+                // hook is replaced here by a declarative filter.
+                let live_advanced = matches!(
+                    n.properties.get("advanced"),
+                    Some(PortValue::Bool(true))
+                );
                 let properties: Vec<ne::PropertyView> = def
                     .properties()
                     .into_iter()
+                    .filter(|p| match p.visible_when {
+                        VisibleWhen::Always => true,
+                        VisibleWhen::Never => false,
+                        VisibleWhen::AdvancedOn => live_advanced,
+                        VisibleWhen::AdvancedOff => !live_advanced,
+                    })
                     .map(|p| {
                         let current = n
                             .properties

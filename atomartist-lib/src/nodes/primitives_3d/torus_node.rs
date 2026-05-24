@@ -31,7 +31,8 @@ impl NodeDef for TorusNode {
             PropDef::new("segments_major", PortValue::Number(32.0)).with_range(3.0, 256.0),
             PropDef::new("segments_minor", PortValue::Number(16.0)).with_range(3.0, 256.0),
         ];
-        p.extend(geometry_props());
+        // Prepend color + matrix so they render as the first two rows.
+        let mut p = { let mut g = geometry_props(); g.extend(p); g };
         p
     }
 

@@ -41,7 +41,8 @@ impl NodeDef for BooleanNode {
             // Operation: 0 = Union, 1 = Difference, 2 = Intersection.
             PropDef::new("operation", PortValue::Number(0.0)).with_range(0.0, 2.0),
         ];
-        p.extend(geometry_props());
+        // Prepend color + matrix so they render as the first two rows.
+        let mut p = { let mut g = geometry_props(); g.extend(p); g };
         p
     }
 

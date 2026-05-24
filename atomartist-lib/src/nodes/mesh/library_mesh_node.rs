@@ -40,7 +40,8 @@ impl NodeDef for LibraryMeshNode {
         let mut p = vec![
             PropDef::new("path", PortValue::StringVal(Arc::new(String::new()))),
         ];
-        p.extend(geometry_props());
+        // Prepend color + matrix so they render as the first two rows.
+        let mut p = { let mut g = geometry_props(); g.extend(p); g };
         p
     }
 

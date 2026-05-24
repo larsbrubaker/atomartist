@@ -155,11 +155,12 @@ fn props_layout() -> Vec<(&'static str, PortValue, NodeFieldAttrs)> {
             )),
             // Read-only string with no label — MatterCAD's
             // `[ReadOnly][DisplayName("")]` combo on `EasyModeMessage`.
-            // Hidden when `advanced == true`; gating is done by the UI
-            // layer based on the live `advanced` property value.
+            // Visible only when `advanced == false`; UI layer hides
+            // the row once the toggle flips on.
             NodeFieldAttrs::new()
                 .with_label("")
-                .with_editor(EditorKind::StringReadOnly),
+                .with_editor(EditorKind::StringReadOnly)
+                .easy_only(),
         ),
         (
             "diameter_top",
@@ -221,7 +222,8 @@ impl NodeDef for CylinderNode {
             .collect();
         // Shared `matrix` + `color` properties tacked onto every
         // 3D-geometry-producing node, same as Box / Sphere / Extrude.
-        p.extend(geometry_props());
+        // Prepend color + matrix so they render as the first two rows.
+        let mut p = { let mut g = geometry_props(); g.extend(p); g };
         p
     }
 
@@ -312,19 +314,39 @@ mod tests {
     /// minted `PropDef` so the UI layer can hide them when the
     /// `advanced` toggle is off. Easy-mode fields must not.
     #[test]
-    fn advanced_flag_propagates_to_propdef() {
+    fn visibility_gating_propagates_to_propdef() {
+        use crate::registry::VisibleWhen;
         let by_name: std::collections::HashMap<String, PropDef> = CylinderNode
             .properties()
             .into_iter()
             .map(|p| (p.name.to_string(), p))
             .collect();
-        assert!(!by_name["diameter"].advanced);
-        assert!(!by_name["height"].advanced);
-        assert!(!by_name["sides"].advanced);
-        assert!(!by_name["advanced"].advanced);
-        assert!(by_name["diameter_top"].advanced);
-        assert!(by_name["starting_angle"].advanced);
-        assert!(by_name["ending_angle"].advanced);
+        assert_eq!(by_name["diameter"].visible_when, VisibleWhen::Always);
+        assert_eq!(by_name["height"].visible_when, VisibleWhen::Always);
+        assert_eq!(by_name["sides"].visible_when, VisibleWhen::Always);
+        assert_eq!(by_name["advanced"].visible_when, VisibleWhen::Always);
+        assert_eq!(by_name["easy_mode_message"].visible_when, VisibleWhen::AdvancedOff);
+        assert_eq!(by_name["diameter_top"].visible_when, VisibleWhen::AdvancedOn);
+        assert_eq!(by_name["starting_angle"].visible_when, VisibleWhen::AdvancedOn);
+        assert_eq!(by_name["ending_angle"].visible_when, VisibleWhen::AdvancedOn);
+        // Color + matrix come from `geometry_props()` — Always.
+        assert_eq!(by_name["color"].visible_when, VisibleWhen::Always);
+        assert_eq!(by_name["matrix"].visible_when, VisibleWhen::Always);
+    }
+
+    /// Color must render first, matrix second — MatterCAD-style panel
+    /// ordering set by `geometry_props()` being prepended to the
+    /// per-node property list.
+    #[test]
+    fn color_then_matrix_lead_the_property_list() {
+        let names: Vec<String> = CylinderNode
+            .properties()
+            .into_iter()
+            .map(|p| p.name.to_string())
+            .collect();
+        assert_eq!(names[0], "color");
+        assert_eq!(names[1], "matrix");
+        assert!(names.contains(&"diameter".to_string()));
     }
 
     /// Editor hints survive the layout → `PropDef` translation. The
