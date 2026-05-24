@@ -177,20 +177,44 @@ impl NodeDef for OutputNode {
         }
 
         // 2) Merge every connected Geometry3d input into __display__ so
-        //    the viewport renders the union.
+        //    the viewport renders the union. Each upstream geometry
+        //    carries its own matrix + colour; the merge baked the
+        //    matrices via `apply_transform` so the merged result is
+        //    world-space and uses the first input's colour as the
+        //    representative tint.
         let mut meshes = Vec::new();
+        let mut first_geom: Option<Arc<crate::geometry::Geometry3d>> = None;
         for slot in &ctx.instance.inputs {
             if slot.name.as_ref().is_empty() {
                 continue;
             }
-            if let PortValue::Geometry3d(m) = ctx.input(slot.uid) {
-                if num_verts(m) > 0 && num_tris(m) > 0 {
-                    meshes.push(m.clone());
+            if let PortValue::Geometry3d(g) = ctx.input(slot.uid) {
+                if num_verts(&g.mesh) > 0 && num_tris(&g.mesh) > 0 {
+                    if first_geom.is_none() {
+                        first_geom = Some(g.clone());
+                    }
+                    if g.matrix == crate::graph::node::identity_matrix() {
+                        meshes.push(g.mesh.clone());
+                    } else {
+                        let baked = crate::geometry::apply_transform(&g.mesh, &g.matrix);
+                        meshes.push(Arc::new(baked));
+                    }
                 }
             }
         }
         let merged = merge_meshes(&meshes);
-        out.set(DISPLAY_OUTPUT_NAME, PortValue::Geometry3d(Arc::new(merged)));
+        let merged_geom = match first_geom {
+            Some(g) => crate::geometry::Geometry3d {
+                mesh: Arc::new(merged),
+                matrix: crate::graph::node::identity_matrix(),
+                color: g.color,
+            },
+            None => crate::geometry::Geometry3d::from_mesh(Arc::new(merged)),
+        };
+        out.set(
+            DISPLAY_OUTPUT_NAME,
+            PortValue::Geometry3d(Arc::new(merged_geom)),
+        );
 
         Ok(out)
     }
@@ -370,10 +394,10 @@ mod tests {
         let n = g.get(out).unwrap();
         let display_uid = n.output_by_name(DISPLAY_OUTPUT_NAME).unwrap().uid;
         match n.cached_outputs.get(&display_uid) {
-            Some(PortValue::Geometry3d(m)) => {
+            Some(PortValue::Geometry3d(g)) => {
                 // Two default boxes: 24 verts each, 12 tris each.
-                assert_eq!(num_verts(m), 48);
-                assert_eq!(num_tris(m), 24);
+                assert_eq!(num_verts(&g.mesh), 48);
+                assert_eq!(num_tris(&g.mesh), 24);
             }
             other => panic!("expected merged Geometry3d, got {:?}", other),
         }

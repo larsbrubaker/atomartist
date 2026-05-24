@@ -13,7 +13,8 @@ use crate::geometry::{apply_transform, bounds};
 use crate::graph::node::PortValue;
 use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeRegistry, PropDef,
+    geometry_props, wrap_mesh, EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs,
+    NodeRegistry, PropDef,
 };
 use crate::socket_types::SocketType;
 
@@ -32,22 +33,24 @@ impl NodeDef for AlignNode {
     }
 
     fn properties(&self) -> Vec<PropDef> {
-        vec![
+        let mut p = vec![
             PropDef::new("align_x", PortValue::Number(0.0)).with_range(-1.0, 1.0),
             PropDef::new("align_y", PortValue::Number(-1.0)).with_range(-1.0, 1.0),
             PropDef::new("align_z", PortValue::Number(0.0)).with_range(-1.0, 1.0),
-        ]
+        ];
+        p.extend(geometry_props());
+        p
     }
 
     fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
         let input = match ctx.input_named("input") {
-            PortValue::Geometry3d(m) => m.clone(),
+            PortValue::Geometry3d(g) => g.clone(),
             PortValue::None => return Ok(NodeOutputs::default()),
             other => return Err(NodeError::msg(format!(
                 "Align: expected Geometry3d, got {:?}", other.socket_type()
             ))),
         };
-        let (mn, mx) = match bounds(&input) {
+        let (mn, mx) = match bounds(&input.mesh) {
             Some(b) => b,
             None => {
                 let mut o = NodeOutputs::default();
@@ -64,9 +67,9 @@ impl NodeDef for AlignNode {
         let anchor_z = (mn[2] + mx[2]) * 0.5 + az * (mx[2] - mn[2]) * 0.5;
 
         let translate = column_major_translate(-anchor_x, -anchor_y, -anchor_z);
-        let result = apply_transform(&input, &translate);
+        let result = apply_transform(&input.mesh, &translate);
         let mut out = NodeOutputs::default();
-        out.set("out", PortValue::Geometry3d(Arc::new(result)));
+        out.set("out", PortValue::Geometry3d(Arc::new(wrap_mesh(ctx, result))));
         Ok(out)
     }
 }

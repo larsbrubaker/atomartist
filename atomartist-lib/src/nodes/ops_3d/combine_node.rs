@@ -22,8 +22,8 @@ use crate::geometry::{merge_meshes, num_tris, num_verts};
 use crate::graph::node::PortValue;
 use crate::graph::socket::{Socket, SocketUidAlloc};
 use crate::registry::{
-    ConnectCtx, DisconnectCtx, EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs,
-    NodeRegistry,
+    geometry_props, wrap_mesh, ConnectCtx, DisconnectCtx, EvalCtx, InstanceTemplate, NodeDef,
+    NodeError, NodeOutputs, NodeRegistry, PropDef,
 };
 use crate::socket_types::SocketType;
 
@@ -111,6 +111,10 @@ impl NodeDef for CombineNode {
         ensure_trailing_empty_input(ctx.graph, ctx.this_node);
     }
 
+    fn properties(&self) -> Vec<PropDef> {
+        geometry_props()
+    }
+
     fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
         // Iterate the instance's input slots, skipping the trailing
         // empty placeholder. Concatenate every non-empty Geometry3d
@@ -120,15 +124,15 @@ impl NodeDef for CombineNode {
             if slot.name.as_ref().is_empty() {
                 continue;
             }
-            if let PortValue::Geometry3d(m) = ctx.input(slot.uid) {
-                if num_verts(m) > 0 && num_tris(m) > 0 {
-                    parts.push(m.clone());
+            if let PortValue::Geometry3d(g) = ctx.input(slot.uid) {
+                if num_verts(&g.mesh) > 0 && num_tris(&g.mesh) > 0 {
+                    parts.push(g.mesh.clone());
                 }
             }
         }
         let merged = merge_meshes(&parts);
         let mut out = NodeOutputs::default();
-        out.set("out", PortValue::Geometry3d(Arc::new(merged)));
+        out.set("out", PortValue::Geometry3d(Arc::new(wrap_mesh(ctx, merged))));
         Ok(out)
     }
 }
@@ -280,9 +284,9 @@ mod tests {
         evaluate_all(&mut g, &reg).unwrap();
         let out_uid = g.get(c).unwrap().output_by_name("out").unwrap().uid;
         match g.get(c).unwrap().cached_outputs.get(&out_uid) {
-            Some(PortValue::Geometry3d(m)) => {
-                assert_eq!(num_verts(m), 48, "two unit boxes → 24+24 vertices");
-                assert_eq!(num_tris(m), 24, "two unit boxes → 12+12 triangles");
+            Some(PortValue::Geometry3d(geo)) => {
+                assert_eq!(num_verts(&geo.mesh), 48, "two unit boxes → 24+24 vertices");
+                assert_eq!(num_tris(&geo.mesh), 24, "two unit boxes → 12+12 triangles");
             }
             other => panic!("expected merged Geometry3d, got {:?}", other),
         }
@@ -298,9 +302,9 @@ mod tests {
         evaluate_all(&mut g, &reg).unwrap();
         let out_uid = g.get(c).unwrap().output_by_name("out").unwrap().uid;
         match g.get(c).unwrap().cached_outputs.get(&out_uid) {
-            Some(PortValue::Geometry3d(m)) => {
-                assert_eq!(num_verts(m), 0);
-                assert_eq!(num_tris(m), 0);
+            Some(PortValue::Geometry3d(geo)) => {
+                assert_eq!(num_verts(&geo.mesh), 0);
+                assert_eq!(num_tris(&geo.mesh), 0);
             }
             other => panic!("expected empty Geometry3d, got {:?}", other),
         }

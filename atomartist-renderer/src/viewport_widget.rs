@@ -711,17 +711,15 @@ impl Widget for Viewport3dWidget {
                 s.gizmo_lines
                     .push(GizmoLineSet::bounds_box(center, size, None));
             }
-            // Theme-driven outline colour: NodeDesigner uses bright
-            // cyan-blue against dark backgrounds and a deeper blue
-            // against light backgrounds (see
-            // `selection-outline.js` outlineColor / outlineColorLight).
-            s.outline_color = if dark {
-                // 0x88ccff
-                [0.533, 0.800, 1.000, 1.0]
-            } else {
-                // 0x4477cc
-                [0.267, 0.467, 0.800, 1.0]
-            };
+            // Outline colour tracks the user-selected accent from the
+            // View → Color menu so the selection highlight matches the
+            // rest of the themed UI (buttons, dropdowns, gizmos).
+            s.outline_color = [
+                visuals.accent.r,
+                visuals.accent.g,
+                visuals.accent.b,
+                1.0,
+            ];
             // Sync render style from app state so the picker beneath the
             // tumble cube takes effect on the next frame without any
             // extra plumbing.

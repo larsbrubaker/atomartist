@@ -35,7 +35,6 @@ use bevy_reflect::Reflect;
 use manifold_rust::types::MeshGL;
 use tess2_rust::{ElementType, Tessellator, WindingRule};
 
-use crate::geometry::apply_transform;
 use crate::geometry::mesh3d::{make_mesh, NUM_PROP, STRIDE};
 use crate::geometry::path2d::{is_ccw, CrossSection, Vec2D};
 use crate::graph::node::{identity_matrix, PortValue};
@@ -250,13 +249,23 @@ impl NodeDef for ExtrudeNode {
         };
         let resolved = ExtrudeProps::resolve(ctx);
         let height = resolved.height.max(1e-6);
-        let mut mesh = extrude_cross_section(&cross_section, height as f32)
+        let mesh = extrude_cross_section(&cross_section, height as f32)
             .map_err(|e| NodeError::msg(e))?;
-        if resolved.matrix != identity_matrix() {
-            mesh = apply_transform(&mesh, &resolved.matrix);
-        }
+        // Don't bake `resolved.matrix` into the mesh — carry it forward
+        // on `Geometry3d.matrix` and let the renderer apply it at draw
+        // time. Baking now would result in a double-application when
+        // the gizmo / property editor also drives the same matrix.
+        // We pass `resolved.matrix` + `resolved.color` directly rather
+        // than going through `wrap_mesh` because the extrude node
+        // has its own typed-resolver path that prefers a connected
+        // `Matrix` / `Color` input over the same-named property.
+        let geom = crate::geometry::Geometry3d {
+            mesh: Arc::new(mesh),
+            matrix: resolved.matrix,
+            color: resolved.color,
+        };
         let mut out = NodeOutputs::default();
-        out.set("Geometry", PortValue::Geometry3d(Arc::new(mesh)));
+        out.set("Geometry", PortValue::Geometry3d(Arc::new(geom)));
         Ok(out)
     }
 }
@@ -583,7 +592,13 @@ mod tests {
     }
 
     #[test]
-    fn evaluate_applies_matrix_input_to_output_mesh() {
+    fn evaluate_propagates_matrix_input_to_output_geometry() {
+        // The extrude node no longer bakes its `matrix` property into
+        // the mesh — it carries the matrix forward on
+        // `Geometry3d.matrix` and the renderer applies it at draw
+        // time. So this test now asserts the propagation: vertex
+        // positions stay at their un-transformed Z range, and the
+        // emitted matrix matches the input matrix.
         let cs = CS::square(2.0);
         let translate_z10: [f32; 16] = [
             1.0, 0.0, 0.0, 0.0,
@@ -601,7 +616,9 @@ mod tests {
         let ctx = EvalCtx { instance: &inst, properties: &props, inputs: &inputs };
         let out = ExtrudeNode.evaluate(&ctx).unwrap();
         match out.by_name.get("Geometry").unwrap() {
-            PortValue::Geometry3d(m) => {
+            PortValue::Geometry3d(g) => {
+                assert_eq!(g.matrix, translate_z10);
+                let m = &g.mesh;
                 let stride = m.num_prop as usize;
                 let nv = m.vert_properties.len() / stride;
                 let mut z_min = f32::INFINITY;
@@ -611,8 +628,9 @@ mod tests {
                     if z < z_min { z_min = z; }
                     if z > z_max { z_max = z; }
                 }
-                assert!((z_min - 9.0).abs() < 1e-4, "z_min was {}", z_min);
-                assert!((z_max - 11.0).abs() < 1e-4, "z_max was {}", z_max);
+                // Un-transformed extrude spans Z in [-height/2, +height/2].
+                assert!((z_min + 1.0).abs() < 1e-4, "z_min was {}", z_min);
+                assert!((z_max - 1.0).abs() < 1e-4, "z_max was {}", z_max);
             }
             _ => panic!("expected Geometry3d output"),
         }

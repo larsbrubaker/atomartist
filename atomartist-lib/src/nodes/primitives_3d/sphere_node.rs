@@ -6,7 +6,8 @@ use crate::geometry::generate_sphere;
 use crate::graph::node::PortValue;
 use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeRegistry, PropDef,
+    geometry_props, wrap_mesh, EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs,
+    NodeRegistry, PropDef,
 };
 use crate::socket_types::SocketType;
 
@@ -24,11 +25,13 @@ impl NodeDef for SphereNode {
     }
 
     fn properties(&self) -> Vec<PropDef> {
-        vec![
+        let mut p = vec![
             PropDef::new("radius", PortValue::Number(10.0)).with_range(0.001, 10_000.0),
             PropDef::new("segments_u", PortValue::Number(32.0)).with_range(3.0, 256.0),
             PropDef::new("segments_v", PortValue::Number(16.0)).with_range(2.0, 256.0),
-        ]
+        ];
+        p.extend(geometry_props());
+        p
     }
 
     fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
@@ -37,7 +40,7 @@ impl NodeDef for SphereNode {
         let sv = ctx.properties.number("segments_v", 16.0).round().clamp(2.0, 256.0) as u32;
         let mesh = generate_sphere(r, su, sv);
         let mut out = NodeOutputs::default();
-        out.set("out", PortValue::Geometry3d(Arc::new(mesh)));
+        out.set("out", PortValue::Geometry3d(Arc::new(wrap_mesh(ctx, mesh))));
         Ok(out)
     }
 }

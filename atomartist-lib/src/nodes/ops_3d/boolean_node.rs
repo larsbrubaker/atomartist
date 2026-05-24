@@ -16,7 +16,8 @@ use crate::geometry::mesh3d::{compute_flat_normals, NUM_PROP};
 use crate::graph::node::PortValue;
 use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeRegistry, PropDef,
+    geometry_props, wrap_mesh, EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs,
+    NodeRegistry, PropDef,
 };
 use crate::socket_types::SocketType;
 
@@ -36,22 +37,24 @@ impl NodeDef for BooleanNode {
     }
 
     fn properties(&self) -> Vec<PropDef> {
-        vec![
+        let mut p = vec![
             // Operation: 0 = Union, 1 = Difference, 2 = Intersection.
             PropDef::new("operation", PortValue::Number(0.0)).with_range(0.0, 2.0),
-        ]
+        ];
+        p.extend(geometry_props());
+        p
     }
 
     fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
-        let mesh_a = match ctx.input_named("a") {
-            PortValue::Geometry3d(m) => m.clone(),
+        let geom_a = match ctx.input_named("a") {
+            PortValue::Geometry3d(g) => g.clone(),
             PortValue::None => return Ok(NodeOutputs::default()),
             other => return Err(NodeError::msg(format!(
                 "Boolean: input 'a' must be Geometry3d, got {:?}", other.socket_type()
             ))),
         };
-        let mesh_b = match ctx.input_named("b") {
-            PortValue::Geometry3d(m) => m.clone(),
+        let geom_b = match ctx.input_named("b") {
+            PortValue::Geometry3d(g) => g.clone(),
             PortValue::None => return Ok(NodeOutputs::default()),
             other => return Err(NodeError::msg(format!(
                 "Boolean: input 'b' must be Geometry3d, got {:?}", other.socket_type()
@@ -65,8 +68,8 @@ impl NodeDef for BooleanNode {
             _ => OpType::Add,
         };
 
-        let stripped_a = strip_normals(&mesh_a);
-        let stripped_b = strip_normals(&mesh_b);
+        let stripped_a = strip_normals(&geom_a.mesh);
+        let stripped_b = strip_normals(&geom_b.mesh);
         let ma = Manifold::from_mesh_gl(&stripped_a);
         let mb = Manifold::from_mesh_gl(&stripped_b);
         let result = ma.boolean(&mb, op);
@@ -75,7 +78,7 @@ impl NodeDef for BooleanNode {
         compute_flat_normals(&mut out_mesh);
 
         let mut out = NodeOutputs::default();
-        out.set("out", PortValue::Geometry3d(Arc::new(out_mesh)));
+        out.set("out", PortValue::Geometry3d(Arc::new(wrap_mesh(ctx, out_mesh))));
         Ok(out)
     }
 }
@@ -161,6 +164,10 @@ mod tests {
     use crate::graph::node::{NodeId, NodeInstance};
     use crate::registry::{NodeInputs, NodeProperties};
 
+    fn wrap(m: Arc<MeshGL>) -> PortValue {
+        PortValue::Geometry3d(Arc::new(crate::geometry::Geometry3d::from_mesh(m)))
+    }
+
     #[test]
     fn union_of_overlapping_boxes_yields_single_solid() {
         let n = BooleanNode;
@@ -172,16 +179,16 @@ mod tests {
         inst.inputs = tpl.inputs;
         inst.outputs = tpl.outputs;
         let mut inputs = NodeInputs::default();
-        inputs.insert(inst.input_by_name("a").unwrap().uid, PortValue::Geometry3d(a));
-        inputs.insert(inst.input_by_name("b").unwrap().uid, PortValue::Geometry3d(b));
+        inputs.insert(inst.input_by_name("a").unwrap().uid, wrap(a));
+        inputs.insert(inst.input_by_name("b").unwrap().uid, wrap(b));
         let mut props = NodeProperties::default();
         props.insert("operation", PortValue::Number(0.0));
         let ctx = EvalCtx { instance: &inst, properties: &props, inputs: &inputs };
         let outs = n.evaluate(&ctx).unwrap();
         match outs.by_name.get("out").unwrap() {
-            PortValue::Geometry3d(m) => {
-                assert!(!m.vert_properties.is_empty());
-                assert!(m.tri_verts.len() / 3 >= 12);
+            PortValue::Geometry3d(g) => {
+                assert!(!g.mesh.vert_properties.is_empty());
+                assert!(g.mesh.tri_verts.len() / 3 >= 12);
             }
             _ => panic!(),
         }

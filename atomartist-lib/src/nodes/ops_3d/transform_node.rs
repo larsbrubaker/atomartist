@@ -11,8 +11,8 @@ use crate::geometry::apply_transform;
 use crate::graph::node::PortValue;
 use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeProperties, NodeRegistry,
-    PropDef,
+    geometry_props, wrap_mesh, EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs,
+    NodeProperties, NodeRegistry, PropDef,
 };
 use crate::socket_types::SocketType;
 
@@ -56,7 +56,7 @@ impl NodeDef for TransformNode {
     }
 
     fn properties(&self) -> Vec<PropDef> {
-        vec![
+        let mut p = vec![
             PropDef::new("tx", PortValue::Number(0.0)),
             PropDef::new("ty", PortValue::Number(0.0)),
             PropDef::new("tz", PortValue::Number(0.0)),
@@ -66,21 +66,23 @@ impl NodeDef for TransformNode {
             PropDef::new("sx", PortValue::Number(1.0)).with_range(0.001, 1000.0),
             PropDef::new("sy", PortValue::Number(1.0)).with_range(0.001, 1000.0),
             PropDef::new("sz", PortValue::Number(1.0)).with_range(0.001, 1000.0),
-        ]
+        ];
+        p.extend(geometry_props());
+        p
     }
 
     fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
         let input = match ctx.input_named("input") {
-            PortValue::Geometry3d(m) => m.clone(),
+            PortValue::Geometry3d(g) => g.clone(),
             PortValue::None => return Ok(NodeOutputs::default()),
             other => return Err(NodeError::msg(format!(
                 "Transform: expected Geometry3d input, got {:?}", other.socket_type()
             ))),
         };
         let matrix = Self::build_matrix(ctx.properties);
-        let out_mesh = apply_transform(&input, &matrix);
+        let out_mesh = apply_transform(&input.mesh, &matrix);
         let mut out = NodeOutputs::default();
-        out.set("out", PortValue::Geometry3d(Arc::new(out_mesh)));
+        out.set("out", PortValue::Geometry3d(Arc::new(wrap_mesh(ctx, out_mesh))));
         Ok(out)
     }
 }
@@ -181,7 +183,12 @@ mod tests {
         inst.outputs = tpl.outputs;
         let mut inputs = NodeInputs::default();
         let uid = inst.input_by_name("input").unwrap().uid;
-        inputs.insert(uid, PortValue::Geometry3d(mesh));
+        inputs.insert(
+            uid,
+            PortValue::Geometry3d(Arc::new(
+                crate::geometry::Geometry3d::from_mesh(mesh),
+            )),
+        );
         (inst, inputs)
     }
 
@@ -195,8 +202,8 @@ mod tests {
         let outs = n.evaluate(&ctx).unwrap();
         match outs.by_name.get("out").unwrap() {
             PortValue::Geometry3d(t) => {
-                for i in 0..num_verts(t) {
-                    let p = get_pos(t, i);
+                for i in 0..num_verts(&t.mesh) {
+                    let p = get_pos(&t.mesh, i);
                     let p0 = get_pos(&m, i);
                     assert!((p[1] - (p0[1] + 5.0)).abs() < 1e-5,
                             "vert {} y did not shift by 5: was {}, now {}",
@@ -217,8 +224,8 @@ mod tests {
         let outs = n.evaluate(&ctx).unwrap();
         match outs.by_name.get("out").unwrap() {
             PortValue::Geometry3d(t) => {
-                for i in 0..num_verts(t) {
-                    let p = get_pos(t, i);
+                for i in 0..num_verts(&t.mesh) {
+                    let p = get_pos(&t.mesh, i);
                     let p0 = get_pos(&m, i);
                     assert!((p[0] - p0[0] * 2.0).abs() < 1e-5);
                     assert!((p[1] - p0[1]).abs() < 1e-5);

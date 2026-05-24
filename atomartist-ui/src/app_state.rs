@@ -94,6 +94,13 @@ pub struct AppState {
     /// without locking the main app, but writes go through the
     /// `Mutex` to keep insert-and-spawn-node atomic.
     pub assets: Arc<Mutex<atomartist_lib::serialization::AssetStore>>,
+    /// User-selected theme + accent color. The View menu's Color and
+    /// Theme submenus mutate these; `set_visuals` is re-applied from
+    /// the combination whenever either changes. Mirrors the demo-ui
+    /// pattern (theme + accent picked independently, combined into one
+    /// `Visuals` snapshot).
+    pub theme: Arc<Mutex<agg_gui::theme::ThemePreference>>,
+    pub accent_color: Arc<Mutex<agg_gui::theme::AccentColor>>,
 }
 
 impl AppState {
@@ -120,6 +127,8 @@ impl AppState {
             assets: Arc::new(Mutex::new(
                 atomartist_lib::serialization::AssetStore::new(),
             )),
+            theme: Arc::new(Mutex::new(agg_gui::theme::ThemePreference::Light)),
+            accent_color: Arc::new(Mutex::new(agg_gui::theme::AccentColor::default())),
         }
     }
 
@@ -216,10 +225,14 @@ impl EvalTask {
         // Look up any Geometry3d cached output on the node — sockets
         // names vary across node types (`"out"` for primitives, `"Geometry"`
         // for Extrude). Picking by type is more robust than picking by
-        // a hard-coded name.
+        // a hard-coded name. The `Geometry3d` value carries mesh +
+        // matrix + colour; we extract the mesh here so callers that
+        // only need the triangle data continue to work. The full
+        // bundle stays reachable via `Graph::get` for per-node
+        // gizmos / handles.
         let first_geometry = |n: &atomartist_lib::graph::node::NodeInstance| {
             n.cached_outputs.values().find_map(|v| match v {
-                PortValue::Geometry3d(m) => Some(m.clone()),
+                PortValue::Geometry3d(g) => Some(g.mesh.clone()),
                 _ => None,
             })
         };
@@ -265,6 +278,8 @@ impl Clone for AppState {
             camera_animation: self.camera_animation.clone(),
             projection_animation: self.projection_animation.clone(),
             assets: self.assets.clone(),
+            theme: self.theme.clone(),
+            accent_color: self.accent_color.clone(),
         }
     }
 }
@@ -401,7 +416,9 @@ impl AppState {
                 .set_property(
                     id,
                     Arc::<str>::from("mesh"),
-                    PortValue::Geometry3d(Arc::new(mesh)),
+                    PortValue::Geometry3d(Arc::new(
+                        atomartist_lib::geometry::Geometry3d::from_mesh(Arc::new(mesh)),
+                    )),
                 )
                 .ok();
             id
@@ -433,6 +450,8 @@ impl AppState {
             // it changed. The native shell uses this on next launch
             // to auto-reopen the same file.
             last_project_path: self.current_file.lock().unwrap().clone(),
+            theme: *self.theme.lock().unwrap(),
+            accent_color: *self.accent_color.lock().unwrap(),
         }
     }
 
@@ -467,6 +486,19 @@ impl AppState {
         } else {
             OrbitMode::Trackball
         };
+        drop(c);
+        *self.theme.lock().unwrap() = s.theme;
+        *self.accent_color.lock().unwrap() = s.accent_color;
+        // Push the restored theme + accent into agg-gui's live
+        // visuals so the very first paint matches the user's saved
+        // selection — same call the View menu uses.
+        let base = match s.theme {
+            agg_gui::theme::ThemePreference::Light => agg_gui::theme::Visuals::light(),
+            agg_gui::theme::ThemePreference::Dark | agg_gui::theme::ThemePreference::System => {
+                agg_gui::theme::Visuals::dark()
+            }
+        };
+        agg_gui::theme::set_visuals(base.with_accent_color(s.accent_color));
     }
 
     /// Save the current displayed mesh as a binary STL.

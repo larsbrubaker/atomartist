@@ -42,8 +42,8 @@ fn box_through_transform_produces_translated_mesh() {
     let out = g.get(xform_id).unwrap()
         .cached_outputs.get(&out_uid).cloned().unwrap();
     match out {
-        PortValue::Geometry3d(mesh) => {
-            assert_mesh_translated_y(&mesh, 5.0);
+        PortValue::Geometry3d(g) => {
+            assert_mesh_translated_y(&g.mesh, 5.0);
         }
         _ => panic!("expected Geometry3d output"),
     }
@@ -94,7 +94,8 @@ fn rectangle_through_extrude_produces_solid() {
     atomartist_lib::graph::executor::evaluate_all(&mut g, &reg).unwrap();
     let geo_uid = g.get(e).unwrap().output_by_name("Geometry").unwrap().uid;
     match g.get(e).unwrap().cached_outputs.get(&geo_uid) {
-        Some(PortValue::Geometry3d(m)) => {
+        Some(PortValue::Geometry3d(geo)) => {
+            let m = &geo.mesh;
             assert!(m.vert_properties.len() > 0);
             assert!(m.tri_verts.len() >= 12);
             let stride = m.num_prop as usize;
@@ -135,7 +136,8 @@ fn combine_two_boxes_via_executor() {
     evaluate_all(&mut g, &reg).unwrap();
     let out_c = g.get(c).unwrap().output_by_name("out").unwrap().uid;
     match g.get(c).unwrap().cached_outputs.get(&out_c) {
-        Some(PortValue::Geometry3d(m)) => {
+        Some(PortValue::Geometry3d(geo)) => {
+            let m = &geo.mesh;
             assert_eq!(m.vert_properties.len() / m.num_prop as usize, 48);
             assert_eq!(m.tri_verts.len() / 3, 24);
         }
@@ -143,7 +145,7 @@ fn combine_two_boxes_via_executor() {
     }
 
     let _arc: Arc<MeshGL> = match g.get(c).unwrap().cached_outputs.get(&out_c) {
-        Some(PortValue::Geometry3d(m)) => m.clone(),
+        Some(PortValue::Geometry3d(geo)) => geo.mesh.clone(),
         _ => panic!(),
     };
 }

@@ -17,7 +17,8 @@ use manifold_rust::types::MeshGL;
 use crate::graph::node::PortValue;
 use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeRegistry, PropDef,
+    geometry_props, wrap_mesh, EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs,
+    NodeRegistry, PropDef,
 };
 use crate::serialization::mesh_io::import_stl;
 use crate::socket_types::SocketType;
@@ -36,9 +37,11 @@ impl NodeDef for LibraryMeshNode {
     }
 
     fn properties(&self) -> Vec<PropDef> {
-        vec![
+        let mut p = vec![
             PropDef::new("path", PortValue::StringVal(Arc::new(String::new()))),
-        ]
+        ];
+        p.extend(geometry_props());
+        p
     }
 
     fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
@@ -51,7 +54,7 @@ impl NodeDef for LibraryMeshNode {
         }
         let mesh = load_mesh_from_path(&path).map_err(NodeError::msg)?;
         let mut out = NodeOutputs::default();
-        out.set("out", PortValue::Geometry3d(Arc::new(mesh)));
+        out.set("out", PortValue::Geometry3d(Arc::new(wrap_mesh(ctx, mesh))));
         Ok(out)
     }
 }
@@ -107,8 +110,8 @@ mod tests {
         let ctx = EvalCtx { instance: &inst, properties: &props, inputs: &inputs };
         let outs = n.evaluate(&ctx).unwrap();
         match outs.by_name.get("out").unwrap() {
-            PortValue::Geometry3d(m) => {
-                assert_eq!(m.tri_verts.len() / 3, 12, "box has 12 tris");
+            PortValue::Geometry3d(g) => {
+                assert_eq!(g.mesh.tri_verts.len() / 3, 12, "box has 12 tris");
             }
             _ => panic!(),
         }

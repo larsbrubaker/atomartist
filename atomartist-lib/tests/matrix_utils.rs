@@ -25,7 +25,12 @@ fn fixture(
     inst.outputs = tpl.outputs;
     let mut inputs = NodeInputs::default();
     let uid = inst.input_by_name("input").unwrap().uid;
-    inputs.insert(uid, PortValue::Geometry3d(mesh));
+    inputs.insert(
+        uid,
+        PortValue::Geometry3d(Arc::new(
+            atomartist_lib::geometry::Geometry3d::from_mesh(mesh),
+        )),
+    );
     let mut props = NodeProperties::default();
     for (k, v) in props_kv {
         props.insert(*k, PortValue::Number(*v));
@@ -41,8 +46,8 @@ fn identity_transform_preserves_positions() {
     let outs = TransformNode.evaluate(&ctx).unwrap();
     match outs.by_name.get("out").unwrap() {
         PortValue::Geometry3d(t) => {
-            for i in 0..num_verts(t) {
-                let p = get_pos(t, i);
+            for i in 0..num_verts(&t.mesh) {
+                let p = get_pos(&t.mesh, i);
                 let p0 = get_pos(&m, i);
                 for k in 0..3 {
                     assert!(
@@ -65,8 +70,8 @@ fn nonuniform_scale_changes_each_axis_independently() {
     let outs = TransformNode.evaluate(&ctx).unwrap();
     match outs.by_name.get("out").unwrap() {
         PortValue::Geometry3d(t) => {
-            for i in 0..num_verts(t) {
-                let p = get_pos(t, i);
+            for i in 0..num_verts(&t.mesh) {
+                let p = get_pos(&t.mesh, i);
                 let p0 = get_pos(&m, i);
                 assert!((p[0] - p0[0] * 2.0).abs() < 1e-5);
                 assert!((p[1] - p0[1] * 0.5).abs() < 1e-5);
@@ -122,11 +127,11 @@ fn translation_shifts_origin() {
     match outs.by_name.get("out").unwrap() {
         PortValue::Geometry3d(t) => {
             let mut sum = [0.0f32; 3];
-            for i in 0..num_verts(t) {
-                let p = get_pos(t, i);
+            for i in 0..num_verts(&t.mesh) {
+                let p = get_pos(&t.mesh, i);
                 for k in 0..3 { sum[k] += p[k]; }
             }
-            let n = num_verts(t) as f32;
+            let n = num_verts(&t.mesh) as f32;
             assert!((sum[0] / n - 5.0).abs() < 1e-4);
             assert!((sum[1] / n - (-3.0)).abs() < 1e-4);
             assert!((sum[2] / n - 7.0).abs() < 1e-4);

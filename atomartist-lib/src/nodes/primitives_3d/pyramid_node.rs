@@ -6,7 +6,8 @@ use crate::geometry::generate_pyramid;
 use crate::graph::node::PortValue;
 use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeRegistry, PropDef,
+    geometry_props, wrap_mesh, EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs,
+    NodeRegistry, PropDef,
 };
 use crate::socket_types::SocketType;
 
@@ -24,11 +25,13 @@ impl NodeDef for PyramidNode {
     }
 
     fn properties(&self) -> Vec<PropDef> {
-        vec![
+        let mut p = vec![
             PropDef::new("width", PortValue::Number(20.0)).with_range(0.001, 10_000.0),
             PropDef::new("height", PortValue::Number(20.0)).with_range(0.001, 10_000.0),
             PropDef::new("depth", PortValue::Number(20.0)).with_range(0.001, 10_000.0),
-        ]
+        ];
+        p.extend(geometry_props());
+        p
     }
 
     fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
@@ -36,7 +39,7 @@ impl NodeDef for PyramidNode {
         let h = ctx.properties.number("height", 20.0);
         let d = ctx.properties.number("depth", 20.0);
         let mut o = NodeOutputs::default();
-        o.set("out", PortValue::Geometry3d(Arc::new(generate_pyramid(w, h, d))));
+        o.set("out", PortValue::Geometry3d(Arc::new(wrap_mesh(ctx, generate_pyramid(w, h, d)))));
         Ok(o)
     }
 }

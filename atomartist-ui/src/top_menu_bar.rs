@@ -8,7 +8,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use agg_gui::{text::Font, MenuBar, MenuEntry, MenuItem, TopMenu, Widget};
+use agg_gui::{
+    text::Font,
+    theme::{AccentColor, ThemePreference},
+    MenuBar, MenuEntry, MenuItem, TopMenu, Widget,
+};
 
 use crate::app_state::AppState;
 use crate::debug_windows::DebugWindowHandles;
@@ -96,31 +100,7 @@ pub fn build_menu_bar(
                 MenuEntry::Item(MenuItem::action("Select All", "edit.select_all").icon(bi::ARROWS_ANGLE_EXPAND)),
             ],
         ),
-        TopMenu::new(
-            "View",
-            vec![MenuEntry::Item(
-                MenuItem::submenu(
-                    "Debug",
-                    vec![
-                        MenuEntry::Item(
-                            MenuItem::action("Inspector", "view.debug.inspector").icon(bi::BUG),
-                        ),
-                        MenuEntry::Item(
-                            MenuItem::action("Performance Graph", "view.debug.performance")
-                                .icon(bi::SPEEDOMETER),
-                        ),
-                    ],
-                )
-                .icon(bi::BUG),
-            )],
-        ),
-        TopMenu::new(
-            "Settings",
-            vec![
-                MenuEntry::Item(MenuItem::action("Light Theme", "settings.theme.light").icon(bi::SUN)),
-                MenuEntry::Item(MenuItem::action("Dark Theme", "settings.theme.dark").icon(bi::SUN)),
-            ],
-        ),
+        TopMenu::new("View", build_view_entries(&state)),
         TopMenu::new(
             "Help",
             vec![
@@ -159,6 +139,82 @@ pub fn build_menu_bar_sized(
     debug: DebugWindowHandles,
 ) -> Box<dyn Widget> {
     Box::new(build_menu_bar(state, font, dialogs, debug))
+}
+
+/// Build the View menu — debug toggles, theme (Light / Dark), and an
+/// AccentColor swatch picker. Mirrors the agg-gui demo's View menu so
+/// the theme + accent affordances feel the same across both apps.
+fn build_view_entries(state: &AppState) -> Vec<MenuEntry> {
+    let theme = *state.theme.lock().unwrap();
+    let accent = *state.accent_color.lock().unwrap();
+
+    let theme_submenu = vec![
+        MenuEntry::Item(
+            MenuItem::action("Light", "view.theme.light")
+                .icon(bi::SUN)
+                .radio(theme == ThemePreference::Light)
+                .keep_open(),
+        ),
+        MenuEntry::Item(
+            MenuItem::action("Dark", "view.theme.dark")
+                .icon(bi::SUN)
+                .radio(theme == ThemePreference::Dark)
+                .keep_open(),
+        ),
+        MenuEntry::Item(
+            MenuItem::action("System", "view.theme.system")
+                .icon(bi::SUN)
+                .radio(theme == ThemePreference::System)
+                .keep_open(),
+        ),
+    ];
+
+    let accent_submenu: Vec<MenuEntry> = AccentColor::ALL
+        .iter()
+        .map(|a| {
+            MenuEntry::Item(
+                MenuItem::action(a.label(), format!("view.accent.{}", a.key()))
+                    .swatch(a.color())
+                    .radio(accent == *a)
+                    .keep_open(),
+            )
+        })
+        .collect();
+
+    vec![
+        MenuEntry::Item(
+            MenuItem::submenu(
+                "Debug",
+                vec![
+                    MenuEntry::Item(
+                        MenuItem::action("Inspector", "view.debug.inspector").icon(bi::BUG),
+                    ),
+                    MenuEntry::Item(
+                        MenuItem::action("Performance Graph", "view.debug.performance")
+                            .icon(bi::SPEEDOMETER),
+                    ),
+                ],
+            )
+            .icon(bi::BUG),
+        ),
+        MenuEntry::Separator,
+        MenuEntry::Item(MenuItem::submenu("Theme", theme_submenu).icon(bi::SUN)),
+        MenuEntry::Item(MenuItem::submenu("Color", accent_submenu).icon(bi::SUN)),
+    ]
+}
+
+/// Apply the current theme + accent combination to agg-gui's live
+/// visuals. Called whenever either changes — same shape as the demo's
+/// `apply_theme_visuals`.
+fn apply_theme_visuals(theme: ThemePreference, accent: AccentColor) {
+    use agg_gui::theme::{set_visuals, Visuals};
+    let base = match theme {
+        ThemePreference::Light => Visuals::light(),
+        // System currently falls back to Dark; if agg-gui later grows
+        // a `detect_system_theme()` AtomArtist can plug it in here.
+        ThemePreference::Dark | ThemePreference::System => Visuals::dark(),
+    };
+    set_visuals(base.with_accent_color(accent));
 }
 
 /// Walk the `NodeRegistry` and build a category-grouped Add Node submenu
@@ -205,7 +261,6 @@ fn handle_action(
     debug: &DebugWindowHandles,
     action: &str,
 ) {
-    use agg_gui::theme::{set_visuals, Visuals};
     if let Some(type_id) = action.strip_prefix("add.") {
         // Find the action's NodeDef by its dynamic type_id string and
         // intern it. Registry stores &'static str ids; we look up the
@@ -228,9 +283,28 @@ fn handle_action(
         }
         return;
     }
+    // Accent swatch picker — routes to the shared `Visuals` apply path
+    // so the chosen colour flows through every widget on the next frame.
+    if let Some(key) = action.strip_prefix("view.accent.") {
+        if let Some(accent) = AccentColor::from_key(key) {
+            *state.accent_color.lock().unwrap() = accent;
+            let theme = *state.theme.lock().unwrap();
+            apply_theme_visuals(theme, accent);
+        }
+        return;
+    }
+    if let Some(theme) = match action {
+        "view.theme.light" => Some(ThemePreference::Light),
+        "view.theme.dark" => Some(ThemePreference::Dark),
+        "view.theme.system" => Some(ThemePreference::System),
+        _ => None,
+    } {
+        *state.theme.lock().unwrap() = theme;
+        let accent = *state.accent_color.lock().unwrap();
+        apply_theme_visuals(theme, accent);
+        return;
+    }
     match action {
-        "settings.theme.light" => set_visuals(Visuals::light()),
-        "settings.theme.dark" => set_visuals(Visuals::dark()),
         "edit.undo" => {
             let mut buf = state.undo.lock().unwrap();
             buf.undo();

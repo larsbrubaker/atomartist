@@ -110,7 +110,8 @@ fn translate_subgraph_shifts_box_in_y() {
         .cloned()
         .unwrap();
     match out_value {
-        PortValue::Geometry3d(mesh) => {
+        PortValue::Geometry3d(geo) => {
+            let mesh = &geo.mesh;
             let stride = mesh.num_prop as usize;
             let n = mesh.vert_properties.len() / stride;
             let mut y_min = f32::INFINITY;

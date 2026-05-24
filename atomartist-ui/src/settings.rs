@@ -38,6 +38,7 @@
 
 use std::path::{Path, PathBuf};
 
+use agg_gui::theme::{AccentColor, ThemePreference};
 use atomartist_renderer::RenderStyle;
 
 /// Persisted geometry + maximized flag for the host OS window the
@@ -289,6 +290,12 @@ pub struct UiSettings {
     /// resumes where they left off; `None` means there's nothing
     /// to reopen and the starter graph stays loaded.
     pub last_project_path: Option<PathBuf>,
+    /// User's chosen theme (light / dark / system). Persisted so the
+    /// View → Theme selection survives across runs.
+    pub theme: ThemePreference,
+    /// User's chosen accent swatch. Persisted so the View → Color
+    /// selection survives across runs.
+    pub accent_color: AccentColor,
 }
 
 impl Default for UiSettings {
@@ -302,6 +309,11 @@ impl Default for UiSettings {
             main_window: MainWindowState::default(),
             debug_windows: DebugWindowsState::default(),
             last_project_path: None,
+            // Light is AtomArtist's first-launch default (CAD-style
+            // white background); the shell's `set_visuals` call at
+            // startup matches.
+            theme: ThemePreference::Light,
+            accent_color: AccentColor::default(),
         }
     }
 }
@@ -324,6 +336,8 @@ impl UiSettings {
         write_main_window(&mut out, &self.main_window);
         write_debug_window(&mut out, "inspector", &self.debug_windows.inspector);
         write_debug_window(&mut out, "performance", &self.debug_windows.performance);
+        out.push_str(&format!("theme={}\n", self.theme.key()));
+        out.push_str(&format!("accent_color={}\n", self.accent_color.key()));
         if let Some(p) = self.last_project_path.as_ref() {
             // `to_string_lossy` is good enough — projects with
             // non-UTF-8 paths (rare) round-trip in their lossy form,
@@ -376,6 +390,16 @@ impl UiSettings {
                         // Negative snap amounts are nonsensical;
                         // treat them as 0 (snap off).
                         out.snap_amount = if f.is_finite() && f >= 0.0 { f } else { 0.0 };
+                    }
+                }
+                "theme" => {
+                    if let Some(t) = ThemePreference::from_key(value) {
+                        out.theme = t;
+                    }
+                }
+                "accent_color" => {
+                    if let Some(a) = AccentColor::from_key(value) {
+                        out.accent_color = a;
                     }
                 }
                 "last_project_path" => {

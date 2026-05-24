@@ -125,7 +125,9 @@ pub fn resolve_mesh_assets(graph: &mut Graph, assets: &AssetStore) -> Vec<String
                 if let Some(n) = graph.get_mut(id) {
                     n.properties.insert(
                         Arc::from(MESH_CACHE_KEY),
-                        PortValue::Geometry3d(Arc::new(mesh)),
+                        PortValue::Geometry3d(Arc::new(
+                            crate::geometry::Geometry3d::from_mesh(Arc::new(mesh)),
+                        )),
                     );
                     n.dirty = true;
                 }
@@ -192,12 +194,17 @@ mod tests {
     fn evaluate_returns_cached_mesh() {
         let mesh = generate_box(1.0, 2.0, 3.0);
         let mut props = NodeProperties::default();
-        props.insert(MESH_CACHE_KEY, PortValue::Geometry3d(Arc::new(mesh)));
+        props.insert(
+            MESH_CACHE_KEY,
+            PortValue::Geometry3d(Arc::new(
+                crate::geometry::Geometry3d::from_mesh(Arc::new(mesh)),
+            )),
+        );
         let (inst, inputs, props) = make_ctx(props);
         let ctx = EvalCtx { instance: &inst, properties: &props, inputs: &inputs };
         let out = MeshNode.evaluate(&ctx).unwrap();
         match out.by_name.get("out").unwrap() {
-            PortValue::Geometry3d(m) => assert_eq!(m.tri_verts.len() / 3, 12),
+            PortValue::Geometry3d(g) => assert_eq!(g.mesh.tri_verts.len() / 3, 12),
             _ => panic!("expected Geometry3d output"),
         }
     }
@@ -216,7 +223,7 @@ mod tests {
 
         let node = graph.get(crate::graph::node::NodeId(1)).unwrap();
         match node.properties.get(MESH_CACHE_KEY) {
-            Some(PortValue::Geometry3d(m)) => assert_eq!(m.tri_verts.len() / 3, 12),
+            Some(PortValue::Geometry3d(g)) => assert_eq!(g.mesh.tri_verts.len() / 3, 12),
             other => panic!("expected resolved geometry, got {:?}", other),
         }
         assert!(node.dirty, "resolution should flag the node dirty");

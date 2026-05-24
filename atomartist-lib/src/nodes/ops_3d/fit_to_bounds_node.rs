@@ -7,7 +7,8 @@ use crate::geometry::{apply_transform, bounds};
 use crate::graph::node::PortValue;
 use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeRegistry, PropDef,
+    geometry_props, wrap_mesh, EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs,
+    NodeRegistry, PropDef,
 };
 use crate::socket_types::SocketType;
 
@@ -26,23 +27,25 @@ impl NodeDef for FitToBoundsNode {
     }
 
     fn properties(&self) -> Vec<PropDef> {
-        vec![
+        let mut p = vec![
             PropDef::new("width",  PortValue::Number(20.0)).with_range(0.001, 10_000.0),
             PropDef::new("height", PortValue::Number(20.0)).with_range(0.001, 10_000.0),
             PropDef::new("depth",  PortValue::Number(20.0)).with_range(0.001, 10_000.0),
             PropDef::new("uniform", PortValue::Bool(true)),
-        ]
+        ];
+        p.extend(geometry_props());
+        p
     }
 
     fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
         let input = match ctx.input_named("input") {
-            PortValue::Geometry3d(m) => m.clone(),
+            PortValue::Geometry3d(g) => g.clone(),
             PortValue::None => return Ok(NodeOutputs::default()),
             other => return Err(NodeError::msg(format!(
                 "FitToBounds: expected Geometry3d, got {:?}", other.socket_type()
             ))),
         };
-        let (mn, mx) = match bounds(&input) {
+        let (mn, mx) = match bounds(&input.mesh) {
             Some(b) => b,
             None => {
                 let mut o = NodeOutputs::default();
@@ -76,9 +79,9 @@ impl NodeDef for FitToBoundsNode {
         let cy = (mn[1] + mx[1]) * 0.5;
         let cz = (mn[2] + mx[2]) * 0.5;
         let m = scale_about([cx, cy, cz], [sx, sy, sz]);
-        let result = apply_transform(&input, &m);
+        let result = apply_transform(&input.mesh, &m);
         let mut out = NodeOutputs::default();
-        out.set("out", PortValue::Geometry3d(Arc::new(result)));
+        out.set("out", PortValue::Geometry3d(Arc::new(wrap_mesh(ctx, result))));
         Ok(out)
     }
 }
