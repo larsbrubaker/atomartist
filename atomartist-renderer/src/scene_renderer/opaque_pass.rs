@@ -22,6 +22,7 @@
 use bytemuck::{Pod, Zeroable};
 
 use super::opaque_shaders::{OUTLINE_SHADER, SCENE_SHADER};
+use super::util::SCENE_DEPTH_COLOR_FORMAT;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -262,17 +263,44 @@ fn build_scene_pipeline(
         fragment: Some(wgpu::FragmentState {
             module: &shader,
             entry_point: Some("fs"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: surface_format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
+            targets: &[
+                Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                }),
+                Some(scene_depth_color_target()),
+            ],
             compilation_options: Default::default(),
         }),
         multiview_mask: None,
         cache: None,
     });
     (pipeline, bgl)
+}
+
+/// Colour target for the auxiliary `scene_depth_color` attachment
+/// every opaque-pass pipeline writes alongside the regular shaded
+/// colour. R32Float so we can store raw `clip.z` without precision
+/// loss. No blending and write-mask `RED` only — the green / blue /
+/// alpha channels of the attachment are unused.
+fn scene_depth_color_target() -> wgpu::ColorTargetState {
+    wgpu::ColorTargetState {
+        format: SCENE_DEPTH_COLOR_FORMAT,
+        blend: None,
+        write_mask: wgpu::ColorWrites::RED,
+    }
+}
+
+/// Same shape as [`scene_depth_color_target`] but with an empty
+/// write mask — used by the outline pipeline so its inflated
+/// silhouette never overwrites the peel-reference depth.
+fn scene_depth_color_target_disabled() -> wgpu::ColorTargetState {
+    wgpu::ColorTargetState {
+        format: SCENE_DEPTH_COLOR_FORMAT,
+        blend: None,
+        write_mask: wgpu::ColorWrites::empty(),
+    }
 }
 
 fn build_scene_uniforms(
@@ -347,11 +375,17 @@ fn build_outline_pipeline(
         fragment: Some(wgpu::FragmentState {
             module: &shader,
             entry_point: Some("fs"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: surface_format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
+            targets: &[
+                Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                }),
+                // Outline z is inflated along normals and would
+                // pollute the peel-reference depth — zero the
+                // write mask so the outline never updates it.
+                Some(scene_depth_color_target_disabled()),
+            ],
             compilation_options: Default::default(),
         }),
         multiview_mask: None,
@@ -412,11 +446,17 @@ fn build_depth_only_pipeline(
         fragment: Some(wgpu::FragmentState {
             module: &shader,
             entry_point: Some("fs"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: surface_format,
-                blend: None,
-                write_mask: wgpu::ColorWrites::empty(),
-            })],
+            targets: &[
+                Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: None,
+                    // Suppresses the mesh's *colour* (the dual-peel
+                    // chain writes that), while we still let the
+                    // `depth_color` attachment receive the mesh's z.
+                    write_mask: wgpu::ColorWrites::empty(),
+                }),
+                Some(scene_depth_color_target()),
+            ],
             compilation_options: Default::default(),
         }),
         multiview_mask: None,

@@ -157,7 +157,7 @@ impl DualPeelPipelines {
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         targets: &DualPeelTargets,
-        opaque_depth_view: &wgpu::TextureView,
+        opaque_depth_color_view: &wgpu::TextureView,
         opaque_color_view: &wgpu::TextureView,
         output_view: &wgpu::TextureView,
         mesh: Option<MeshHandles<'_>>,
@@ -175,7 +175,7 @@ impl DualPeelPipelines {
         queue.write_buffer(&self.peel_ub, 0, bytemuck::bytes_of(peel_uniforms));
 
         // ---- Pass A: init ------------------------------------------------
-        let init_bg = self.build_init_bind_group(device, opaque_depth_view, targets);
+        let init_bg = self.build_init_bind_group(device, opaque_depth_color_view);
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("atomartist dual-peel init"),
@@ -215,7 +215,8 @@ impl DualPeelPipelines {
         );
         for i in 0..iterations {
             let (src_dual_depth, dst_dual_depth) = targets.dual_depth_for_iteration(i);
-            let peel_bg = self.build_peel_bind_group(device, opaque_depth_view, src_dual_depth);
+            let peel_bg =
+                self.build_peel_bind_group(device, opaque_depth_color_view, src_dual_depth);
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("atomartist dual-peel iter"),
@@ -332,8 +333,7 @@ impl DualPeelPipelines {
     fn build_init_bind_group(
         &self,
         device: &wgpu::Device,
-        opaque_depth: &wgpu::TextureView,
-        targets: &DualPeelTargets,
+        opaque_depth_color: &wgpu::TextureView,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("atomartist dual-peel init bg"),
@@ -345,11 +345,7 @@ impl DualPeelPipelines {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(opaque_depth),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&targets.point_sampler),
+                    resource: wgpu::BindingResource::TextureView(opaque_depth_color),
                 },
             ],
         })
@@ -358,21 +354,9 @@ impl DualPeelPipelines {
     fn build_peel_bind_group(
         &self,
         device: &wgpu::Device,
-        opaque_depth: &wgpu::TextureView,
+        opaque_depth_color: &wgpu::TextureView,
         src_dual_depth: &wgpu::TextureView,
     ) -> wgpu::BindGroup {
-        // Sampler is borrowed from `targets.point_sampler` through the
-        // bind group entries below; we create a fresh sampler here only
-        // to avoid threading `&DualPeelTargets` through. The cost is
-        // tiny — wgpu pools sampler creation — and keeps the helper
-        // signature stable across the init / peel / resolve trio.
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("atomartist dual-peel sampler"),
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-            ..Default::default()
-        });
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("atomartist dual-peel bg"),
             layout: &self.peel_bgl,
@@ -383,15 +367,11 @@ impl DualPeelPipelines {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(opaque_depth),
+                    resource: wgpu::BindingResource::TextureView(opaque_depth_color),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::TextureView(src_dual_depth),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
                 },
             ],
         })
@@ -481,20 +461,19 @@ fn build_init_pipeline(device: &wgpu::Device) -> (wgpu::RenderPipeline, wgpu::Bi
                 },
                 count: None,
             },
+            // Opaque-pass depth mirrored into an R32Float colour
+            // attachment by the opaque pipelines. Sampled with
+            // `textureLoad` so no sampler binding is needed —
+            // Naga emits `texelFetch(sampler2D, …)` in GLSL which
+            // WebGL2 supports cleanly.
             wgpu::BindGroupLayoutEntry {
                 binding: 1,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Depth,
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
                     view_dimension: wgpu::TextureViewDimension::D2,
                     multisampled: false,
                 },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 2,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                 count: None,
             },
         ],
@@ -558,11 +537,12 @@ fn build_peel_pipeline(device: &wgpu::Device) -> (wgpu::RenderPipeline, wgpu::Bi
                 },
                 count: None,
             },
+            // Mirrored R32Float opaque-pass depth — see init bgl.
             wgpu::BindGroupLayoutEntry {
                 binding: 1,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Depth,
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
                     view_dimension: wgpu::TextureViewDimension::D2,
                     multisampled: false,
                 },
@@ -576,12 +556,6 @@ fn build_peel_pipeline(device: &wgpu::Device) -> (wgpu::RenderPipeline, wgpu::Bi
                     view_dimension: wgpu::TextureViewDimension::D2,
                     multisampled: false,
                 },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 3,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                 count: None,
             },
         ],

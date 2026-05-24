@@ -342,6 +342,96 @@ mod tests {
         );
     }
 
+    /// Regression for the May 2026 WASM panic: Naga's GLSL ES 3.00
+    /// backend (the one wgpu uses on WebGL2) refuses to emit
+    /// `textureLoad` on `texture_depth_2d`, and silently emits
+    /// `textureLod(sampler2DShadow, …)` for `textureSampleLevel`
+    /// which the WebGL2 GLSL compiler then rejects. Both failure
+    /// modes manifest as a `Device::create_render_pipeline`
+    /// validation error in the browser — invisible to native tests.
+    ///
+    /// We run the three peel shaders through naga's WGSL frontend
+    /// and GLSL ES backend to catch *either* failure at unit-test
+    /// time. The test passes when every shader emits a non-empty
+    /// GLSL string without error; it doesn't bother diff-checking
+    /// the actual GLSL contents — naga's exact output is unstable
+    /// across versions and not what we care about.
+    #[test]
+    fn peel_shaders_emit_glsl_es_300() {
+        for (label, wgsl, stage) in [
+            (
+                "dual-depth init",
+                super::shaders::DUAL_DEPTH_INIT_SHADER,
+                naga::ShaderStage::Fragment,
+            ),
+            (
+                "dual-peel colour",
+                super::shaders::DUAL_PEEL_COLOR_SHADER,
+                naga::ShaderStage::Fragment,
+            ),
+            (
+                "dual-peel resolve",
+                super::shaders::DUAL_PEEL_RESOLVE_SHADER,
+                naga::ShaderStage::Fragment,
+            ),
+        ] {
+            let module = naga::front::wgsl::parse_str(wgsl)
+                .unwrap_or_else(|e| panic!("[{label}] WGSL parse failed: {e:?}"));
+            let info = naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::empty(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("[{label}] validation failed: {e:?}"));
+
+            let options = naga::back::glsl::Options {
+                version: naga::back::glsl::Version::Embedded {
+                    version: 300,
+                    is_webgl: true,
+                },
+                writer_flags: naga::back::glsl::WriterFlags::empty(),
+                binding_map: Default::default(),
+                zero_initialize_workgroup_memory: false,
+            };
+            let entry_point = module
+                .entry_points
+                .iter()
+                .find(|ep| ep.stage == stage)
+                .unwrap_or_else(|| panic!("[{label}] no entry point for stage {stage:?}"));
+            let pipeline_options = naga::back::glsl::PipelineOptions {
+                shader_stage: stage,
+                entry_point: entry_point.name.clone(),
+                multiview: None,
+            };
+            let mut out = String::new();
+            let mut writer = naga::back::glsl::Writer::new(
+                &mut out,
+                &module,
+                &info,
+                &options,
+                &pipeline_options,
+                naga::proc::BoundsCheckPolicies::default(),
+            )
+            .unwrap_or_else(|e| panic!("[{label}] glsl writer construct failed: {e:?}"));
+            writer
+                .write()
+                .unwrap_or_else(|e| panic!("[{label}] glsl emit failed: {e:?}"));
+            assert!(
+                out.contains("void main()"),
+                "[{label}] emitted GLSL missing entry point: {out}"
+            );
+            // No `sampler2DShadow` in any peel shader — that's the
+            // sentinel that Naga has gone down the "treat this as a
+            // depth-comparison sampler" path that WebGL2 chokes on.
+            // Our fix routes the opaque depth through an R32Float
+            // colour attachment specifically to avoid this.
+            assert!(
+                !out.contains("sampler2DShadow"),
+                "[{label}] emitted GLSL still binds a shadow sampler: {out}"
+            );
+        }
+    }
+
     #[test]
     fn ensure_size_is_no_op_when_unchanged() {
         let Some((device, _queue)) = headless_device() else {

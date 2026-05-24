@@ -171,8 +171,18 @@ fn vs(@location(0) pos: vec2<f32>, @location(1) uv: vec2<f32>) -> VOut {
     return o;
 }
 
+// The bed pipeline draws into the scene renderer's opaque pass,
+// which carries a second R32Float attachment used by the dual-peel
+// chain (see `opaque_shaders` for the rationale). We mirror
+// `in.clip.z` into `@location(1)` so the bed plane participates in
+// the peel-reference depth like the mesh does.
+struct FsOut {
+    @location(0) color: vec4<f32>,
+    @location(1) depth_color: vec4<f32>,
+};
+
 @fragment
-fn fs(in: VOut) -> @location(0) vec4<f32> {
+fn fs(in: VOut) -> FsOut {
     let c = textureSample(bed_tex, bed_smp, in.uv);
     // Bed-texture sample is premultiplied. Discard fully-transparent
     // texels so the bed never overwrites the depth buffer where it has
@@ -187,6 +197,9 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
     if (c.a < 0.01) {
         discard;
     }
-    return c;
+    var out: FsOut;
+    out.color = c;
+    out.depth_color = vec4<f32>(in.clip.z, 0.0, 0.0, 1.0);
+    return out;
 }
 "#;

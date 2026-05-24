@@ -57,7 +57,7 @@ mod timings;
 mod util;
 
 use timings::{elapsed_ms, log_scene_timings, SceneTimings};
-use util::{ensure_scene_depth, normalize3};
+use util::{ensure_scene_depth, ensure_scene_depth_color, normalize3};
 
 use accumulation::{
     apply_jitter_to_proj, jitter_offset, AccumulationPipelines, AccumulationTargets, MAX_SAMPLES,
@@ -135,12 +135,19 @@ struct GpuState {
     /// sample-able by the dual-peel shaders.
     framebuffer: Option<MsaaFramebuffer>,
 
-    /// Sample-able depth texture used as the opaque-pass depth
-    /// attachment and read by the init / peel shaders for the
-    /// behind-opaque discard test. The pair `(texture, view)` lives
-    /// here rather than in `DualPeelTargets` because the opaque pass
-    /// owns the writes (DualPeelTargets is purely peel-pass state).
+    /// Hardware depth attachment for the opaque pass — used for
+    /// regular depth testing during scene / bed / outline draws.
+    /// Not sample-able from shaders because Naga's WebGL2 backend
+    /// can't `textureLoad` from depth textures (it binds them as
+    /// `sampler2DShadow` in GLSL).
     scene_depth: Option<(wgpu::Texture, wgpu::TextureView)>,
+
+    /// R32Float mirror of `scene_depth` populated by the opaque
+    /// pipelines from their fragment shader at `@location(1)`. The
+    /// dual-peel init / colour shaders sample this view as a
+    /// regular `texture_2d<f32>` (see `depth_peel::shaders` for the
+    /// matching `textureLoad`).
+    scene_depth_color: Option<(wgpu::Texture, wgpu::TextureView)>,
 
     /// Dual-peel ping-pong + accumulator textures. Sized to match
     /// `framebuffer`; reallocated on resize via
@@ -278,6 +285,7 @@ impl WgpuSceneRenderer {
             index_count: 0,
             framebuffer: None,
             scene_depth: None,
+            scene_depth_color: None,
             peel_targets: None,
             accum_targets: None,
             output_fb: None,
@@ -311,6 +319,7 @@ impl WgpuSceneRenderer {
             }
         }
         ensure_scene_depth(device, &mut s.scene_depth, w, h);
+        ensure_scene_depth_color(device, &mut s.scene_depth_color, w, h);
         match &mut s.peel_targets {
             Some(t) => t.ensure_size(device, w, h),
             None => s.peel_targets = Some(DualPeelTargets::new(device, w, h, format)),
@@ -486,6 +495,10 @@ impl WgpuCustomRender for WgpuSceneRenderer {
             Some((_, v)) => v,
             None => return,
         };
+        let scene_depth_color_view = match &s.scene_depth_color {
+            Some((_, v)) => v,
+            None => return,
+        };
         let peel_targets = match &s.peel_targets {
             Some(t) => t,
             None => return,
@@ -590,15 +603,36 @@ impl WgpuCustomRender for WgpuSceneRenderer {
         {
             let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("atomartist scene opaque"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: fb.render_view(),
-                    resolve_target: fb.resolve_target(),
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
+                color_attachments: &[
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: fb.render_view(),
+                        resolve_target: fb.resolve_target(),
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                    // R32Float mirror of the opaque depth — the
+                    // dual-peel chain samples this. Clear to 1.0 (far
+                    // plane) so any pixel the opaque pass leaves
+                    // untouched reads as "no opaque geometry here"
+                    // and lets every transparent fragment through.
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: scene_depth_color_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 1.0,
+                                g: 0.0,
+                                b: 0.0,
+                                a: 1.0,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                ],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: scene_depth_view,
                     depth_ops: Some(wgpu::Operations {
@@ -679,7 +713,7 @@ impl WgpuCustomRender for WgpuSceneRenderer {
             ctx.queue,
             ctx.encoder,
             peel_targets,
-            scene_depth_view,
+            scene_depth_color_view,
             // For SAMPLE_COUNT = 1 the render_view *is* the resolve
             // view, so the resolve shader's `scene_color` sample reads
             // the same texture the opaque pass wrote to.

@@ -359,6 +359,7 @@ dependencies = [
  "demo-wgpu",
  "glam",
  "manifold-rust",
+ "naga",
  "pollster 0.3.0",
  "web-time",
  "wgpu",

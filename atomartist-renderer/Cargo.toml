@@ -24,6 +24,11 @@ web-time       = "1"
 
 [dev-dependencies]
 pollster       = "0.3"
+# Direct naga dep with `wgsl-in` + `glsl-out` reachable from tests so
+# `glsl_es_emit_succeeds` can catch WebGL2-incompatible shader
+# constructs (depth-texture sampling, `textureLoad` on shadow samplers,
+# etc.) at unit-test time without spinning up a real GL context.
+naga           = { version = "29", features = ["wgsl-in", "glsl-out"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies.wgpu]
 version = "29"

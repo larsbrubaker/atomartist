@@ -46,8 +46,12 @@ struct U {
 };
 
 @group(0) @binding(0) var<uniform> u: U;
-@group(0) @binding(1) var opaque_depth: texture_depth_2d;
-@group(0) @binding(2) var depth_sampler: sampler;
+// `opaque_depth_color` is the R32Float mirror of the opaque depth
+// attachment populated by the scene / bed pipelines. We sample it
+// via `textureLoad` (no sampler needed) because Naga's WebGL2
+// backend can't load directly from `texture_depth_2d` — see the
+// long-form rationale in `scene_renderer::opaque_shaders`.
+@group(0) @binding(1) var opaque_depth_color: texture_2d<f32>;
 
 struct VOut {
     @builtin(position) clip: vec4<f32>,
@@ -69,12 +73,8 @@ const PEEL_BIAS: f32 = 1e-3;
 
 @fragment
 fn fs(in: VOut) -> @location(0) vec4<f32> {
-    // `textureLoad` on `texture_depth_2d` doesn't translate to GLSL
-    // (WebGL2 backend), so we sample with a nearest-filter sampler at
-    // the fragment-center UV instead — bit-identical result. WGSL
-    // requires the level argument on depth textures to be integer.
-    let uv = in.clip.xy / u.resolution.xy;
-    let opaque_z = textureSampleLevel(opaque_depth, depth_sampler, uv, 0i);
+    let pixel = vec2<i32>(clamp(in.clip.xy, vec2<f32>(0.0), u.resolution.xy - vec2<f32>(1.0)));
+    let opaque_z = textureLoad(opaque_depth_color, pixel, 0).r;
     if (opaque_z < in.clip.z - PEEL_BIAS) {
         discard;
     }
@@ -101,9 +101,11 @@ struct U {
 };
 
 @group(0) @binding(0) var<uniform> u: U;
-@group(0) @binding(1) var opaque_depth: texture_depth_2d;
+// Same R32Float mirror of the opaque depth attachment that the init
+// shader uses. `textureLoad` rather than sampling because Naga's
+// WebGL2 backend can't translate `textureLoad` on depth textures.
+@group(0) @binding(1) var opaque_depth_color: texture_2d<f32>;
 @group(0) @binding(2) var src_dual_depth: texture_2d<f32>;
-@group(0) @binding(3) var depth_sampler: sampler;
 
 struct VOut {
     @builtin(position) clip: vec4<f32>,
@@ -141,11 +143,7 @@ fn shade(world_normal: vec3<f32>) -> vec4<f32> {
 @fragment
 fn fs(in: VOut) -> PeelOut {
     let pixel = vec2<i32>(clamp(in.clip.xy, vec2<f32>(0.0), u.resolution.xy - vec2<f32>(1.0)));
-    // See `DUAL_DEPTH_INIT_SHADER`: `textureLoad` on depth textures
-    // doesn't translate to GLSL, so we sample via the nearest sampler
-    // (depth-texture variant requires integer mip level).
-    let uv = in.clip.xy / u.resolution.xy;
-    let opaque_z = textureSampleLevel(opaque_depth, depth_sampler, uv, 0i);
+    let opaque_z = textureLoad(opaque_depth_color, pixel, 0).r;
     if (opaque_z < in.clip.z - PEEL_BIAS) {
         discard;
     }

@@ -459,11 +459,22 @@ fn build_bed_pipeline(
         fragment: Some(wgpu::FragmentState {
             module: &shader,
             entry_point: Some("fs"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: surface_format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
+            targets: &[
+                Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                }),
+                // Mirrors the bed plane's `clip.z` into the R32Float
+                // auxiliary depth attachment that the dual-peel chain
+                // samples. See `scene_renderer::opaque_shaders` for
+                // the design rationale.
+                Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::R32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::RED,
+                }),
+            ],
             compilation_options: Default::default(),
         }),
         multiview_mask: None,
