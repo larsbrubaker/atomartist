@@ -69,8 +69,12 @@ const PEEL_BIAS: f32 = 1e-3;
 
 @fragment
 fn fs(in: VOut) -> @location(0) vec4<f32> {
-    let pixel = vec2<i32>(clamp(in.clip.xy, vec2<f32>(0.0), u.resolution.xy - vec2<f32>(1.0)));
-    let opaque_z = textureLoad(opaque_depth, pixel, 0);
+    // `textureLoad` on `texture_depth_2d` doesn't translate to GLSL
+    // (WebGL2 backend), so we sample with a nearest-filter sampler at
+    // the fragment-center UV instead — bit-identical result. WGSL
+    // requires the level argument on depth textures to be integer.
+    let uv = in.clip.xy / u.resolution.xy;
+    let opaque_z = textureSampleLevel(opaque_depth, depth_sampler, uv, 0i);
     if (opaque_z < in.clip.z - PEEL_BIAS) {
         discard;
     }
@@ -137,7 +141,11 @@ fn shade(world_normal: vec3<f32>) -> vec4<f32> {
 @fragment
 fn fs(in: VOut) -> PeelOut {
     let pixel = vec2<i32>(clamp(in.clip.xy, vec2<f32>(0.0), u.resolution.xy - vec2<f32>(1.0)));
-    let opaque_z = textureLoad(opaque_depth, pixel, 0);
+    // See `DUAL_DEPTH_INIT_SHADER`: `textureLoad` on depth textures
+    // doesn't translate to GLSL, so we sample via the nearest sampler
+    // (depth-texture variant requires integer mip level).
+    let uv = in.clip.xy / u.resolution.xy;
+    let opaque_z = textureSampleLevel(opaque_depth, depth_sampler, uv, 0i);
     if (opaque_z < in.clip.z - PEEL_BIAS) {
         discard;
     }
