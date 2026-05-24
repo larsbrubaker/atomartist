@@ -46,7 +46,7 @@ mod viewport_widget_helpers;
 use viewport_widget_helpers::{
     cross3, dot3, mouse_button_bit, normalize3, project, stroke_circle, sub3, vert_pos,
 };
-use crate::scene_renderer::{RenderStyle, WgpuSceneRenderer};
+use crate::scene_renderer::{GizmoLineSet, RenderStyle, WgpuSceneRenderer};
 
 /// Default left-mouse-drag behaviour, picked by the radio cluster of
 /// buttons around the tumble cube.  Mirrors MatterCAD's
@@ -544,13 +544,12 @@ impl Viewport3dWidget {
     }
 }
 
-/// Pick an outline thickness scaled to the model's bounding-box extent so
-/// the silhouette reads at any model size without micro-tuning per scene.
-/// 0.6% of the largest dimension is enough to be visible from typical
-/// orbit distances, small enough not to obscure surface detail.
-fn estimate_outline_width(mesh: &MeshGL) -> f32 {
+/// Axis-aligned bounding box of a mesh, returned as `(min, max)`.
+/// `None` when the mesh has no usable vertex data — caller should
+/// fall back to a sensible default.
+fn mesh_aabb(mesh: &MeshGL) -> Option<([f32; 3], [f32; 3])> {
     if mesh.num_prop == 0 || mesh.vert_properties.is_empty() {
-        return 0.05;
+        return None;
     }
     let stride = mesh.num_prop as usize;
     let n = mesh.vert_properties.len() / stride;
@@ -564,8 +563,19 @@ fn estimate_outline_width(mesh: &MeshGL) -> f32 {
         }
     }
     if !mn[0].is_finite() || !mx[0].is_finite() {
-        return 0.05;
+        return None;
     }
+    Some((mn, mx))
+}
+
+/// Pick an outline thickness scaled to the model's bounding-box extent so
+/// the silhouette reads at any model size without micro-tuning per scene.
+/// 0.6% of the largest dimension is enough to be visible from typical
+/// orbit distances, small enough not to obscure surface detail.
+fn estimate_outline_width(mesh: &MeshGL) -> f32 {
+    let Some((mn, mx)) = mesh_aabb(mesh) else {
+        return 0.05;
+    };
     let dx = mx[0] - mn[0];
     let dy = mx[1] - mn[1];
     let dz = mx[2] - mn[2];
@@ -677,19 +687,40 @@ impl Widget for Viewport3dWidget {
         // bounds in `last_mesh_ptr`/grid_y; recompute briefly here from
         // the live mesh.
         let outline_width = mesh_opt.as_deref().map(estimate_outline_width).unwrap_or(0.05);
+        // Bounds-gizmo geometry: emit a 12-edge wireframe AABB around
+        // the displayed mesh whenever the user has it selected. The
+        // host populates `gizmo_lines` each frame; the renderer's
+        // fingerprint hashes this list so accumulation restarts when
+        // bounds change.
+        let bounds_aabb =
+            mesh_opt.as_deref().and_then(mesh_aabb).filter(|_| selection_active);
         {
             let mut s = self.scene.borrow_mut();
             s.mesh = mesh_opt.clone();
             s.camera = self.cam();
             s.outline_enabled = selection_active;
             s.outline_width = outline_width;
-            // Theme-driven outline colour: warm orange against either
-            // dark or light backgrounds reads as "selected" without
-            // clashing with the model's surface tint.
+            s.gizmo_lines.clear();
+            if let Some((mn, mx)) = bounds_aabb {
+                let center = [
+                    (mn[0] + mx[0]) * 0.5,
+                    (mn[1] + mx[1]) * 0.5,
+                    (mn[2] + mx[2]) * 0.5,
+                ];
+                let size = [mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]];
+                s.gizmo_lines
+                    .push(GizmoLineSet::bounds_box(center, size, None));
+            }
+            // Theme-driven outline colour: NodeDesigner uses bright
+            // cyan-blue against dark backgrounds and a deeper blue
+            // against light backgrounds (see
+            // `selection-outline.js` outlineColor / outlineColorLight).
             s.outline_color = if dark {
-                [1.00, 0.65, 0.20, 1.0]
+                // 0x88ccff
+                [0.533, 0.800, 1.000, 1.0]
             } else {
-                [0.95, 0.50, 0.10, 1.0]
+                // 0x4477cc
+                [0.267, 0.467, 0.800, 1.0]
             };
             // Sync render style from app state so the picker beneath the
             // tumble cube takes effect on the next frame without any

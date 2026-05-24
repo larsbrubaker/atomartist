@@ -85,19 +85,33 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// Uniform layout for the dual-peel color pass. Same `mvp` /
-/// `resolution` as the init shader, plus a per-mesh `base_color`,
-/// `light_dir`, and `normal_mat` for the Blinn-Phong-ish lighting
-/// inherited from the opaque pass. Keeping lighting identical to the
-/// opaque shader keeps cross-layer colour consistency — a translucent
-/// fragment and the opaque scene behind it both shade the same way.
+/// Uniform layout for the dual-peel colour pass. Layout matches the
+/// opaque scene shader's `U` block field-for-field (see
+/// [`crate::scene_renderer::opaque_pass::Uniforms`]) so both shaders
+/// can share the same Rust struct — cross-layer colour consistency
+/// is preserved because a translucent fragment and the opaque scene
+/// behind it run identical Blinn-Phong math.
+///
+/// Port of NodeDesigner's `depth-peeling.js::generateFragmentShader`:
+/// view-space lighting via `proj`/`view` split, dual camera-fixed
+/// directional lights, configurable shininess, sRGB-encoded base
+/// colour.
 pub const DUAL_PEEL_COLOR_SHADER: &str = r#"
 struct U {
-    mvp: mat4x4<f32>,
-    normal_mat: mat4x4<f32>,
-    light_dir: vec4<f32>,
+    proj: mat4x4<f32>,
+    view: mat4x4<f32>,
+    light_dir0: vec4<f32>,
+    light_dir1: vec4<f32>,
+    light_diffuse0: vec4<f32>,
+    light_specular0: vec4<f32>,
+    light_ambient0: vec4<f32>,
+    light_diffuse1: vec4<f32>,
+    light_specular1: vec4<f32>,
+    global_ambient: vec4<f32>,
+    material_specular: vec4<f32>,
     base_color: vec4<f32>,
-    resolution: vec4<f32>, // xy = pixel size, zw = pad
+    params: vec4<f32>,     // x = shininess
+    resolution: vec4<f32>, // xy = pixel size
 };
 
 @group(0) @binding(0) var<uniform> u: U;
@@ -109,14 +123,15 @@ struct U {
 
 struct VOut {
     @builtin(position) clip: vec4<f32>,
-    @location(0) world_normal: vec3<f32>,
+    @location(0) view_pos: vec3<f32>,
 };
 
 @vertex
-fn vs(@location(0) pos: vec3<f32>, @location(1) normal: vec3<f32>) -> VOut {
+fn vs(@location(0) pos: vec3<f32>, @location(1) _normal: vec3<f32>) -> VOut {
     var o: VOut;
-    o.clip = u.mvp * vec4<f32>(pos, 1.0);
-    o.world_normal = (u.normal_mat * vec4<f32>(normal, 0.0)).xyz;
+    let view_pos4 = u.view * vec4<f32>(pos, 1.0);
+    o.view_pos = view_pos4.xyz;
+    o.clip = u.proj * view_pos4;
     return o;
 }
 
@@ -130,14 +145,42 @@ struct PeelOut {
 // rationale — sized for `Rgba16Float` dual-depth precision.
 const PEEL_BIAS: f32 = 1e-3;
 
-fn shade(world_normal: vec3<f32>) -> vec4<f32> {
-    let n = normalize(world_normal);
-    let l = normalize(u.light_dir.xyz);
-    let diff = max(dot(n, l), 0.0);
-    let fill = max(dot(n, vec3<f32>(-l.x, l.y * 0.4, -l.z)), 0.0) * 0.35;
-    let ambient = 0.18;
-    let lit = ambient + diff * 0.85 + fill;
-    return vec4<f32>(u.base_color.rgb * lit, u.base_color.a);
+fn srgb_to_linear(srgb: vec3<f32>) -> vec3<f32> {
+    let low = srgb / 12.92;
+    let high = pow((srgb + vec3<f32>(0.055)) / vec3<f32>(1.055), vec3<f32>(2.4));
+    return mix(low, high, step(vec3<f32>(0.04045), srgb));
+}
+
+fn shade(view_pos: vec3<f32>) -> vec4<f32> {
+    let base = srgb_to_linear(u.base_color.rgb);
+    let fdx = dpdx(view_pos);
+    let fdy = dpdy(view_pos);
+    let n = normalize(cross(fdx, fdy));
+    let v = normalize(-view_pos);
+    let shininess = max(u.params.x, 1.0);
+
+    let l0 = normalize(u.light_dir0.xyz);
+    let ndotl0 = max(dot(n, l0), 0.0);
+    let ambient0 = u.light_ambient0.rgb * base;
+    let diffuse0 = u.light_diffuse0.rgb * base * ndotl0;
+    let h0 = normalize(l0 + v);
+    let ndoth0 = max(dot(n, h0), 0.0);
+    let spec0_active = step(0.0001, ndotl0);
+    let specular0 = u.light_specular0.rgb * u.material_specular.rgb
+        * pow(ndoth0, shininess) * spec0_active;
+
+    let l1 = normalize(u.light_dir1.xyz);
+    let ndotl1 = max(dot(n, l1), 0.0);
+    let diffuse1 = u.light_diffuse1.rgb * base * ndotl1;
+    let h1 = normalize(l1 + v);
+    let ndoth1 = max(dot(n, h1), 0.0);
+    let spec1_active = step(0.0001, ndotl1);
+    let specular1 = u.light_specular1.rgb * u.material_specular.rgb
+        * pow(ndoth1, shininess) * spec1_active;
+
+    let global_amb = u.global_ambient.rgb * base;
+    let lit = global_amb + ambient0 + diffuse0 + specular0 + diffuse1 + specular1;
+    return vec4<f32>(lit, u.base_color.a);
 }
 
 @fragment
@@ -169,7 +212,7 @@ fn fs(in: VOut) -> PeelOut {
         return out;
     }
 
-    let shaded = shade(in.world_normal);
+    let shaded = shade(in.view_pos);
     if (abs(cur_z - front_z) <= PEEL_BIAS) {
         // Front-layer hit: premultiply (per MatterCAD's UnderBlend).
         out.front_color = vec4<f32>(shaded.rgb * shaded.a, shaded.a);

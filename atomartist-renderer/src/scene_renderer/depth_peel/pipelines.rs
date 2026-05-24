@@ -20,6 +20,7 @@
 //! entry point is [`DualPeelPipelines::execute_chain`].
 
 use bytemuck::{Pod, Zeroable};
+use glam::Mat4;
 
 use super::shaders::{
     DUAL_DEPTH_INIT_SHADER, DUAL_PEEL_COLOR_SHADER, DUAL_PEEL_RESOLVE_SHADER,
@@ -38,18 +39,13 @@ pub struct InitUniforms {
     pub resolution: [f32; 4],
 }
 
-/// Per-iteration uniform for the peel colour shader. `base_color` and
-/// `light_dir` keep the peeled mesh visually consistent with how the
-/// same mesh would have looked through the opaque pipeline.
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-pub struct PeelUniforms {
-    pub mvp: [f32; 16],
-    pub normal_mat: [f32; 16],
-    pub light_dir: [f32; 4],
-    pub base_color: [f32; 4],
-    pub resolution: [f32; 4],
-}
+/// Per-iteration uniform for the peel colour shader. Layout reuses
+/// the opaque scene shader's uniform set so a fragment peeled out
+/// of the dual-peel chain shades identically to how it would have
+/// shaded through the opaque pipeline. See
+/// [`crate::scene_renderer::opaque_pass::Uniforms`] for the field
+/// breakdown.
+pub use crate::scene_renderer::opaque_pass::Uniforms as PeelUniforms;
 
 // Match `super::DUAL_DEPTH_FORMAT`. Half-float is the largest format
 // `wgpu` guarantees `Max`-blend support on without a backend-specific
@@ -166,9 +162,15 @@ impl DualPeelPipelines {
     ) {
         // Init uniforms reuse the MVP + resolution slice of the peel
         // uniforms — keeps the shader bindings cheap and avoids a
-        // second per-frame write.
+        // second per-frame write. The peel uniforms hold `proj` and
+        // `view` separately so the colour shader can pass view-space
+        // position through; the init shader still wants a combined
+        // MVP, so we fold them here.
+        let proj = Mat4::from_cols_array(&peel_uniforms.proj);
+        let view = Mat4::from_cols_array(&peel_uniforms.view);
+        let mvp = (proj * view).to_cols_array();
         let init_uniforms = InitUniforms {
-            mvp: peel_uniforms.mvp,
+            mvp,
             resolution: peel_uniforms.resolution,
         };
         queue.write_buffer(&self.init_ub, 0, bytemuck::bytes_of(&init_uniforms));

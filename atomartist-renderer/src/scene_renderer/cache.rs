@@ -36,6 +36,7 @@
 //! * World positions (bed Z, outline width): `1e-5` — same reasoning
 //!   as the camera matrices.
 
+use super::gizmo_pass::hash_gizmos;
 use super::{RenderStyle, WgpuSceneRenderer};
 
 /// All-encompassing fingerprint of the 3-D scene state. Two frames
@@ -70,7 +71,7 @@ pub struct SceneFingerprint {
     /// Discriminant of [`RenderStyle`] — picking a different style
     /// changes which passes draw the user mesh.
     render_style: u8,
-    /// Outline pass active (selection or `OutlineOnly` mode).
+    /// Selection outline pass active.
     outline_enabled: bool,
     /// Outline colour, packed to 8 bit per channel.
     outline_color_q: u32,
@@ -78,9 +79,26 @@ pub struct SceneFingerprint {
     outline_width_q: i32,
     /// Mesh base colour, packed to 8 bit per channel.
     base_color_q: u32,
-    /// Light direction, quantised. Three components — the shader
+    /// Light 0 direction, quantised. Three components — the shader
     /// renormalises, so we capture pre-normalisation values.
     light_dir_q: [i32; 3],
+    /// Light 1 direction, quantised.
+    light_dir1_q: [i32; 3],
+    /// Per-light diffuse / specular / ambient intensities (light 0)
+    /// and diffuse / specular (light 1), plus scene-wide ambient,
+    /// material specular tint, packed 8-bit-per-channel into `u32`s
+    /// the same way `base_color_q` is. Tweaks via the lighting debug
+    /// panel must invalidate accumulation, otherwise the panel won't
+    /// preview changes mid-frame.
+    light_diffuse0_q: u32,
+    light_specular0_q: u32,
+    light_ambient0_q: u32,
+    light_diffuse1_q: u32,
+    light_specular1_q: u32,
+    global_ambient_q: u32,
+    material_specular_q: u32,
+    /// Blinn-Phong shininess exponent, quantised.
+    shininess_q: i32,
     /// Bed grid line colour, packed to 8 bit per channel.
     grid_color_q: u32,
     /// Dark-mode flag — the bed renders inverted contact-shadow
@@ -90,6 +108,13 @@ pub struct SceneFingerprint {
     show_bed: bool,
     /// World Z (height) of the bed plane, quantised.
     bed_z_q: i32,
+    /// 64-bit hash of the renderer's `gizmo_lines` slice. Any
+    /// change to vertex positions, colours, matrices, or per-gizmo
+    /// flags rolls this and forces an accumulation restart so the
+    /// AA chain redraws against the new gizmo state. See
+    /// [`crate::scene_renderer::gizmo_pass::hash_gizmos`] for the
+    /// hashing details.
+    gizmo_hash: u64,
 }
 
 const FLOAT_Q: f32 = 1.0e4;
@@ -105,6 +130,7 @@ impl SceneFingerprint {
         } else {
             r.viewport_size.0 as f32 / r.viewport_size.1 as f32
         };
+        let to_rgba = |v: [f32; 3]| [v[0], v[1], v[2], 1.0];
         Self::from_inputs(SceneFingerprintInputs {
             view: r.camera.view_matrix(),
             proj: r.camera.projection_matrix(aspect),
@@ -120,10 +146,20 @@ impl SceneFingerprint {
             outline_width: r.outline_width,
             base_color: r.base_color,
             light_dir: r.light_dir,
+            light_dir1: r.light_dir1,
+            light_diffuse0: to_rgba(r.light_diffuse0),
+            light_specular0: to_rgba(r.light_specular0),
+            light_ambient0: to_rgba(r.light_ambient0),
+            light_diffuse1: to_rgba(r.light_diffuse1),
+            light_specular1: to_rgba(r.light_specular1),
+            global_ambient: to_rgba(r.global_ambient),
+            material_specular: to_rgba(r.material_specular),
+            shininess: r.shininess,
             grid_color: r.grid_line_color,
             grid_dark: r.grid_dark_mode,
             show_bed: r.draw_grid,
             bed_z: r.grid_z,
+            gizmo_hash: hash_gizmos(&r.gizmo_lines),
         })
     }
 
@@ -143,10 +179,24 @@ impl SceneFingerprint {
                 quantise(i.light_dir[1], FLOAT_Q),
                 quantise(i.light_dir[2], FLOAT_Q),
             ],
+            light_dir1_q: [
+                quantise(i.light_dir1[0], FLOAT_Q),
+                quantise(i.light_dir1[1], FLOAT_Q),
+                quantise(i.light_dir1[2], FLOAT_Q),
+            ],
+            light_diffuse0_q: pack_color(i.light_diffuse0),
+            light_specular0_q: pack_color(i.light_specular0),
+            light_ambient0_q: pack_color(i.light_ambient0),
+            light_diffuse1_q: pack_color(i.light_diffuse1),
+            light_specular1_q: pack_color(i.light_specular1),
+            global_ambient_q: pack_color(i.global_ambient),
+            material_specular_q: pack_color(i.material_specular),
+            shininess_q: quantise(i.shininess, FLOAT_Q),
             grid_color_q: pack_color(i.grid_color),
             grid_dark: i.grid_dark,
             show_bed: i.show_bed,
             bed_z_q: quantise(i.bed_z, FINE_FLOAT_Q),
+            gizmo_hash: i.gizmo_hash,
         }
     }
 }
@@ -166,10 +216,23 @@ pub struct SceneFingerprintInputs {
     pub outline_width: f32,
     pub base_color: [f32; 4],
     pub light_dir: [f32; 3],
+    pub light_dir1: [f32; 3],
+    /// Light 0/1 colour intensities packed as RGBA — A is ignored by
+    /// the fingerprint but the field stays `[f32; 4]` so the
+    /// `pack_color` helper can be reused.
+    pub light_diffuse0: [f32; 4],
+    pub light_specular0: [f32; 4],
+    pub light_ambient0: [f32; 4],
+    pub light_diffuse1: [f32; 4],
+    pub light_specular1: [f32; 4],
+    pub global_ambient: [f32; 4],
+    pub material_specular: [f32; 4],
+    pub shininess: f32,
     pub grid_color: [f32; 4],
     pub grid_dark: bool,
     pub show_bed: bool,
     pub bed_z: f32,
+    pub gizmo_hash: u64,
 }
 
 impl SceneFingerprintInputs {
@@ -188,11 +251,21 @@ impl SceneFingerprintInputs {
             outline_color: [1.0, 0.55, 0.10, 1.0],
             outline_width: 0.05,
             base_color: [0.62, 0.66, 0.78, 1.0],
-            light_dir: [0.4, 0.7, 0.6],
+            light_dir: [-0.577_350_3, -0.577_350_3, 0.577_350_3],
+            light_dir1: [0.577_350_3, 0.577_350_3, 0.577_350_3],
+            light_diffuse0: [0.7, 0.7, 0.7, 1.0],
+            light_specular0: [0.05, 0.05, 0.05, 1.0],
+            light_ambient0: [0.0, 0.0, 0.0, 1.0],
+            light_diffuse1: [0.5, 0.5, 0.5, 1.0],
+            light_specular1: [0.05, 0.05, 0.05, 1.0],
+            global_ambient: [0.2, 0.2, 0.2, 1.0],
+            material_specular: [1.0, 1.0, 1.0, 1.0],
+            shininess: 30.0,
             grid_color: [0.55, 0.58, 0.66, 0.7],
             grid_dark: false,
             show_bed: true,
             bed_z: 0.0,
+            gizmo_hash: 0,
         }
     }
 }
@@ -233,8 +306,7 @@ fn pack_color(c: [f32; 4]) -> u32 {
 fn render_style_id(s: RenderStyle) -> u8 {
     match s {
         RenderStyle::Shaded => 0,
-        RenderStyle::OutlineOnly => 1,
-        RenderStyle::Wireframe => 2,
+        RenderStyle::Wireframe => 1,
     }
 }
 
@@ -379,13 +451,29 @@ mod tests {
 
     /// Different render styles must produce different fingerprints.
     /// Otherwise the cached output for `Shaded` would survive a switch
-    /// to `OutlineOnly` and the user would see stale content.
+    /// to `Wireframe` and the user would see stale content.
     #[test]
     fn render_style_change_invalidates() {
         let mut a = SceneFingerprintInputs::baseline_for_tests();
         a.render_style = RenderStyle::Shaded;
         let mut b = SceneFingerprintInputs::baseline_for_tests();
-        b.render_style = RenderStyle::OutlineOnly;
+        b.render_style = RenderStyle::Wireframe;
+        assert_ne!(
+            SceneFingerprint::from_inputs(a),
+            SceneFingerprint::from_inputs(b),
+        );
+    }
+
+    /// A gizmo state change (different `gizmo_hash`) must invalidate
+    /// the fingerprint — otherwise resizing the bounds box or
+    /// showing/hiding a control gizmo would leave the AA chain
+    /// frozen on the previous frame.
+    #[test]
+    fn gizmo_state_change_invalidates() {
+        let mut a = SceneFingerprintInputs::baseline_for_tests();
+        a.gizmo_hash = 0;
+        let mut b = SceneFingerprintInputs::baseline_for_tests();
+        b.gizmo_hash = 0xDEAD_BEEF_CAFE_BABE;
         assert_ne!(
             SceneFingerprint::from_inputs(a),
             SceneFingerprint::from_inputs(b),

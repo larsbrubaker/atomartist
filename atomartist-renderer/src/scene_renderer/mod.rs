@@ -51,8 +51,10 @@ use crate::camera::OrbitCamera;
 pub mod accumulation;
 pub mod cache;
 pub mod depth_peel;
+pub mod gizmo_pass;
 pub mod opaque_pass;
 mod opaque_shaders;
+pub mod post_outline;
 mod timings;
 mod util;
 
@@ -66,7 +68,10 @@ use accumulation::{
 use cache::{handle_cache_hit, CacheOutcome, SceneFingerprint};
 use depth_peel::pipelines::{DualPeelPipelines, MeshHandles, PeelUniforms};
 use depth_peel::{iteration_count, DualPeelTargets, DEFAULT_LAYERS};
-use opaque_pass::{OpaquePipelines, OutlineUniforms, Uniforms, Vertex};
+use gizmo_pass::{GizmoLinePipelines, GizmoLineUniforms};
+pub use gizmo_pass::GizmoLineSet;
+use opaque_pass::{OpaquePipelines, Uniforms, Vertex};
+use post_outline::{OutlinePipelines, OutlineTargets, OutlineUniforms};
 
 /// Render-style picker beneath the tumble cube.  Drives the surface
 /// pipeline used by [`WgpuSceneRenderer`] so the user can compare a
@@ -77,9 +82,6 @@ use opaque_pass::{OpaquePipelines, OutlineUniforms, Uniforms, Vertex};
 pub enum RenderStyle {
     /// Default Blinn-Phong shaded surface.
     Shaded,
-    /// Hide the filled surface; only the inverted-hull silhouette draws.
-    /// Useful for inspecting outline silhouettes / boundary fairing.
-    OutlineOnly,
     /// Software wireframe — falls back to the existing CPU edge path.
     /// Disables the wgpu fill pass so the 2-D viewport draws the
     /// per-triangle edges from `Viewport3dWidget::draw_mesh`.
@@ -166,6 +168,25 @@ struct GpuState {
     /// no depth) so the existing `MsaaFramebuffer::blit_to` path
     /// keeps working for the final surface composite.
     output_fb: Option<MsaaFramebuffer>,
+
+    /// Pipelines + uniforms for the Blender-style post-process
+    /// selection outline. Built once during `ensure_state`; runs
+    /// against `output_fb` after the accumulation copy. See
+    /// [`crate::scene_renderer::post_outline`] for the per-pass
+    /// rationale.
+    post_outline: OutlinePipelines,
+
+    /// Textures the outline chain renders into: ID mask, hardware
+    /// depth for the ID prepass, and an `R32Float` mirror of the
+    /// selected-mesh depth. Reallocated on resize via
+    /// [`OutlineTargets::ensure_size`].
+    outline_targets: Option<OutlineTargets>,
+
+    /// Solid + overlay line pipelines used by the gizmo pass. See
+    /// [`crate::scene_renderer::gizmo_pass`] for the rationale
+    /// behind the two-variant pattern (depth-tested solid + no-depth
+    /// alpha-blended overlay) shared across all gizmos.
+    gizmo_pipelines: GizmoLinePipelines,
 }
 
 pub struct WgpuSceneRenderer {
@@ -174,7 +195,37 @@ pub struct WgpuSceneRenderer {
     pub mesh: Option<Arc<MeshGL>>,
     pub viewport_size: (u32, u32),
     pub base_color: [f32; 4],
+    /// Light 0 (key light) direction — used as a *view-space* (camera-
+    /// fixed) directional light, matching NodeDesigner's
+    /// `lightDir0` uniform default of `(-1, -1, 1).normalize()`.
     pub light_dir: [f32; 3],
+    /// Light 1 (fill light) direction. Camera-fixed; NodeDesigner
+    /// default `(1, 1, 1).normalize()`.
+    pub light_dir1: [f32; 3],
+    /// Per-channel diffuse intensity of light 0 (NodeDesigner default
+    /// `(0.7, 0.7, 0.7)`).
+    pub light_diffuse0: [f32; 3],
+    /// Per-channel specular intensity of light 0 (NodeDesigner default
+    /// `(0.05, 0.05, 0.05)`).
+    pub light_specular0: [f32; 3],
+    /// Per-channel ambient intensity attached to light 0 (NodeDesigner
+    /// keeps this at zero and uses `global_ambient` for the scene-wide
+    /// floor).
+    pub light_ambient0: [f32; 3],
+    /// Per-channel diffuse intensity of light 1 (NodeDesigner default
+    /// `(0.5, 0.5, 0.5)`).
+    pub light_diffuse1: [f32; 3],
+    /// Per-channel specular intensity of light 1 (NodeDesigner default
+    /// `(0.05, 0.05, 0.05)`).
+    pub light_specular1: [f32; 3],
+    /// Per-channel scene-wide ambient (NodeDesigner default
+    /// `(0.2, 0.2, 0.2)`).
+    pub global_ambient: [f32; 3],
+    /// Per-channel material specular tint (NodeDesigner default
+    /// `(1.0, 1.0, 1.0)` — lets per-light specular control intensity).
+    pub material_specular: [f32; 3],
+    /// Blinn-Phong shininess exponent (NodeDesigner default `30.0`).
+    pub shininess: f32,
     /// Floor-grid line color — caller adapts to the active theme.
     /// Forwarded to [`crate::bed::BedRenderer::set_line_color`] each
     /// frame; cheap when unchanged.
@@ -204,6 +255,14 @@ pub struct WgpuSceneRenderer {
     /// branch in the main pass.
     pub render_style: RenderStyle,
 
+    /// Gizmo line sets — the host populates this each frame with one
+    /// entry per visible gizmo (bounds box, Z control, XY control,
+    /// rotate corner, measurement overlay). Each entry carries its
+    /// own vertices + colour + transform; see [`GizmoLineSet`] for
+    /// the field-by-field breakdown. Empty by default — gizmos are
+    /// pushed by viewport code in response to selection changes.
+    pub gizmo_lines: Vec<GizmoLineSet>,
+
     /// Progressive-AA sample index. Bumped each frame that the chain
     /// runs and clamped at [`MAX_SAMPLES`]; reset to 0 on a scene
     /// fingerprint mismatch (see [`crate::scene_renderer::cache`]).
@@ -228,7 +287,18 @@ impl WgpuSceneRenderer {
             mesh: None,
             viewport_size: (0, 0),
             base_color: [0.62, 0.66, 0.78, 1.0],
-            light_dir: [0.4, 0.7, 0.6],
+            // NodeDesigner `lightDir0 = (-1, -1, 1).normalize()`.
+            light_dir: [-0.577_350_3, -0.577_350_3, 0.577_350_3],
+            // NodeDesigner `lightDir1 = (1, 1, 1).normalize()`.
+            light_dir1: [0.577_350_3, 0.577_350_3, 0.577_350_3],
+            light_diffuse0: [0.7, 0.7, 0.7],
+            light_specular0: [0.05, 0.05, 0.05],
+            light_ambient0: [0.0, 0.0, 0.0],
+            light_diffuse1: [0.5, 0.5, 0.5],
+            light_specular1: [0.05, 0.05, 0.05],
+            global_ambient: [0.2, 0.2, 0.2],
+            material_specular: [1.0, 1.0, 1.0],
+            shininess: 30.0,
             grid_line_color: [0.55, 0.58, 0.66, 0.7],
             grid_dark_mode: false,
             draw_grid: true,
@@ -237,6 +307,7 @@ impl WgpuSceneRenderer {
             outline_color: [1.0, 0.55, 0.10, 1.0],
             outline_width: 0.05,
             render_style: RenderStyle::Shaded,
+            gizmo_lines: Vec::new(),
             sample_count: 0,
             accum_read: 0,
             last_fingerprint: None,
@@ -273,6 +344,23 @@ impl WgpuSceneRenderer {
         );
         bed.set_dark_mode(self.grid_dark_mode);
 
+        // Post-process outline writes into the per-sample HDR target
+        // (`accum_targets.sample_view`) so it lives inside the
+        // jittered sample stream and gets averaged across 16 Halton
+        // offsets. That target's format is `SAMPLE_FORMAT`
+        // (Rgba16Float), not the surface format.
+        let post_outline = OutlinePipelines::new(device, SAMPLE_FORMAT);
+
+        // Gizmo line pipelines target the same per-sample HDR view
+        // (so gizmos AA-smooth with the rest of the scene) and depth-
+        // test the solid variant against `scene_depth` (the opaque
+        // pass's depth attachment).
+        let gizmo_pipelines = GizmoLinePipelines::new(
+            device,
+            SAMPLE_FORMAT,
+            wgpu::TextureFormat::Depth32Float,
+        );
+
         self.state = Some(GpuState {
             surface_format,
             opaque,
@@ -289,6 +377,9 @@ impl WgpuSceneRenderer {
             peel_targets: None,
             accum_targets: None,
             output_fb: None,
+            post_outline,
+            outline_targets: None,
+            gizmo_pipelines,
         });
     }
 
@@ -341,26 +432,20 @@ impl WgpuSceneRenderer {
                 ));
             }
         }
+        match &mut s.outline_targets {
+            Some(t) => t.ensure_size(device, w, h),
+            None => s.outline_targets = Some(OutlineTargets::new(device, w, h)),
+        }
     }
 
-    /// Compute the bed-quad's render-time Z, slightly nudged away
-    /// from the camera so the bed never Z-fights with model geometry
-    /// that rests at `grid_z`. Port of NodeDesigner's `three-viewer`
-    /// camera-distance offset: at typical zoom the offset is a few
-    /// thousandths of a world unit — invisible to the eye but well
-    /// above depth-buffer precision noise.
-    ///
-    /// The bed's depth contribution is driven by the bed shader's
-    /// `alphaTest = 0.01` discard — fully-transparent texels discard
-    /// (no depth write) while grid-line texels and the soft contact-
-    /// shadow halo both write depth. Translucent geometry above the
-    /// bed therefore peels through the empty grid cells correctly,
-    /// while still being occluded by the bed surface and its shadow.
+    /// Bed-quad render-time Z. Temporarily locked to literal `0.0`
+    /// while the camera-distance-based offset is reworked — the
+    /// previous formula moved the bed in the wrong direction and
+    /// with too large a magnitude under some camera orientations.
+    /// `grid_z` is intentionally ignored too, so any stale writes
+    /// can't reintroduce motion until the new formula lands.
     fn bed_render_z(&self) -> f32 {
-        let eye_z = self.camera.eye()[2];
-        let dist = (eye_z - self.grid_z).abs();
-        let sign = if eye_z >= self.grid_z { -1.0 } else { 1.0 };
-        self.grid_z + sign * dist * 0.004
+        0.0
     }
 
     /// Re-upload mesh buffers if the mesh changed since the last frame.
@@ -548,17 +633,32 @@ impl WgpuCustomRender for WgpuSceneRenderer {
         apply_jitter_to_proj(&mut proj_arr, jx, jy, fb_w as f32, fb_h as f32);
         let jittered_proj = Mat4::from_cols_array(&proj_arr);
         let mvp = (jittered_proj * view).to_cols_array();
-        let mut normal_mat = [0.0f32; 16];
-        normal_mat[0] = 1.0;
-        normal_mat[5] = 1.0;
-        normal_mat[10] = 1.0;
-        normal_mat[15] = 1.0;
-        let l = normalize3(self.light_dir);
+        let jittered_proj_arr = jittered_proj.to_cols_array();
+        let view_arr = view.to_cols_array();
+        let l0 = normalize3(self.light_dir);
+        let l1 = normalize3(self.light_dir1);
+        let to_vec4 = |v: [f32; 3]| [v[0], v[1], v[2], 0.0];
+        // Shading uniforms — shared between the opaque scene pipeline
+        // and the dual-peel colour pipeline so a peeled fragment shades
+        // identically to how it would have shaded through the opaque
+        // pass. Layout mirrors NodeDesigner's `createDepthPeelMaterial`
+        // uniform set (two view-space directional lights, configurable
+        // shininess, sRGB-encoded base colour).
         let uniforms = Uniforms {
-            mvp,
-            normal_mat,
-            light_dir: [l[0], l[1], l[2], 0.0],
+            proj: jittered_proj_arr,
+            view: view_arr,
+            light_dir0: to_vec4(l0),
+            light_dir1: to_vec4(l1),
+            light_diffuse0: to_vec4(self.light_diffuse0),
+            light_specular0: to_vec4(self.light_specular0),
+            light_ambient0: to_vec4(self.light_ambient0),
+            light_diffuse1: to_vec4(self.light_diffuse1),
+            light_specular1: to_vec4(self.light_specular1),
+            global_ambient: to_vec4(self.global_ambient),
+            material_specular: to_vec4(self.material_specular),
             base_color: self.base_color,
+            params: [self.shininess, 0.0, 0.0, 0.0],
+            resolution: [fb_w as f32, fb_h as f32, 0.0, 0.0],
         };
 
         s.opaque.write_scene_uniforms(ctx.queue, &uniforms);
@@ -586,20 +686,21 @@ impl WgpuCustomRender for WgpuSceneRenderer {
                 ctx.encoder,
                 mesh_ref,
                 s.mesh_ptr as u64,
-                self.grid_z,
+                // Locked to 0 alongside `bed_render_z` while the
+                // bed-Z offset is reworked. Keeps the shadow caster's
+                // ortho aimed at world z=0 so the silhouette stays put.
+                0.0,
             );
         }
         let bed_composite_ms = elapsed_ms(t_bed_composite);
 
         // ── Pass 1: opaque scene — bed + mesh-depth-only + outline ─────────
-        // Bed draws colour + depth, the mesh writes *only* depth (so the
-        // outline pass can rim-test against it without the mesh's
-        // colour landing in scene_color), and the outline writes
-        // colour. Mesh colour comes from the dual-peel chain below. The
-        // scene-depth attachment is `STORE`d for the peel chain to
-        // sample.
+        // Bed draws colour + depth, the mesh writes *only* depth (so
+        // the dual-peel chain can rim-test against it without the
+        // mesh's colour landing in scene_color). Mesh colour comes
+        // from the dual-peel chain below. The scene-depth attachment
+        // is `STORE`d for the peel chain to sample.
         let draw_surface = self.render_style == RenderStyle::Shaded;
-        let outline_force_on = self.render_style == RenderStyle::OutlineOnly;
         {
             let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("atomartist scene opaque"),
@@ -656,26 +757,14 @@ impl WgpuCustomRender for WgpuSceneRenderer {
                 s.bed.draw_bed(ctx.queue, &mut pass, mvp, bed_z);
             }
 
-            // `RenderStyle::Shaded` and `OutlineOnly` populate the mesh's
-            // depth so the outline can rim-test against it.
-            // `Wireframe` skips both passes (the wireframe is drawn by
-            // the host widget at the 2-D layer).
-            let render_mesh = draw_surface || outline_force_on;
+            // `RenderStyle::Shaded` populates the mesh's depth so the
+            // dual-peel chain has something to discard against.
+            // `Wireframe` skips this — the host widget draws the
+            // wireframe at the 2-D layer instead.
             if let (Some(vbuf), Some(ibuf)) = (&s.vbuf, &s.ibuf) {
-                if s.index_count > 0 && render_mesh {
+                if s.index_count > 0 && draw_surface {
                     s.opaque
                         .draw_depth_only(&mut pass, vbuf, ibuf, s.index_count);
-
-                    if (self.outline_enabled || outline_force_on) && self.outline_width > 0.0 {
-                        let outline_uniforms = OutlineUniforms {
-                            mvp,
-                            color: self.outline_color,
-                            width: [self.outline_width, 0.0, 0.0, 0.0],
-                        };
-                        s.opaque.write_outline_uniforms(ctx.queue, &outline_uniforms);
-                        s.opaque
-                            .draw_outline(&mut pass, vbuf, ibuf, s.index_count);
-                    }
                 }
             }
         }
@@ -700,13 +789,10 @@ impl WgpuCustomRender for WgpuSceneRenderer {
         } else {
             None
         };
-        let peel_uniforms = PeelUniforms {
-            mvp,
-            normal_mat,
-            light_dir: [l[0], l[1], l[2], 0.0],
-            base_color: self.base_color,
-            resolution: [fb_w as f32, fb_h as f32, 0.0, 0.0],
-        };
+        // PeelUniforms is a type alias for the shared shading uniform
+        // struct — reuse the value computed above so the peel chain
+        // sees the exact same light setup as the opaque pass.
+        let peel_uniforms: PeelUniforms = uniforms;
         let iterations = iteration_count(DEFAULT_LAYERS as i32);
         s.dual_peel.execute_chain(
             ctx.device,
@@ -727,6 +813,261 @@ impl WgpuCustomRender for WgpuSceneRenderer {
             iterations,
         );
         let peel_ms = elapsed_ms(t_peel);
+
+        // ── Pass 2.5: post-process selection outline ─────────────────────
+        // Blender-style edge-detect outline rendered into the per-sample
+        // HDR target (`accum_targets.sample_view`) AFTER the dual-peel
+        // resolve but BEFORE the accumulation blend folds the sample
+        // into the running average. Running pre-jitter means the
+        // outline gets averaged across 16 jittered Halton offsets, so
+        // the rim anti-aliases the same way the rest of the scene
+        // does instead of staying a crunchy 1-pixel boundary.
+        //
+        // The ID prepass uses the same jittered MVP as the opaque
+        // pass, so each sample writes the outline at the matching
+        // sub-pixel offset.
+        let want_outline = self.outline_enabled
+            && self.render_style == RenderStyle::Shaded
+            && s.index_count > 0;
+        if want_outline {
+            if let (Some(vbuf), Some(ibuf), Some(outline_targets)) =
+                (&s.vbuf, &s.ibuf, &s.outline_targets)
+            {
+                let outline_u = OutlineUniforms {
+                    mvp,
+                    outline_color: self.outline_color,
+                    resolution: [fb_w as f32, fb_h as f32, 0.0, 0.0],
+                    // x = outline width in texels (NodeDesigner default
+                    // 2.0). y = occluded-alpha (NodeDesigner default
+                    // 0.35).
+                    params: [self.outline_width.max(1.0), 0.35, 0.0, 0.0],
+                };
+                s.post_outline.write_uniforms(ctx.queue, &outline_u);
+
+                // ID prepass — write selected mesh into id_mask +
+                // selected_depth. Clear id_mask to 0 (=unselected) and
+                // selected_depth to 1.0 (= far plane, so the edge
+                // shader's `min` over neighbours picks real depth
+                // only where the prepass actually wrote).
+                {
+                    let mut pass =
+                        ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("atomartist outline id prepass"),
+                            color_attachments: &[
+                                Some(wgpu::RenderPassColorAttachment {
+                                    view: &outline_targets.id_mask_view,
+                                    resolve_target: None,
+                                    depth_slice: None,
+                                    ops: wgpu::Operations {
+                                        load: wgpu::LoadOp::Clear(
+                                            wgpu::Color::TRANSPARENT,
+                                        ),
+                                        store: wgpu::StoreOp::Store,
+                                    },
+                                }),
+                                Some(wgpu::RenderPassColorAttachment {
+                                    view: &outline_targets.selected_depth_view,
+                                    resolve_target: None,
+                                    depth_slice: None,
+                                    ops: wgpu::Operations {
+                                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                                            r: 1.0,
+                                            g: 0.0,
+                                            b: 0.0,
+                                            a: 1.0,
+                                        }),
+                                        store: wgpu::StoreOp::Store,
+                                    },
+                                }),
+                            ],
+                            depth_stencil_attachment: Some(
+                                wgpu::RenderPassDepthStencilAttachment {
+                                    view: &outline_targets.id_depth_view,
+                                    depth_ops: Some(wgpu::Operations {
+                                        load: wgpu::LoadOp::Clear(1.0),
+                                        store: wgpu::StoreOp::Store,
+                                    }),
+                                    stencil_ops: None,
+                                },
+                            ),
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        });
+                    pass.set_viewport(0.0, 0.0, fb_w as f32, fb_h as f32, 0.0, 1.0);
+                    pass.set_scissor_rect(0, 0, fb_w, fb_h);
+                    pass.set_pipeline(&s.post_outline.id_pipeline);
+                    pass.set_bind_group(0, &s.post_outline.id_bg, &[]);
+                    pass.set_vertex_buffer(0, vbuf.slice(..));
+                    pass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..s.index_count, 0, 0..1);
+                }
+
+                // Edge-detect pass — composite outline into the HDR
+                // sample target so the next blend pass folds the
+                // outline + scene together. `LoadOp::Load` preserves
+                // the dual-peel resolve's content; the outline
+                // alpha-blends on top through the pipeline's OVER
+                // blend state.
+                let edge_bg = s.post_outline.build_edge_bind_group(
+                    ctx.device,
+                    &outline_targets.id_mask_view,
+                    &outline_targets.selected_depth_view,
+                    scene_depth_color_view,
+                );
+                {
+                    let mut pass =
+                        ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("atomartist outline edge detect"),
+                            color_attachments: &[Some(
+                                wgpu::RenderPassColorAttachment {
+                                    view: &accum_targets.sample_view,
+                                    resolve_target: None,
+                                    depth_slice: None,
+                                    ops: wgpu::Operations {
+                                        load: wgpu::LoadOp::Load,
+                                        store: wgpu::StoreOp::Store,
+                                    },
+                                },
+                            )],
+                            depth_stencil_attachment: None,
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        });
+                    pass.set_viewport(0.0, 0.0, fb_w as f32, fb_h as f32, 0.0, 1.0);
+                    pass.set_scissor_rect(0, 0, fb_w, fb_h);
+                    pass.set_pipeline(&s.post_outline.edge_pipeline);
+                    pass.set_bind_group(0, &edge_bg, &[]);
+                    pass.draw(0..3, 0..1);
+                }
+            }
+        }
+
+        // ── Pass 2.6: gizmos ─────────────────────────────────────────────
+        // Each entry in `self.gizmo_lines` becomes up to two draws —
+        // a depth-tested solid variant against `scene_depth` and an
+        // optional no-depth overlay variant for the occluded portion.
+        // Per-frame buffer allocations are cheap because gizmos are
+        // small (12 segments for the bounds box; control gizmos are
+        // similar). All draws target `accum_targets.sample_view` so
+        // they get folded into the Halton-jittered AA average.
+        for gizmo in &self.gizmo_lines {
+            if gizmo.vertices.is_empty()
+                || (!gizmo.draw_solid && !gizmo.draw_overlay)
+            {
+                continue;
+            }
+            let model = gizmo
+                .matrix
+                .as_ref()
+                .map(Mat4::from_cols_array)
+                .unwrap_or(Mat4::IDENTITY);
+            let gmvp = (jittered_proj * view * model).to_cols_array();
+            let vbuf = ctx
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("atomartist gizmo line vb"),
+                    contents: cast_slice(&gizmo.vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+            let vertex_count = gizmo.vertices.len() as u32;
+
+            if gizmo.draw_solid {
+                let u = GizmoLineUniforms {
+                    mvp: gmvp,
+                    color: gizmo.color,
+                };
+                let ub = ctx.device.create_buffer_init(
+                    &wgpu::util::BufferInitDescriptor {
+                        label: Some("atomartist gizmo line solid ub"),
+                        contents: bytemuck::bytes_of(&u),
+                        usage: wgpu::BufferUsages::UNIFORM,
+                    },
+                );
+                let bg = s.gizmo_pipelines.build_bind_group(ctx.device, &ub);
+                let mut pass =
+                    ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("atomartist gizmo solid"),
+                        color_attachments: &[Some(
+                            wgpu::RenderPassColorAttachment {
+                                view: &accum_targets.sample_view,
+                                resolve_target: None,
+                                depth_slice: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Load,
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            },
+                        )],
+                        depth_stencil_attachment: Some(
+                            wgpu::RenderPassDepthStencilAttachment {
+                                view: scene_depth_view,
+                                depth_ops: Some(wgpu::Operations {
+                                    load: wgpu::LoadOp::Load,
+                                    store: wgpu::StoreOp::Store,
+                                }),
+                                stencil_ops: None,
+                            },
+                        ),
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                pass.set_viewport(0.0, 0.0, fb_w as f32, fb_h as f32, 0.0, 1.0);
+                pass.set_scissor_rect(0, 0, fb_w, fb_h);
+                pass.set_pipeline(&s.gizmo_pipelines.solid_pipeline);
+                pass.set_bind_group(0, &bg, &[]);
+                pass.set_vertex_buffer(0, vbuf.slice(..));
+                pass.draw(0..vertex_count, 0..1);
+            }
+
+            if gizmo.draw_overlay {
+                let overlay_color = [
+                    gizmo.color[0],
+                    gizmo.color[1],
+                    gizmo.color[2],
+                    gizmo.color[3] * gizmo.occluded_alpha,
+                ];
+                let u = GizmoLineUniforms {
+                    mvp: gmvp,
+                    color: overlay_color,
+                };
+                let ub = ctx.device.create_buffer_init(
+                    &wgpu::util::BufferInitDescriptor {
+                        label: Some("atomartist gizmo line overlay ub"),
+                        contents: bytemuck::bytes_of(&u),
+                        usage: wgpu::BufferUsages::UNIFORM,
+                    },
+                );
+                let bg = s.gizmo_pipelines.build_bind_group(ctx.device, &ub);
+                let mut pass =
+                    ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("atomartist gizmo overlay"),
+                        color_attachments: &[Some(
+                            wgpu::RenderPassColorAttachment {
+                                view: &accum_targets.sample_view,
+                                resolve_target: None,
+                                depth_slice: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Load,
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            },
+                        )],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                pass.set_viewport(0.0, 0.0, fb_w as f32, fb_h as f32, 0.0, 1.0);
+                pass.set_scissor_rect(0, 0, fb_w, fb_h);
+                pass.set_pipeline(&s.gizmo_pipelines.overlay_pipeline);
+                pass.set_bind_group(0, &bg, &[]);
+                pass.set_vertex_buffer(0, vbuf.slice(..));
+                pass.draw(0..vertex_count, 0..1);
+            }
+        }
 
         // ── Pass 3: progressive accumulation ──────────────────────────────
         let t_accum = web_time::Instant::now();

@@ -562,17 +562,16 @@ fn add_bottom_row(overlay: &mut ViewportOverlay, state: &AppState, font: &Arc<Fo
     // Row 2 — Render-mode (Shader) dropdown. The trigger bubble
     // shows the icon for the currently-selected render style,
     // mirroring MatterCAD's `ViewStyleButton` which swaps its icon
-    // between view_shaded.png / view_outlines.png / view_polygons.png
-    // when the user picks a row.
+    // between view_shaded.png / view_polygons.png when the user
+    // picks a row.
     {
         let items = vec![
             DropdownItem { label: "Shaded".into(), value: RenderStyle::Shaded },
-            DropdownItem { label: "Outlines".into(), value: RenderStyle::OutlineOnly },
             DropdownItem { label: "Wireframe".into(), value: RenderStyle::Wireframe },
         ];
         let drop = CircularDropdown::new_with_image(
             IconKind::Shade,
-            Some(MatterCadIcon::ViewOutlines),
+            Some(MatterCadIcon::ViewShaded),
             items,
             state.render_style.clone(),
             font.clone(),
@@ -580,7 +579,6 @@ fn add_bottom_row(overlay: &mut ViewportOverlay, state: &AppState, font: &Arc<Fo
         .with_value_to_icon(|style: &RenderStyle| {
             Some(match style {
                 RenderStyle::Shaded => MatterCadIcon::ViewShaded,
-                RenderStyle::OutlineOnly => MatterCadIcon::ViewOutlines,
                 RenderStyle::Wireframe => MatterCadIcon::ViewPolygons,
             })
         });

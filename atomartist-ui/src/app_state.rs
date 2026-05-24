@@ -69,8 +69,7 @@ pub struct AppState {
     /// MatterCAD's `UserSettingsKey.PerspectiveMode`. Default `true`
     /// (perspective).
     pub perspective: Arc<Mutex<bool>>,
-    /// Render style picker beneath the tumble cube (Shaded / Wireframe /
-    /// OutlineOnly).
+    /// Render style picker beneath the tumble cube (Shaded / Wireframe).
     pub render_style: Arc<Mutex<RenderStyle>>,
     /// Bed-toggle button beneath the cube.  Drives the floor-grid pass
     /// in `WgpuSceneRenderer` so the user can hide the grid when it

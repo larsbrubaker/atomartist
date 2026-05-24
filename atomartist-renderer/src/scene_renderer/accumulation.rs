@@ -150,15 +150,25 @@ pub fn jitter_offset(sample_idx: u32) -> (f32, f32) {
 }
 
 /// Shift a column-major 4x4 projection matrix by a sub-pixel amount.
-/// Modifies `proj[8]` (column 2, row 0 — `m02`) and `proj[9]` (column
-/// 2, row 1 — `m12`) so the perspective divide turns the world-space
-/// view-ray shift into a screen-space pixel shift of `(jx, jy)`.
-/// Mirrors NodeDesigner's `applyJitter` element edits exactly.
+/// Equivalent to post-multiplying by an NDC-space translation
+/// `T(dx, dy, 0)` where `dx = 2·jx/w`, `dy = 2·jy/h`. That formulation
+/// works for **both** perspective and orthographic projections:
+/// row r of M becomes `M_r + d_r · M_3` where `M_3` is the perspective
+/// row. In perspective_rh (`m32 = -1, m33 = 0`) only `m02` / `m12`
+/// move (matches NodeDesigner's `applyJitter`); in orthographic_rh
+/// (`m32 = 0, m33 = 1`) only `m03` / `m13` move — adding to `m02` in
+/// ortho would have multiplied the shift by view-space z, giving a
+/// depth-dependent jitter instead of a constant pixel offset.
 pub fn apply_jitter_to_proj(proj: &mut [f32; 16], jx: f32, jy: f32, w: f32, h: f32) {
     let dx = 2.0 * jx / w.max(1.0);
     let dy = 2.0 * jy / h.max(1.0);
-    proj[8] += dx;
-    proj[9] += dy;
+    // Standard projection matrices have `m30 = m31 = 0`, so only the
+    // `m32` / `m33` columns of row 3 contribute. proj is column-major:
+    // row 3 lives at indices [3, 7, 11, 15], proj[11] = m32, proj[15] = m33.
+    proj[8] += dx * proj[11];
+    proj[12] += dx * proj[15];
+    proj[9] += dy * proj[11];
+    proj[13] += dy * proj[15];
 }
 
 #[repr(C)]
@@ -645,40 +655,145 @@ mod tests {
         }
     }
 
-    #[test]
-    fn apply_jitter_only_touches_m02_and_m12() {
-        let mut proj = [0.0_f32; 16];
-        for v in proj.iter_mut().enumerate() {
-            *v.1 = v.0 as f32; // unique sentinel per slot
+    /// Column-major 4x4 · column vector (length-4).
+    fn mul_mat4_vec4(m: &[f32; 16], v: [f32; 4]) -> [f32; 4] {
+        let mut out = [0.0_f32; 4];
+        for r in 0..4 {
+            out[r] = m[r] * v[0] + m[4 + r] * v[1] + m[8 + r] * v[2] + m[12 + r] * v[3];
         }
-        let original = proj;
-        apply_jitter_to_proj(&mut proj, 0.25, -0.125, 100.0, 50.0);
+        out
+    }
+
+    /// Project a view-space point through `proj`, return `(ndc.x, ndc.y)`.
+    fn project_to_ndc_xy(proj: &[f32; 16], view_pos: [f32; 3]) -> (f32, f32) {
+        let clip = mul_mat4_vec4(proj, [view_pos[0], view_pos[1], view_pos[2], 1.0]);
+        (clip[0] / clip[3], clip[1] / clip[3])
+    }
+
+    #[test]
+    fn apply_jitter_perspective_only_touches_m02_and_m12() {
+        // perspective_rh has m32 = -1, m33 = 0, so the unified jitter
+        // formula collapses to "modify m02 / m12 only" — same as
+        // NodeDesigner's `applyJitter`.
+        let proj_orig =
+            glam::Mat4::perspective_rh(60.0_f32.to_radians(), 16.0 / 9.0, 0.1, 1000.0)
+                .to_cols_array();
+        let mut proj = proj_orig;
+        apply_jitter_to_proj(&mut proj, 0.25, -0.125, 1920.0, 1080.0);
         for i in 0..16 {
             if i == 8 || i == 9 {
-                continue;
+                assert_ne!(proj[i], proj_orig[i], "m02/m12 should move in perspective");
+            } else {
+                assert_eq!(
+                    proj[i], proj_orig[i],
+                    "perspective jitter modified unexpected slot {}",
+                    i
+                );
             }
-            assert_eq!(
-                proj[i], original[i],
-                "apply_jitter modified slot {} (expected only 8 and 9 to change)",
-                i
+        }
+    }
+
+    #[test]
+    fn apply_jitter_orthographic_only_touches_m03_and_m13() {
+        // orthographic_rh has m32 = 0, m33 = 1, so the unified jitter
+        // formula collapses to "modify m03 / m13 (translation column)".
+        // Touching m02 / m12 in ortho would have produced a
+        // depth-dependent offset (the bug this fixes).
+        let proj_orig = glam::Mat4::orthographic_rh(-10.0, 10.0, -5.0, 5.0, 0.1, 1000.0)
+            .to_cols_array();
+        let mut proj = proj_orig;
+        apply_jitter_to_proj(&mut proj, 0.25, -0.125, 1920.0, 1080.0);
+        for i in 0..16 {
+            if i == 12 || i == 13 {
+                assert_ne!(proj[i], proj_orig[i], "m03/m13 should move in ortho");
+            } else {
+                assert_eq!(
+                    proj[i], proj_orig[i],
+                    "ortho jitter modified unexpected slot {}",
+                    i
+                );
+            }
+        }
+    }
+
+    /// Regression: in orthographic projection the jitter must shift
+    /// every projected point by the **same** NDC delta regardless of
+    /// view-space depth. The old code shifted m02 / m12 unconditionally;
+    /// in ortho that multiplied the offset by view-space z, so points
+    /// at different depths picked up different jitter amounts —
+    /// breaking SSAA in orthographic.
+    #[test]
+    fn ortho_jitter_produces_constant_ndc_shift_regardless_of_depth() {
+        let w = 1920.0;
+        let h = 1080.0;
+        let jx = 0.3;
+        let jy = -0.4;
+        let proj_orig = glam::Mat4::orthographic_rh(-10.0, 10.0, -5.0, 5.0, 0.1, 1000.0)
+            .to_cols_array();
+        let mut proj = proj_orig;
+        apply_jitter_to_proj(&mut proj, jx, jy, w, h);
+
+        let expected_dx = 2.0 * jx / w;
+        let expected_dy = 2.0 * jy / h;
+
+        // Sample several depths spanning the ortho frustum.
+        for z in [-1.0_f32, -10.0, -50.0, -200.0, -900.0] {
+            let p = [1.234, -0.567, z];
+            let (nx0, ny0) = project_to_ndc_xy(&proj_orig, p);
+            let (nx1, ny1) = project_to_ndc_xy(&proj, p);
+            let got_dx = nx1 - nx0;
+            let got_dy = ny1 - ny0;
+            assert!(
+                (got_dx - expected_dx).abs() < 1e-6,
+                "ortho ndc dx at z={}: expected {}, got {}",
+                z,
+                expected_dx,
+                got_dx
+            );
+            assert!(
+                (got_dy - expected_dy).abs() < 1e-6,
+                "ortho ndc dy at z={}: expected {}, got {}",
+                z,
+                expected_dy,
+                got_dy
             );
         }
-        let dx_expected = 2.0 * 0.25 / 100.0;
-        let dy_expected = 2.0 * (-0.125) / 50.0;
-        assert!(
-            (proj[8] - (original[8] + dx_expected)).abs() < 1e-7,
-            "m02 mismatch: expected {} + {}, got {}",
-            original[8],
-            dx_expected,
-            proj[8]
-        );
-        assert!(
-            (proj[9] - (original[9] + dy_expected)).abs() < 1e-7,
-            "m12 mismatch: expected {} + {}, got {}",
-            original[9],
-            dy_expected,
-            proj[9]
-        );
+    }
+
+    /// Sanity: perspective jitter also yields a constant pixel offset
+    /// across depths (it always did, but lock it in alongside the
+    /// ortho fix so future refactors can't regress either path).
+    #[test]
+    fn perspective_jitter_produces_constant_ndc_shift_regardless_of_depth() {
+        let w = 1920.0;
+        let h = 1080.0;
+        let jx = 0.3;
+        let jy = -0.4;
+        let proj_orig =
+            glam::Mat4::perspective_rh(60.0_f32.to_radians(), w / h, 0.1, 1000.0)
+                .to_cols_array();
+        let mut proj = proj_orig;
+        apply_jitter_to_proj(&mut proj, jx, jy, w, h);
+
+        let mut first: Option<(f32, f32)> = None;
+        for z in [-1.0_f32, -10.0, -50.0, -200.0, -900.0] {
+            let p = [1.234, -0.567, z];
+            let (nx0, ny0) = project_to_ndc_xy(&proj_orig, p);
+            let (nx1, ny1) = project_to_ndc_xy(&proj, p);
+            let d = (nx1 - nx0, ny1 - ny0);
+            match first {
+                None => first = Some(d),
+                Some(f) => {
+                    assert!(
+                        (d.0 - f.0).abs() < 1e-6 && (d.1 - f.1).abs() < 1e-6,
+                        "perspective ndc delta varied with depth: first {:?}, at z={} {:?}",
+                        f,
+                        z,
+                        d
+                    );
+                }
+            }
+        }
     }
 
     #[test]

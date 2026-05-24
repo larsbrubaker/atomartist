@@ -15,8 +15,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use manifold_rust::cross_section::CrossSection;
-use manifold_rust::types::MeshGL;
 
+use crate::geometry::Geometry3d;
 use crate::graph::socket::{Socket, SocketUid};
 use crate::socket_types::SocketType;
 
@@ -48,7 +48,12 @@ pub enum PortValue {
     /// Column-major 4×4 matrix (matches OpenGL / wgpu convention).
     Matrix4x4([f32; 16]),
     Path2d(Arc<CrossSection>),
-    Geometry3d(Arc<MeshGL>),
+    /// Bundle of mesh + per-node matrix + per-node colour (see
+    /// [`crate::geometry::Geometry3d`]). Carrying the matrix + colour
+    /// alongside the mesh mirrors NodeDesigner's
+    /// `socket._data.matrix` / `_data.color` model, so a downstream
+    /// node sees the upstream transform without walking the graph.
+    Geometry3d(Arc<Geometry3d>),
 }
 
 impl PortValue {
@@ -209,11 +214,12 @@ mod tests {
 
     #[test]
     fn port_value_eq_pointer_identity_for_arc_variants() {
-        let mesh1 = Arc::new(MeshGL::default());
-        let mesh2 = Arc::new(MeshGL::default());
-        let geo_a = PortValue::Geometry3d(mesh1.clone());
-        let geo_a_clone = PortValue::Geometry3d(mesh1.clone());
-        let geo_b = PortValue::Geometry3d(mesh2);
+        use manifold_rust::types::MeshGL;
+        let g1 = Arc::new(Geometry3d::from_mesh(Arc::new(MeshGL::default())));
+        let g2 = Arc::new(Geometry3d::from_mesh(Arc::new(MeshGL::default())));
+        let geo_a = PortValue::Geometry3d(g1.clone());
+        let geo_a_clone = PortValue::Geometry3d(g1.clone());
+        let geo_b = PortValue::Geometry3d(g2);
         assert_eq!(geo_a, geo_a_clone, "same Arc → equal");
         assert_ne!(geo_a, geo_b, "distinct Arcs (even with equal contents) → not equal");
     }

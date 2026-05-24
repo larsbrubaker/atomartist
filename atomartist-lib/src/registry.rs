@@ -27,9 +27,56 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::graph::node::PortValue;
+use manifold_rust::types::MeshGL;
+
+use crate::geometry::{Geometry3d, DEFAULT_GEOMETRY_COLOR};
+use crate::graph::node::{identity_matrix, PortValue};
 use crate::graph::socket::{Socket, SocketUid, SocketUidAlloc};
 use crate::socket_types::SocketType;
+
+/// Standard `matrix` + `color` properties every geometry-producing
+/// node should include. Mirrors NodeDesigner's "every geometry node
+/// carries a transform and a colour" model so handles and gizmos can
+/// drive them without per-node plumbing.
+///
+/// Fold these into a node's `properties()` return value:
+///
+/// ```ignore
+/// fn properties(&self) -> Vec<PropDef> {
+///     let mut props = vec![PropDef::new("size", PortValue::Number(10.0))];
+///     props.extend(geometry_props());
+///     props
+/// }
+/// ```
+pub fn geometry_props() -> Vec<PropDef> {
+    vec![
+        PropDef::new("matrix", PortValue::Matrix4x4(identity_matrix()))
+            .with_editor(EditorKind::Matrix)
+            .with_label("Transform"),
+        PropDef::new("color", PortValue::Color(DEFAULT_GEOMETRY_COLOR))
+            .with_editor(EditorKind::ColorPicker)
+            .with_label("Color"),
+    ]
+}
+
+/// Bundle a mesh with the node's `matrix` + `color` properties into a
+/// [`Geometry3d`] ready to wrap in a `PortValue::Geometry3d`. Used by
+/// every geometry-producing node's `evaluate`:
+///
+/// ```ignore
+/// out.set("out", PortValue::Geometry3d(Arc::new(wrap_mesh(ctx, mesh))));
+/// ```
+pub fn wrap_mesh(ctx: &EvalCtx, mesh: MeshGL) -> Geometry3d {
+    let matrix = ctx
+        .properties
+        .matrix4x4("matrix", identity_matrix());
+    let color = ctx.properties.color("color", DEFAULT_GEOMETRY_COLOR);
+    Geometry3d {
+        mesh: Arc::new(mesh),
+        matrix,
+        color,
+    }
+}
 
 /// Editor hint for a property — how the UI layer should render an inline
 /// editor for the property's current value.
@@ -433,6 +480,26 @@ impl NodeProperties {
     pub fn bool_(&self, name: &str, default: bool) -> bool {
         match self.get(name) {
             PortValue::Bool(b) => *b,
+            _ => default,
+        }
+    }
+
+    /// Convenience accessor that unwraps `PortValue::Matrix4x4`,
+    /// returning `default` if the property is missing or wrong-typed.
+    /// Used by every geometry-producing node to pull its per-node
+    /// transform property into the emitted `Geometry3d`.
+    pub fn matrix4x4(&self, name: &str, default: [f32; 16]) -> [f32; 16] {
+        match self.get(name) {
+            PortValue::Matrix4x4(m) => *m,
+            _ => default,
+        }
+    }
+
+    /// Convenience accessor that unwraps `PortValue::Color`,
+    /// returning `default` if the property is missing or wrong-typed.
+    pub fn color(&self, name: &str, default: [f32; 4]) -> [f32; 4] {
+        match self.get(name) {
+            PortValue::Color(c) => *c,
             _ => default,
         }
     }

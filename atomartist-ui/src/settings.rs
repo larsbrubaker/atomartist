@@ -431,18 +431,18 @@ fn parse_bool(s: &str) -> Option<bool> {
 fn render_style_to_token(s: RenderStyle) -> &'static str {
     match s {
         RenderStyle::Shaded => "Shaded",
-        RenderStyle::OutlineOnly => "Outlines",
         RenderStyle::Wireframe => "Wireframe",
     }
 }
 
 fn render_style_from_token(s: &str) -> Option<RenderStyle> {
-    // Tolerate the obvious variants — both MatterCAD's "Outlines"
-    // label and the Rust enum name "OutlineOnly".
     match s {
         "Shaded" | "shaded" => Some(RenderStyle::Shaded),
-        "Outlines" | "outlines" | "Outline" | "OutlineOnly" => Some(RenderStyle::OutlineOnly),
         "Wireframe" | "wireframe" | "Polygons" | "polygons" => Some(RenderStyle::Wireframe),
+        // Settings files written before the `OutlineOnly` variant was
+        // removed may contain the old token — fall back to Shaded so
+        // upgrades stay seamless.
+        "Outlines" | "outlines" | "Outline" | "OutlineOnly" => Some(RenderStyle::Shaded),
         _ => None,
     }
 }
