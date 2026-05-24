@@ -32,6 +32,7 @@ use agg_gui::{
     Color, DrawCtx, Event, EventResult, HAnchor, Key, Modifiers, MouseButton, Point, Rect, Size,
     VAnchor, Widget, WidgetBase,
 };
+use atomartist_lib::geometry::Geometry3d;
 use atomartist_lib::graph::node::NodeId;
 use manifold_rust::types::MeshGL;
 
@@ -44,7 +45,8 @@ use crate::picking::{resolve_pivot_or_fallback, HitPlane, PivotResolution};
 #[path = "viewport_widget_helpers.rs"]
 mod viewport_widget_helpers;
 use viewport_widget_helpers::{
-    cross3, dot3, mouse_button_bit, normalize3, project, stroke_circle, sub3, vert_pos,
+    cross3, dot3, estimate_outline_width, mesh_aabb, mouse_button_bit, normalize3, project,
+    stroke_circle, sub3, vert_pos,
 };
 use crate::scene_renderer::{GizmoLineSet, RenderStyle, WgpuSceneRenderer};
 
@@ -74,7 +76,12 @@ impl Default for ViewportTool {
 /// mesh from, the live `display_node` so a left-click selection mirrors
 /// into the canvas, and a writable selection slot.
 pub struct ViewportInputs {
-    pub last_mesh_output: Arc<Mutex<Option<Arc<MeshGL>>>>,
+    /// Latest displayed geometry — bundle of mesh + per-node matrix
+    /// + per-node colour pulled forward from upstream. The renderer
+    /// reads `geom.color` into its `base_color` uniform and
+    /// `geom.mesh` into the vertex buffer; the matrix lands on
+    /// the bounds gizmo / future control gizmos.
+    pub last_mesh_output: Arc<Mutex<Option<Arc<Geometry3d>>>>,
     /// The display node whose mesh is currently rendered. Read-only from
     /// the viewport's perspective — used to know which node id to write
     /// into `selection` when the user left-clicks the displayed mesh.
@@ -258,7 +265,7 @@ impl Viewport3dWidget {
         // standard view matrices and a vector is cheaper.
         let (_right, _up, fwd) = cam.basis();
         let mesh_slot = self.inputs.last_mesh_output.lock().unwrap();
-        let mesh_ref = mesh_slot.as_deref();
+        let mesh_ref = mesh_slot.as_deref().map(|g| &*g.mesh);
         resolve_pivot_or_fallback(
             mesh_ref,
             ray_origin,
@@ -293,8 +300,20 @@ impl Viewport3dWidget {
         f(&mut *self.inputs.camera.lock().unwrap())
     }
 
-    fn current_mesh(&self) -> Option<Arc<MeshGL>> {
+    /// Snapshot the currently-displayed geometry bundle. Returns the
+    /// full [`Geometry3d`] so callers that only need the mesh can
+    /// pull `.mesh`, while paint code can also read `.color` (for
+    /// the renderer's `base_color`) and `.matrix` (future
+    /// control-gizmo wiring).
+    fn current_geometry(&self) -> Option<Arc<Geometry3d>> {
         self.inputs.last_mesh_output.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// Mesh-only convenience used by raycast / fit-to-bounds /
+    /// software fallback callers that don't care about the matrix or
+    /// colour.
+    fn current_mesh(&self) -> Option<Arc<MeshGL>> {
+        self.current_geometry().map(|g| g.mesh.clone())
     }
 
     /// Re-fit the camera to the last seen mesh's AABB. Used by the Home
@@ -544,44 +563,8 @@ impl Viewport3dWidget {
     }
 }
 
-/// Axis-aligned bounding box of a mesh, returned as `(min, max)`.
-/// `None` when the mesh has no usable vertex data — caller should
-/// fall back to a sensible default.
-fn mesh_aabb(mesh: &MeshGL) -> Option<([f32; 3], [f32; 3])> {
-    if mesh.num_prop == 0 || mesh.vert_properties.is_empty() {
-        return None;
-    }
-    let stride = mesh.num_prop as usize;
-    let n = mesh.vert_properties.len() / stride;
-    let mut mn = [f32::INFINITY; 3];
-    let mut mx = [f32::NEG_INFINITY; 3];
-    for i in 0..n {
-        for k in 0..3 {
-            let v = mesh.vert_properties[i * stride + k];
-            if v < mn[k] { mn[k] = v; }
-            if v > mx[k] { mx[k] = v; }
-        }
-    }
-    if !mn[0].is_finite() || !mx[0].is_finite() {
-        return None;
-    }
-    Some((mn, mx))
-}
-
-/// Pick an outline thickness scaled to the model's bounding-box extent so
-/// the silhouette reads at any model size without micro-tuning per scene.
-/// 0.6% of the largest dimension is enough to be visible from typical
-/// orbit distances, small enough not to obscure surface detail.
-fn estimate_outline_width(mesh: &MeshGL) -> f32 {
-    let Some((mn, mx)) = mesh_aabb(mesh) else {
-        return 0.05;
-    };
-    let dx = mx[0] - mn[0];
-    let dy = mx[1] - mn[1];
-    let dz = mx[2] - mn[2];
-    let extent = dx.max(dy).max(dz).max(1e-3);
-    (extent * 0.006).max(0.005)
-}
+// `mesh_aabb` + `estimate_outline_width` moved to viewport_widget_helpers.rs
+// so this file stays under the 800-line guardrail.
 
 // Free helpers (vector ops, projection, circle stroke, mouse-bit
 // map) live in the sibling `viewport_widget_helpers.rs` so this
@@ -669,34 +652,32 @@ impl Widget for Viewport3dWidget {
         ctx.rect(0.0, 0.0, w, h);
         ctx.fill();
 
-        // Push the latest mesh + camera into the scene renderer (cheap;
-        // the renderer detects ptr equality and skips re-uploading
-        // identical meshes).
-        let mesh_opt = self.current_mesh();
+        // Push the latest mesh + camera + per-node colour into the
+        // scene renderer (cheap; the renderer detects ptr equality
+        // and skips re-uploading identical meshes). We pull the full
+        // `Geometry3d` bundle so the shader's `base_color` can be
+        // driven by the upstream node's `color` property — without
+        // this the renderer would always paint its `new()` default
+        // tint regardless of what the user set on the node.
+        let geom_opt = self.current_geometry();
+        let mesh_opt: Option<Arc<MeshGL>> = geom_opt.as_ref().map(|g| g.mesh.clone());
         if let Some(mesh) = &mesh_opt {
             self.maybe_auto_fit(mesh);
         }
-        // Read the selection slot once per paint to drive the outline
-        // pass: an outline shows whenever something is selected and we
-        // have a mesh to draw it around. With one displayed mesh today
-        // the selected node *is* the displayed node by construction; A4+
-        // generalise that.
         let selection_active = self.inputs.selection.lock().unwrap().is_some();
-        // Scale the outline thickness off the model's current AABB so it
-        // stays visible across model sizes — the auto-fit path captured
-        // bounds in `last_mesh_ptr`/grid_y; recompute briefly here from
-        // the live mesh.
         let outline_width = mesh_opt.as_deref().map(estimate_outline_width).unwrap_or(0.05);
-        // Bounds-gizmo geometry: emit a 12-edge wireframe AABB around
-        // the displayed mesh whenever the user has it selected. The
-        // host populates `gizmo_lines` each frame; the renderer's
-        // fingerprint hashes this list so accumulation restarts when
-        // bounds change.
         let bounds_aabb =
             mesh_opt.as_deref().and_then(mesh_aabb).filter(|_| selection_active);
         {
             let mut s = self.scene.borrow_mut();
             s.mesh = mesh_opt.clone();
+            // Drive the renderer's `base_color` from the upstream
+            // node's colour property. Falls back to the default
+            // material tint when no geometry is present so the
+            // viewport's background pass still has a sane colour.
+            if let Some(geom) = &geom_opt {
+                s.base_color = geom.color;
+            }
             s.camera = self.cam();
             s.outline_enabled = selection_active;
             s.outline_width = outline_width;

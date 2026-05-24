@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use agg_gui::undo::UndoBuffer;
+use atomartist_lib::geometry::Geometry3d;
 use atomartist_lib::graph::executor::evaluate_dirty;
 use atomartist_lib::graph::node::{NodeId, PortValue};
 use atomartist_lib::registry::NodeRegistry;
@@ -24,7 +25,6 @@ use atomartist_lib::Graph;
 use atomartist_renderer::{
     CameraPoseAnimation, OrbitCamera, ProjectionAnimation, RenderStyle, ViewportTool,
 };
-use manifold_rust::types::MeshGL;
 
 /// Top-level state passed by reference into every UI widget that mutates
 /// the graph or reads evaluation results.
@@ -32,9 +32,15 @@ pub struct AppState {
     pub graph: Arc<Mutex<Graph>>,
     pub registry: Arc<NodeRegistry>,
     pub undo: Arc<Mutex<UndoBuffer>>,
-    /// Most recently computed output mesh (for the 3D viewport). Written
-    /// by `schedule_evaluate` and read by `Viewport3dWidget::needs_draw`.
-    pub last_mesh_output: Arc<Mutex<Option<Arc<MeshGL>>>>,
+    /// Most recently computed output geometry (for the 3D viewport).
+    /// Carries the mesh **plus** the per-node `matrix` and `color`
+    /// pulled forward from upstream (see
+    /// [`atomartist_lib::geometry::Geometry3d`]), so the renderer
+    /// can read both the triangle data and the material tint /
+    /// alpha that drive the shader's `base_color`. Written by
+    /// `schedule_evaluate`, read by
+    /// `Viewport3dWidget::needs_draw` / `current_geometry`.
+    pub last_mesh_output: Arc<Mutex<Option<Arc<Geometry3d>>>>,
     /// Set whenever the graph or its outputs change so the viewport knows
     /// to repaint.
     pub viewport_dirty: Arc<AtomicBool>,
@@ -205,7 +211,7 @@ impl AppState {
 struct EvalTask {
     graph: Arc<Mutex<Graph>>,
     registry: Arc<NodeRegistry>,
-    last_mesh_output: Arc<Mutex<Option<Arc<MeshGL>>>>,
+    last_mesh_output: Arc<Mutex<Option<Arc<Geometry3d>>>>,
     viewport_dirty: Arc<AtomicBool>,
     display_node: Arc<Mutex<Option<NodeId>>>,
 }
@@ -221,18 +227,20 @@ impl EvalTask {
         self.viewport_dirty.store(true, Ordering::Relaxed);
     }
 
-    fn pick_display_mesh(&self, g: &Graph) -> Option<Arc<MeshGL>> {
-        // Look up any Geometry3d cached output on the node — sockets
-        // names vary across node types (`"out"` for primitives, `"Geometry"`
-        // for Extrude). Picking by type is more robust than picking by
-        // a hard-coded name. The `Geometry3d` value carries mesh +
-        // matrix + colour; we extract the mesh here so callers that
-        // only need the triangle data continue to work. The full
-        // bundle stays reachable via `Graph::get` for per-node
-        // gizmos / handles.
+    /// Pick the geometry bundle to display in the viewport. Returns
+    /// the full [`Geometry3d`] (mesh + matrix + colour) so the
+    /// renderer can drive its `base_color` uniform from the
+    /// upstream node's colour property — without this the shader
+    /// would always paint the new() default tint regardless of what
+    /// the user set on the node.
+    fn pick_display_mesh(&self, g: &Graph) -> Option<Arc<Geometry3d>> {
+        // Look up any Geometry3d cached output on the node — socket
+        // names vary across node types (`"out"` for primitives,
+        // `"Geometry"` for Extrude). Picking by type is more robust
+        // than picking by a hard-coded name.
         let first_geometry = |n: &atomartist_lib::graph::node::NodeInstance| {
             n.cached_outputs.values().find_map(|v| match v {
-                PortValue::Geometry3d(g) => Some(g.mesh.clone()),
+                PortValue::Geometry3d(g) => Some(g.clone()),
                 _ => None,
             })
         };
@@ -244,7 +252,7 @@ impl EvalTask {
                 }
             }
         }
-        let mut best: Option<(NodeId, Arc<MeshGL>)> = None;
+        let mut best: Option<(NodeId, Arc<Geometry3d>)> = None;
         for n in g.nodes() {
             if let Some(m) = first_geometry(n) {
                 if best.as_ref().map(|(id, _)| n.id > *id).unwrap_or(true) {
@@ -501,15 +509,18 @@ impl AppState {
         agg_gui::theme::set_visuals(base.with_accent_color(s.accent_color));
     }
 
-    /// Save the current displayed mesh as a binary STL.
+    /// Save the current displayed mesh as a binary STL. Reads the
+    /// triangle data out of [`Geometry3d::mesh`] — STL export
+    /// disregards the per-node matrix + colour bundle the renderer
+    /// uses.
     pub fn export_stl_to_path(&self, path: &Path) -> Result<(), String> {
-        let mesh = self
+        let geom = self
             .last_mesh_output
             .lock()
             .unwrap()
             .clone()
             .ok_or_else(|| "no geometry to export — wire up a node with a 3D output".to_string())?;
-        let bytes = export_stl(&mesh);
+        let bytes = export_stl(&geom.mesh);
         std::fs::write(path, bytes).map_err(|e| format!("write {}: {}", path.display(), e))?;
         Ok(())
     }

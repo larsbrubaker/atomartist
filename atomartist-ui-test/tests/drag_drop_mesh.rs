@@ -129,9 +129,9 @@ fn dropped_mesh_propagates_through_evaluate_now() {
     h.state().evaluate_now();
 
     let out = h.state().last_mesh_output.lock().unwrap();
-    let mesh = out.as_ref().expect("viewport mesh must be populated");
+    let geom = out.as_ref().expect("viewport geometry must be populated");
     assert_eq!(
-        mesh.tri_verts.len() / 3,
+        geom.mesh.tri_verts.len() / 3,
         12,
         "viewport should receive the 12-triangle cube",
     );

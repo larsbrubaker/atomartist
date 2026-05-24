@@ -26,11 +26,13 @@
 
 use std::sync::Arc;
 
+use crate::geometry::{Geometry3d, DEFAULT_GEOMETRY_COLOR};
 use crate::graph::graph::Graph;
-use crate::graph::node::PortValue;
+use crate::graph::node::{identity_matrix, PortValue};
 use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeRegistry, PropDef,
+    geometry_props, EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeRegistry,
+    PropDef,
 };
 use crate::serialization::asset_store::{AssetRef, AssetStore};
 use crate::serialization::mesh_3mf::import_3mf;
@@ -67,16 +69,34 @@ impl NodeDef for MeshNode {
     }
 
     fn properties(&self) -> Vec<PropDef> {
-        vec![
+        let mut p = vec![
             PropDef::new("asset", PortValue::StringVal(Arc::new(String::new()))),
             PropDef::new("label", PortValue::StringVal(Arc::new(String::new()))),
-        ]
+        ];
+        // Mesh nodes carry the same `matrix` + `color` editor props as
+        // every other geometry-producing node so users can transform /
+        // tint the embedded mesh from the inspector and the
+        // (eventually) gizmos.
+        p.extend(geometry_props());
+        p
     }
 
     fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
         let mut out = NodeOutputs::default();
-        if let PortValue::Geometry3d(mesh) = ctx.properties.get(MESH_CACHE_KEY) {
-            out.set("out", PortValue::Geometry3d(Arc::clone(mesh)));
+        if let PortValue::Geometry3d(cached) = ctx.properties.get(MESH_CACHE_KEY) {
+            // Rebuild the Geometry3d so the user-editable `matrix` /
+            // `color` properties take effect on every evaluate. The
+            // cache slot only carries the decoded triangle data; its
+            // own matrix + colour are baseline defaults that get
+            // overridden here.
+            let matrix = ctx.properties.matrix4x4("matrix", identity_matrix());
+            let color = ctx.properties.color("color", DEFAULT_GEOMETRY_COLOR);
+            let geom = Geometry3d {
+                mesh: cached.mesh.clone(),
+                matrix,
+                color,
+            };
+            out.set("out", PortValue::Geometry3d(Arc::new(geom)));
         }
         Ok(out)
     }

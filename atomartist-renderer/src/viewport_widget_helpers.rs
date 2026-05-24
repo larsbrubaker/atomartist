@@ -22,6 +22,47 @@ pub(crate) fn vert_pos(mesh: &MeshGL, i: usize, stride: usize) -> [f32; 3] {
     ]
 }
 
+/// Axis-aligned bounding box of a mesh, returned as `(min, max)`.
+/// `None` when the mesh has no usable vertex data — caller should
+/// fall back to a sensible default. Used by viewport's auto-fit /
+/// bounds-gizmo / outline-width-estimate paths.
+pub(crate) fn mesh_aabb(mesh: &MeshGL) -> Option<([f32; 3], [f32; 3])> {
+    if mesh.num_prop == 0 || mesh.vert_properties.is_empty() {
+        return None;
+    }
+    let stride = mesh.num_prop as usize;
+    let n = mesh.vert_properties.len() / stride;
+    let mut mn = [f32::INFINITY; 3];
+    let mut mx = [f32::NEG_INFINITY; 3];
+    for i in 0..n {
+        for k in 0..3 {
+            let v = mesh.vert_properties[i * stride + k];
+            if v < mn[k] { mn[k] = v; }
+            if v > mx[k] { mx[k] = v; }
+        }
+    }
+    if !mn[0].is_finite() || !mx[0].is_finite() {
+        return None;
+    }
+    Some((mn, mx))
+}
+
+/// Pick an outline thickness scaled to the model's bounding-box
+/// extent so the silhouette reads at any model size without
+/// micro-tuning per scene. 0.6% of the largest dimension is enough
+/// to be visible from typical orbit distances, small enough not to
+/// obscure surface detail.
+pub(crate) fn estimate_outline_width(mesh: &MeshGL) -> f32 {
+    let Some((mn, mx)) = mesh_aabb(mesh) else {
+        return 0.05;
+    };
+    let dx = mx[0] - mn[0];
+    let dy = mx[1] - mn[1];
+    let dz = mx[2] - mn[2];
+    let extent = dx.max(dy).max(dz).max(1e-3);
+    (extent * 0.006).max(0.005)
+}
+
 pub(crate) fn cross3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [
         a[1] * b[2] - a[2] * b[1],

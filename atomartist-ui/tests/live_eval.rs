@@ -24,9 +24,10 @@ fn evaluate_now_populates_last_mesh_for_box() {
     };
     state.set_display_node(Some(id));
     state.evaluate_now();
-    let mesh = state.last_mesh_output.lock().unwrap().clone();
-    assert!(mesh.is_some(), "expected last_mesh_output to be populated");
-    let mesh = mesh.unwrap();
+    let geom = state.last_mesh_output.lock().unwrap().clone();
+    assert!(geom.is_some(), "expected last_mesh_output to be populated");
+    let geom = geom.unwrap();
+    let mesh = &geom.mesh;
     let n_verts = mesh.vert_properties.len() / mesh.num_prop as usize;
     assert_eq!(n_verts, 24);
 }
@@ -40,7 +41,8 @@ fn property_change_then_evaluate_yields_different_mesh() {
     };
     state.set_display_node(Some(id));
     state.evaluate_now();
-    let mesh_a = state.last_mesh_output.lock().unwrap().clone().unwrap();
+    let geom_a = state.last_mesh_output.lock().unwrap().clone().unwrap();
+    let mesh_a = &geom_a.mesh;
 
     // Mutate width and re-evaluate.
     {
@@ -48,7 +50,8 @@ fn property_change_then_evaluate_yields_different_mesh() {
         g.set_property(id, "width", PortValue::Number(5.0)).unwrap();
     }
     state.evaluate_now();
-    let mesh_b = state.last_mesh_output.lock().unwrap().clone().unwrap();
+    let geom_b = state.last_mesh_output.lock().unwrap().clone().unwrap();
+    let mesh_b = &geom_b.mesh;
 
     // Same vertex/triangle counts, different vertex coords.
     assert_eq!(mesh_a.vert_properties.len(), mesh_b.vert_properties.len());
@@ -69,7 +72,7 @@ fn property_change_then_evaluate_yields_different_mesh() {
     }
     assert!((max_x - 2.5).abs() < 1e-5, "max x should be 2.5, was {}", max_x);
     // Sanity drop on the Arc clone.
-    drop(Arc::clone(&mesh_a));
+    drop(Arc::clone(&geom_a));
 }
 
 #[test]

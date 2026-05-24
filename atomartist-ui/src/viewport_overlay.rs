@@ -399,7 +399,8 @@ fn add_zoom_to_sel_button(overlay: &mut ViewportOverlay, state: &AppState, font:
     let btn = CircularIconButton::new(IconKind::Fit)
         .with_image_icon(MatterCadIcon::Select)
         .on_click(move || {
-            let Some(mesh) = mesh_slot.lock().unwrap().clone() else { return };
+            let Some(geom) = mesh_slot.lock().unwrap().clone() else { return };
+            let mesh = &geom.mesh;
             if mesh.num_prop < 3 || mesh.vert_properties.is_empty() {
                 return;
             }
