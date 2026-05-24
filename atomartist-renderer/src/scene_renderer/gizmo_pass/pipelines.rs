@@ -103,6 +103,115 @@ impl GizmoLinePipelines {
             }],
         })
     }
+
+    /// Draw one [`super::GizmoLineSet`] into the per-sample HDR
+    /// target. Solid variant depth-tests against `scene_depth_view`;
+    /// overlay variant runs without a depth attachment. Per-gizmo
+    /// scratch buffers are created here and dropped at end-of-call —
+    /// cheap because gizmo geometry is tiny (≤ a few hundred verts).
+    ///
+    /// `mvp` is the renderer's jittered projection × view, already
+    /// composed with the gizmo's optional model matrix.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        gizmo: &super::GizmoLineSet,
+        mvp: [f32; 16],
+        sample_view: &wgpu::TextureView,
+        scene_depth_view: &wgpu::TextureView,
+        viewport: (u32, u32),
+    ) {
+        if gizmo.vertices.is_empty() || (!gizmo.draw_solid && !gizmo.draw_overlay) {
+            return;
+        }
+        let (w, h) = viewport;
+        use wgpu::util::DeviceExt;
+        let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("atomartist gizmo line vb"),
+            contents: bytemuck::cast_slice(&gizmo.vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let vertex_count = gizmo.vertices.len() as u32;
+
+        if gizmo.draw_solid {
+            let u = GizmoLineUniforms { mvp, color: gizmo.color };
+            let ub = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("atomartist gizmo line solid ub"),
+                contents: bytemuck::bytes_of(&u),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+            let bg = self.build_bind_group(device, &ub);
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("atomartist gizmo solid"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: sample_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: scene_depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_viewport(0.0, 0.0, w as f32, h as f32, 0.0, 1.0);
+            pass.set_scissor_rect(0, 0, w, h);
+            pass.set_pipeline(&self.solid_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.set_vertex_buffer(0, vbuf.slice(..));
+            pass.draw(0..vertex_count, 0..1);
+        }
+
+        if gizmo.draw_overlay {
+            let overlay_color = [
+                gizmo.color[0],
+                gizmo.color[1],
+                gizmo.color[2],
+                gizmo.color[3] * gizmo.occluded_alpha,
+            ];
+            let u = GizmoLineUniforms { mvp, color: overlay_color };
+            let ub = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("atomartist gizmo line overlay ub"),
+                contents: bytemuck::bytes_of(&u),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+            let bg = self.build_bind_group(device, &ub);
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("atomartist gizmo overlay"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: sample_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_viewport(0.0, 0.0, w as f32, h as f32, 0.0, 1.0);
+            pass.set_scissor_rect(0, 0, w, h);
+            pass.set_pipeline(&self.overlay_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.set_vertex_buffer(0, vbuf.slice(..));
+            pass.draw(0..vertex_count, 0..1);
+        }
+    }
 }
 
 fn vertex_layout() -> wgpu::VertexBufferLayout<'static> {

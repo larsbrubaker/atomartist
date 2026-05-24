@@ -62,8 +62,8 @@ fn dropping_an_stl_on_the_canvas_adds_a_mesh_node() {
         asset_ref
     );
     match mesh_node_instance.properties.get("mesh") {
-        Some(PortValue::Geometry3d(m)) => {
-            assert_eq!(m.tri_verts.len() / 3, 12, "Simple Box has 12 triangles");
+        Some(PortValue::Geometry3d(g)) => {
+            assert_eq!(g.mesh.tri_verts.len() / 3, 12, "Simple Box has 12 triangles");
         }
         other => panic!(
             "mesh cache should be populated immediately on drop, got {:?}",

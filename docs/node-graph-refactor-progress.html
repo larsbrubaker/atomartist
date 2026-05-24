@@ -150,32 +150,25 @@ hr {
 <main>
 
 <h1>Node-graph engine refactor — progress</h1>
-<p class="subtitle">AtomArtist · snapshot updated 2026-05-23 · all green at this checkpoint</p>
+<p class="subtitle">AtomArtist · pickup snapshot · what's left, not what's done</p>
 
 <div class="banner">
-  <strong>Status:</strong> stable mid-task checkpoint.
-  Engine refactor (Stage 1) complete; unified <code>Output</code> node (Stage 2) shipped;
-  legacy <code>GraphOutput</code> deleted; <code>Combine</code> rebuilt on the new
-  dynamic-input mechanism (Stage 1i); five NodeDesigner connectivity test suites ported
-  (Tier 1, files 1–5 of 7); engine grew <code>Graph::execution_order</code>,
-  <code>Graph::ancestors</code>, and <code>ChangeTracker</code> to back the ports;
-  <code>graph_json</code> properties now use <code>BTreeMap</code> for deterministic
-  canonical JSON. One bug surfaced + fixed in <code>agg-gui-node-editor</code> along the
-  way. Two more test files queued. Safe to commit; next session can pick up from the queue
-  without re-reading any of this.
+  <strong>Where we are:</strong> engine refactor (Stages 1, 1i, 2) shipped; NodeDesigner
+  test ports paused with two files still queued; <strong>wgpu rendering port</strong>
+  (Stage 3) covers shader, post-process outline, gizmo render pass, and bounds gizmo;
+  <strong>per-node matrix + colour data model</strong> (Stage 4) lands so handles + control
+  gizmos have somewhere to write transform updates back into. The next sitting should
+  start in the "Next up" section below — pick the top item, work down.
 </div>
 
-<div class="grid">
-  <div class="card">
-    <div class="metric-small">atomartist workspace</div>
-    <div class="metric">416</div>
-    <div class="metric-small">tests passing, 0 failing (was 403)</div>
-  </div>
-  <div class="card">
-    <div class="metric-small">agg-gui-node-editor</div>
-    <div class="metric">28</div>
-    <div class="metric-small">tests passing, 0 failing (was 26)</div>
-  </div>
+<div class="banner" style="background:#f0eef9;border-left-color:#5a4ea3;">
+  <strong>Immediate next:</strong> handle meshes (drag-on-line / drag-on-plane) — Task #8.
+  Builds the picking + drag-state pattern the four control gizmos (Z, XY, rotate-corner,
+  bounds-edit) all reuse. Rendering side is unblocked — the [GizmoLineSet] pipeline
+  already takes arbitrary line geometry, and bounds gizmo is shipping as proof. Missing
+  half is mouse-raycast → handle hit → mutate node's <code>matrix</code> property
+  through an undo command. See "Open threads (heavy)" below for the full list of
+  remaining work.
 </div>
 
 <h2>The big change in one paragraph</h2>
@@ -247,6 +240,90 @@ applies only to the noodle concept.</p>
   type</em> (any source can land on it). Symmetric direction not allowed —
   outputs always carry a concrete type.
 </p>
+
+<h3>Stage 3 — wgpu rendering port (NodeDesigner parity)</h3>
+<p class="section-hint">
+  Behavioural port of NodeDesigner's <code>three-viewer.js</code> chain into the
+  Rust + wgpu pipeline. Source-level translation is impossible (different
+  language, different API, naga's WebGL2 backend can't sample depth textures as
+  <code>f32</code>); algorithms + constants are matched verbatim.
+</p>
+<ul>
+  <li><strong>Blinn-Phong shader</strong> — view-space lighting via <code>dpdx</code>/<code>dpdy</code>
+    flat normals, dual camera-fixed directional lights with independent diffuse +
+    specular + per-light ambient, configurable shininess (default 30),
+    sRGB→linear base colour. Defaults match NodeDesigner's
+    <code>createDepthPeelMaterial</code> uniforms (light 0 = <code>(-1,-1,1).normalize()</code>,
+    light 1 = <code>(1,1,1).normalize()</code>, diff 0.7 / 0.5, spec 0.05 / 0.05,
+    global ambient 0.2). Shared <code>Uniforms</code> struct between the opaque
+    pass and the dual-peel colour pass so peeled fragments shade identically.
+    File: <code>atomartist-renderer/src/scene_renderer/opaque_shaders.rs</code>.</li>
+  <li><strong>Post-process selection outline</strong> — port of
+    <code>selection-outline.js</code>: ID prepass rasterises selected mesh into
+    R8 mask + R32Float depth mirror, edge-detect quad samples 8 neighbours +
+    full-scene depth, alpha-blends a rim at <code>colour.a=1.0</code> (visible)
+    or <code>occluded_alpha=0.35</code> (behind geometry). Runs inside the
+    per-sample HDR stream so the rim is AA-smoothed by the Halton accumulator.
+    The legacy inverted-hull outline is gone. Colour matches NodeDesigner blue
+    (<code>0x88ccff</code> dark / <code>0x4477cc</code> light). File:
+    <code>scene_renderer/post_outline/</code>.</li>
+  <li><strong>Gizmo render pass</strong> — port of
+    <code>gizmo-render-pass.js</code> as two-variant <code>LineList</code>
+    pipelines (solid depth-tested against <code>scene_depth</code> + overlay
+    no-depth alpha-blended at <code>occluded_alpha</code>). Targets the per-sample
+    HDR view so gizmos AA-smooth with the rest of the scene.
+    <code>WgpuSceneRenderer.gizmo_lines: Vec&lt;GizmoLineSet&gt;</code> populated
+    each frame by the host. File: <code>scene_renderer/gizmo_pass/</code>.</li>
+  <li><strong>Bounds gizmo</strong> — 12 edges around the selected mesh's AABB,
+    red <code>0xff4444</code>, occluded_alpha 0.25, built by
+    <code>GizmoLineSet::bounds_box(center, size, matrix)</code>. Host pushes it
+    from <code>viewport_widget.rs</code> whenever selection is active.</li>
+  <li><strong>Verified byte-for-byte ports</strong>: accumulation AA (Halton(2,3),
+    MAX_SAMPLES=16, mix-weight <code>1/(N+1)</code>, Rgba16Float ping-pong) and
+    contact shadows (1024² shadow map, ±100 bounds, blur radius 4.0, opacity
+    0.35) already match NodeDesigner exactly — no code change needed.</li>
+  <li><strong>WebGL2 / naga guardrails</strong>: <code>scene_shaders_emit_glsl_es_300</code>,
+    <code>peel_shaders_emit_glsl_es_300</code>, <code>outline_shaders_emit_glsl_es_300</code>,
+    <code>gizmo_shader_emits_glsl_es_300</code> — each runs the WGSL through
+    naga's GLSL ES 3.00 backend and asserts no <code>sampler2DShadow</code>
+    sentinel. Catches future shader changes that drift into a path naga can't
+    emit cleanly.</li>
+</ul>
+
+<h3>Stage 4 — per-node matrix + colour data model</h3>
+<p>
+  Every geometry-producing node now carries a <code>matrix</code> + <code>color</code>
+  property (mirrors NodeDesigner's <code>socket._data.matrix</code> /
+  <code>_data.color</code>), so handles + control gizmos have somewhere to write
+  transform updates back into. Mechanism:
+</p>
+<ul>
+  <li><code>atomartist_lib::geometry::Geometry3d { mesh: Arc&lt;MeshGL&gt;, matrix: [f32; 16], color: [f32; 4] }</code>
+    — the bundle that travels along a Geometry3d socket.
+    <code>PortValue::Geometry3d</code> now holds <code>Arc&lt;Geometry3d&gt;</code>.</li>
+  <li><code>registry::geometry_props()</code> returns the standard
+    <code>[matrix=identity, color=DEFAULT_GEOMETRY_COLOR]</code> PropDefs every
+    geometry-producing node folds into its <code>properties()</code>.</li>
+  <li><code>registry::wrap_mesh(ctx, mesh)</code> reads those props off
+    <code>ctx</code> and builds a <code>Geometry3d</code> ready to wrap in
+    <code>PortValue::Geometry3d</code>.</li>
+  <li>All 16 geometry-producing nodes updated (every primitive +
+    Transform, Align, FitToBounds, Boolean, Combine, Extrude, LibraryMesh,
+    MeshNode, Output).</li>
+</ul>
+<div class="banner" style="background:#f7eedd;border-left-color:#a86b00;">
+  <strong>Known semantic gap (deferred):</strong> ops nodes (Transform, Align,
+  FitToBounds, Boolean, Combine) <em>bake</em> their internal transform into the
+  mesh vertices, then emit a <code>Geometry3d</code> whose
+  <code>matrix</code> is the node's own gizmo-driven matrix (identity by default).
+  The <strong>upstream's</strong> matrix is currently dropped on the floor by
+  these ops — they call <code>apply_transform(&amp;input.mesh, …)</code> without
+  composing <code>input.matrix</code>. Output node compensates by baking each
+  upstream's matrix into the merged display mesh as a one-off, but Transform →
+  Transform chains still drop the upstream matrix. Either compose matrices
+  through ops, or treat the matrix as render-time only (don't bake). Decide
+  before the control gizmos ship.
+</div>
 
 <h2>NodeDesigner test ports <span class="badge flight">in flight</span></h2>
 <p class="section-hint">
@@ -326,31 +403,182 @@ applies only to the noodle concept.</p>
   the other guards stale-noodle paint.
 </div>
 
-<h2>Open threads / known gaps <span class="badge gap">deferred</span></h2>
+<h2>Next up — ordered TODO <span class="badge next">priority order</span></h2>
+<p class="section-hint">
+  This is the queue. Top is highest priority. Items below the divider are
+  smaller / independent and can be picked up out of order.
+</p>
+
+<h3>1. Handle meshes (drag-on-line / drag-on-plane) <span class="badge next">next</span></h3>
 <ul>
+  <li>JS source: <code>NodeDesigner/static/js/node-editor/rendering/handle-meshes.js</code> (257 lines).</li>
+  <li>Purpose: per-vertex draggable handles for "drag-on-line" / "drag-on-plane"
+    nodes — user clicks a small sphere/cube in 3-D and drags it along an axis or
+    plane to drive a node property.</li>
+  <li>Rendering side is unblocked: emit handle geometry as a
+    <code>GizmoLineSet</code> (or small filled-tri variant — see note below)
+    and the existing gizmo pass draws it.</li>
+  <li>What's missing:
+    <ol>
+      <li>Mouse-raycast against handle geometry (extend <code>picking.rs</code>
+        with a sphere/AABB intersect for handles).</li>
+      <li>Drag state machine on <code>Viewport3dWidget</code> — mouse-down on
+        handle → record start property value → mouse-move updates the property
+        via a coalesced undo command → mouse-up commits.</li>
+      <li>Property write must go through an <code>UndoCommand</code> so the
+        canvas right-side numeric editor stays in sync.</li>
+    </ol>
+  </li>
+  <li>The gizmo pipeline today is <code>LineList</code> only. Handles want
+    filled spheres/cubes. <em>Decision needed</em>: either add a filled-tri
+    pipeline variant to <code>gizmo_pass</code>, or extend
+    <code>GizmoLineSet</code> with a topology enum.</li>
+</ul>
+
+<h3>2. Control gizmos (Z, XY, rotate-corner) <span class="badge next">queue</span></h3>
+<ul>
+  <li>JS sources (each is a pair):
+    <ul>
+      <li><code>z-control-gizmo.js</code> (542 lines) + <code>z-height-drag.js</code> (1204 lines)</li>
+      <li><code>xy-control-gizmo.js</code> (561 lines) + <code>xy-width-depth-drag.js</code> (807 lines)</li>
+      <li><code>rotate-corner-gizmo.js</code> (813 lines) + <code>rotate-corner-drag.js</code> (274 lines)</li>
+    </ul>
+  </li>
+  <li>Each gizmo:
+    <ul>
+      <li>Mounts above the selected mesh; geometry mostly line segments + a few
+        arrowhead/box markers.</li>
+      <li>Shows constant on-screen size (must scale with camera distance per
+        paint — see NodeDesigner's per-frame
+        <code>updateZControlPosition</code> etc.).</li>
+      <li>Drag updates the node's <code>matrix</code> property (Stage 4's new
+        property), which propagates downstream via the new Geometry3d
+        bundling.</li>
+    </ul>
+  </li>
+  <li>Z control: vertical translate arrow + height-scale box anchored at
+    base. XY control: 4 edge arrows constraining each axis. Rotate-corner: ring
+    + corner arrows.</li>
+  <li>Each share the same picking + drag-state pattern as #1; once #1 lands,
+    these reuse it.</li>
+  <li><strong>Decide first:</strong> matrix composition through ops nodes (see
+    the yellow box at the end of Stage 4). Until that's resolved, dragging a
+    gizmo upstream of a Transform node will give surprising results.</li>
+</ul>
+
+<h3>3. Bounds gizmo edit handles <span class="badge gap">extension</span></h3>
+<ul>
+  <li>Bounds gizmo currently renders read-only (Stage 3 / Task #9 shipped).
+    NodeDesigner allows dragging the 8 corner / 6 face handles to resize the
+    bounds (for FitToBounds nodes).</li>
+  <li>Same picking + drag-state pattern as #1 + #2; writes
+    <code>FitToBounds.width</code> / <code>.height</code> / <code>.depth</code>
+    properties.</li>
+</ul>
+
+<h3>4. Measurement overlay <span class="badge gap">substantial</span></h3>
+<ul>
+  <li>JS: <code>measurement-overlay.js</code> (635 lines).</li>
+  <li>Renders dimension lines + tick marks + value labels around selection.
+    Mixed 3-D (the line segments, depth-tested against geometry) + 2-D (the
+    value labels, screen-space text).</li>
+  <li>Lines side: reuses the gizmo pass.</li>
+  <li>Labels side: need agg-gui text overlay anchored to world points →
+    projected to screen each paint.</li>
+</ul>
+
+<h3>5. Rubber-band selection visual <span class="badge gap">small</span></h3>
+<ul>
+  <li>JS: <code>rubber-band-selection.js</code> (210 lines).</li>
+  <li>Pure 2-D screen-space rectangle drawn over the viewport during drag-select.
+    No depth interaction; lives in <code>atomartist-ui</code>, not the renderer.</li>
+  <li>Hit-test logic (which meshes fall inside the rect) already lives in
+    <code>picking.rs</code> — just need the visual.</li>
+</ul>
+
+<h3>6. Lighting debug panel <span class="badge gap">UI-only</span></h3>
+<ul>
+  <li>JS: <code>lighting-panel.js</code> (434 lines) +
+    <code>lighting-debug-panel.js</code> (361 lines).</li>
+  <li>All the uniforms it tweaks are already wired:
+    <code>WgpuSceneRenderer.light_diffuse0</code> / <code>light_specular0</code>
+    / <code>light_ambient0</code> / <code>light_diffuse1</code> /
+    <code>light_specular1</code> / <code>global_ambient</code> /
+    <code>material_specular</code> / <code>shininess</code>. Cache fingerprint
+    already invalidates accumulation on tweaks.</li>
+  <li>Missing: an atomartist-ui floating panel with sliders + colour pickers
+    bound to those fields. Pure UI work.</li>
+</ul>
+
+<h3>7. Vertex format expansion <span class="badge gap">larger</span></h3>
+<ul>
+  <li>NodeDesigner's depth-peel shader supports per-vertex colour, per-vertex
+    alpha, barycentric (for the wireframe overlay shader), and UV (for textured
+    materials). atomartist's <code>Vertex</code> struct is
+    <code>pos[3] + normal[3]</code> only.</li>
+  <li>Touches: <code>opaque_pass::Vertex</code>, <code>vertex_layout</code>,
+    mesh ingestion in
+    <code>WgpuSceneRenderer::ensure_mesh_buffers</code> (synthesise barycentric
+    per-triangle since <code>MeshGL</code> doesn't carry it), shader logic in
+    both <code>SCENE_SHADER</code> + <code>DUAL_PEEL_COLOR_SHADER</code>, plus
+    new <code>useVertexColors</code> / <code>useVertexAlpha</code> /
+    <code>showWireframe</code> uniforms.</li>
+  <li>Defer until a node actually emits per-vertex colour data
+    (manifold-rust's <code>MeshGL.num_prop &gt; 6</code> case isn't wired in
+    any of our nodes yet).</li>
+</ul>
+
+<h3>8. WASM smoke-test pickup <span class="badge gap">blocked</span></h3>
+<ul>
+  <li>Sandbox can't bind a local HTTP port, so we can't load
+    <code>demo-wasm/pkg/</code> in a browser from within the Claude session.
+    Run <code>python -m http.server 8765</code> in
+    <code>demo-wasm/</code>, open <code>http://localhost:8765</code>, verify:
+    canvas not blank; selected node shows blue rim outline; selected node
+    shows red wireframe AABB; AA converges after 16 frames (rim and outline
+    smooth out).</li>
+  <li><code>cargo check -p demo-wasm --target wasm32-unknown-unknown</code>
+    builds clean at this snapshot; <code>wasm-pack build --target web --dev</code>
+    last ran ~38 s.</li>
+</ul>
+
+<hr>
+
+<h2>Open threads (lighter / engine-side gaps) <span class="badge gap">deferred</span></h2>
+<ul>
+  <li><strong>Matrix composition through ops nodes</strong> (called out at end
+    of Stage 4). Either compose upstream matrix through Transform / Align /
+    FitToBounds / Boolean / Combine, or commit to render-time-only matrices
+    and stop baking. Currently mixed and confusing. Decide before #2 above.</li>
+  <li><strong>NodeDesigner test ports — 2 files queued.</strong>
+    <code>graph-io-nodes.test.ts</code> + <code>graph-io-slot-rearrangement.test.ts</code>
+    and <code>socket-rename-persistence.test.ts</code>. Pattern matches the five
+    already-ported files; shared fixtures in <code>tests/common/mod.rs</code>.</li>
   <li><strong>Source-side hooks.</strong> No <code>on_output_connected</code>,
     <code>on_output_disconnected</code>, or <code>validate_output_connection</code>
     yet. Symmetric to the input-side hooks. Add when a node needs to react to its
-    consumers (e.g. JS-style <code>onConnectionsChange(OUTPUT)</code>).</li>
+    consumers.</li>
   <li><strong>Source-side wildcards.</strong> JS treats output type <code>*</code> as
     "match any input". atomartist only supports <em>target-side</em>
-    <code>SocketType::None</code> wildcard (used by Output's trailing slot). Outputs
-    always carry concrete types.</li>
+    <code>SocketType::None</code> wildcard. Outputs always carry concrete types.</li>
   <li><strong>Drag-reorder UI.</strong> Engine support is done
-    (<code>Graph::reorder_input_sockets</code>, edges unaffected since they're
-    uid-keyed). Canvas-side row drag handler is not built.</li>
-  <li><strong>Rename UI for mirror outputs.</strong> Currently subgraph publish names
-    match source-socket names (e.g. an Output node fed from <code>Extrude.Geometry</code>
-    publishes a port named <code>Geometry</code>). If users want friendlier names
-    like <code>result</code>, we need a rename UI. <code>Graph::rename_socket</code>
-    already exists.</li>
-  <li><strong>connectByType / connectByTypeOutput.</strong> JS convenience helpers.
-    Not in our API; flagged inline in <code>node_connections.rs</code>. Add when a
-    UI flow demands them.</li>
-  <li><strong>Multi-mesh viewport.</strong> Stage 2's Output node merges all
-    geometry inputs into one mesh on <code>__display__</code>. If we ever need
-    per-input materials/picking, extend <code>last_mesh_output</code> to
-    <code>Vec&lt;Arc&lt;MeshGL&gt;&gt;</code>.</li>
+    (<code>Graph::reorder_input_sockets</code>). Canvas-side row drag handler
+    is not built.</li>
+  <li><strong>Rename UI for mirror outputs.</strong>
+    <code>Graph::rename_socket</code> exists; canvas-side rename UI does not.</li>
+  <li><strong>connectByType / connectByTypeOutput.</strong> JS convenience helpers
+    flagged inline in <code>node_connections.rs</code>. Add when a UI flow
+    demands them.</li>
+  <li><strong>Multi-mesh viewport.</strong> Output node merges all geometry
+    inputs into one mesh on <code>__display__</code>. For per-input materials /
+    per-input picking, extend <code>last_mesh_output</code> to
+    <code>Vec&lt;Arc&lt;Geometry3d&gt;&gt;</code> (was <code>Arc&lt;MeshGL&gt;</code>
+    pre-Stage-4).</li>
+  <li><strong>File-line guardrail.</strong>
+    <code>demo-native/src/main.rs</code> is at 815 lines (over the 800-line cap)
+    as of this snapshot. Not touched by recent work; the
+    <code>first_party_project_files_stay_under_line_limit</code> test is the
+    canonical reporter. Refactor or carve a sub-module when convenient.</li>
 </ul>
 
 <h2>Critical file paths</h2>
@@ -358,16 +586,34 @@ applies only to the noodle concept.</p>
 <h3>Engine (<code>atomartist-lib/src/</code>)</h3>
 <ul>
   <li class="path">graph/socket.rs — <code>SocketUid</code>, <code>Socket</code>, <code>SocketUidAlloc</code></li>
-  <li class="path">graph/node.rs — <code>NodeInstance</code>, <code>PortValue</code>, lookup helpers</li>
+  <li class="path">graph/node.rs — <code>NodeInstance</code>, <code>PortValue</code> (Stage 4: <code>Geometry3d</code> variant now holds <code>Arc&lt;Geometry3d&gt;</code>)</li>
   <li class="path">graph/graph.rs — <code>Graph</code>, <code>Noodle</code>, <code>NoodleEndpoint</code>, <code>connect</code>/<code>disconnect</code></li>
   <li class="path">graph/socket_mutations.rs — rename/relabel/retype/append/remove + is_free queries</li>
   <li class="path">graph/execution_order.rs — <code>Graph::execution_order</code>, <code>Graph::ancestors</code></li>
   <li class="path">graph/executor.rs — uid-keyed evaluation (topo_sort delegates to <code>execution_order</code>)</li>
-  <li class="path">registry.rs — <code>NodeDef</code> trait + ctx types (<code>EvalCtx</code>, <code>ConnectCtx</code>, …)</li>
-  <li class="path">nodes/output_node.rs — unified dynamic Output node</li>
+  <li class="path">geometry/geometry3d.rs — <strong>Stage 4</strong>: <code>Geometry3d { mesh, matrix, color }</code> + <code>DEFAULT_GEOMETRY_COLOR</code></li>
+  <li class="path">registry.rs — <code>NodeDef</code> trait + ctx types; <code>NodeProperties::matrix4x4</code> / <code>::color</code> accessors</li>
+  <li class="path">registry/geometry_props.rs — <strong>Stage 4</strong>: <code>geometry_props()</code> + <code>wrap_mesh(ctx, mesh)</code> helpers every geometry-producing node calls</li>
+  <li class="path">nodes/output_node.rs — unified dynamic Output node (now bakes upstream matrices into <code>__display__</code> mesh)</li>
   <li class="path">nodes/ops_3d/combine_node.rs — Combine on dynamic-input</li>
+  <li class="path">nodes/ops_3d/extrude_node.rs — propagates <code>matrix</code> through <code>Geometry3d.matrix</code> (no longer bakes)</li>
   <li class="path">serialization/graph_json.rs — format v2 (uid-keyed); <code>NodeFile.properties</code> uses <code>BTreeMap</code> for deterministic canonical JSON</li>
   <li class="path">serialization/change_detection.rs — <code>ChangeTracker</code> (JSON-snapshot dirty bit)</li>
+</ul>
+
+<h3>Renderer (<code>atomartist-renderer/src/scene_renderer/</code>)</h3>
+<ul>
+  <li class="path">mod.rs — <code>WgpuSceneRenderer</code> struct, <code>RenderStyle</code> enum, <code>GpuState</code>, per-light uniform fields, <code>gizmo_lines: Vec&lt;GizmoLineSet&gt;</code></li>
+  <li class="path">render_impl.rs — full <code>WgpuCustomRender::render</code> implementation (extracted from mod.rs to stay under the 800-line cap)</li>
+  <li class="path">opaque_shaders.rs — <code>SCENE_SHADER</code> WGSL (Blinn-Phong, dual lights, sRGB→linear, flat normals via <code>dpdx</code>/<code>dpdy</code>)</li>
+  <li class="path">opaque_pass.rs — shared <code>Uniforms</code> struct (consumed by both opaque + dual-peel colour shaders)</li>
+  <li class="path">depth_peel/ — dual depth peeling (MatterCAD port, kept over NodeDesigner's single-direction peel for the ~2× perf win)</li>
+  <li class="path">accumulation.rs / accumulation_tests.rs — Halton(2,3) jitter accumulator, 16 samples, Rgba16Float ping-pong; matches NodeDesigner verbatim</li>
+  <li class="path">post_outline/ — Stage 3 NodeDesigner selection outline (ID prepass + edge-detect quad, runs in the jittered sample stream)</li>
+  <li class="path">gizmo_pass/ — Stage 3 line-list pipelines (solid depth-tested + overlay alpha-blended), <code>GizmoLineSet</code> data, <code>::bounds_box(center, size, matrix)</code> builder, <code>hash_gizmos</code> for the fingerprint cache</li>
+  <li class="path">cache.rs — <code>SceneFingerprint</code> (includes gizmo hash + all per-light uniforms + base color + outline state)</li>
+  <li class="path">viewport_widget.rs — host wiring: pushes a <code>GizmoLineSet::bounds_box</code> when selection is active, sets per-light uniforms, drives the bed gizmo</li>
+  <li class="path">picking.rs — ray / AABB intersect; the next handle / control-gizmo work extends this</li>
 </ul>
 
 <h3>Tests (<code>atomartist-lib/tests/</code>)</h3>
@@ -422,17 +668,39 @@ applies only to the noodle concept.</p>
     <td><code>Graph::noodles()</code> returns <code>&amp;[Noodle]</code></td></tr>
 <tr><td><code>node.setOutputSocketData(0, v)</code></td>
     <td>flows through <code>NodeDef::evaluate(ctx)</code> → <code>cached_outputs</code> via <code>evaluate_all</code></td></tr>
+<tr><td><code>{ mesh, _data: { matrix, color } }</code> on a geometry socket</td>
+    <td><code>Geometry3d { mesh, matrix, color }</code> wrapped in <code>PortValue::Geometry3d(Arc&lt;…&gt;)</code></td></tr>
+<tr><td>NodeDesigner's per-node <code>matrix</code> / <code>color</code> editor</td>
+    <td><code>registry::geometry_props()</code> in the node's <code>properties()</code> + <code>registry::wrap_mesh(ctx, mesh)</code> in <code>evaluate</code></td></tr>
+<tr><td><code>bounds-gizmo.js</code> show / hide</td>
+    <td>host pushes <code>GizmoLineSet::bounds_box(center, size, matrix)</code> onto <code>WgpuSceneRenderer::gizmo_lines</code> (cleared each frame)</td></tr>
 </tbody>
 </table>
 
 <h2>How to pick this back up</h2>
 <ol>
   <li><code>cd C:\Development\rust-apps\atomartist</code></li>
-  <li><code>cargo test --workspace --exclude demo-native</code> — should be 363/363 green.</li>
-  <li><code>cargo test -p agg-gui-node-editor</code> (run from <code>C:\Development\rust-apps\agg-gui</code>) — 28/28 green.</li>
-  <li>Pick the next test file off the "in flight" table. Pattern is fixed: read the JS file, port test-by-test using the shared fixtures in <code>tests/common/mod.rs</code>, cite the JS test name in each Rust <code>#[test]</code>'s doc comment.</li>
-  <li>If a port reveals a missing helper (like <code>first_free_input</code> did), add the helper to the engine in a small surgical commit, then continue the port.</li>
-  <li>If a port reveals a bug (like the noodle side-ambiguity), write the reproducing test in the relevant crate first per the project's "Test-First Bug Fixing" rule, then fix.</li>
+  <li><code>cargo test -p atomartist-lib</code> — 116 lib + 4 + 13 + 19 + 4 integration tests green. The
+    <code>first_party_project_files_stay_under_line_limit</code> test fails
+    only on <code>demo-native/src/main.rs</code> (815 lines — pre-existing, not
+    from current work).</li>
+  <li><code>cargo test -p atomartist-renderer</code> — 99 green (includes the four naga GLSL-ES emit guards).</li>
+  <li><code>cargo check -p demo-wasm --target wasm32-unknown-unknown</code> — clean.</li>
+  <li><strong>Open the "Next up" section above.</strong> Top of the queue is
+    handle meshes (#1). Start by reading the JS source path it cites; the
+    rendering side is mostly already in place. The bigger work is picking +
+    drag state + property writes through an <code>UndoCommand</code>.</li>
+  <li>Before #2 (the control gizmos), <strong>decide the matrix-composition
+    question</strong> highlighted at the end of Stage 4. Either propagate
+    upstream <code>Geometry3d.matrix</code> through every ops node, or strip
+    baking from every op and run matrices render-time-only. Without that
+    decision, dragging a Z control on a box that feeds a Transform node will
+    behave inconsistently.</li>
+  <li>For WASM verification: <code>python -m http.server 8765</code> in
+    <code>demo-wasm/</code>, then load <code>http://localhost:8765</code>.
+    Sandbox can't bind ports for me, so the actual eyeball check is on you.</li>
+  <li>Test-first bug fixing rule still applies — if a port reveals a bug, write
+    the reproducing test first per <code>CLAUDE.md</code>'s guidance.</li>
 </ol>
 
 <hr>

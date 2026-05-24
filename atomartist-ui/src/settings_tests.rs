@@ -47,6 +47,8 @@ fn non_default_values_round_trip() {
             },
         },
         last_project_path: Some(PathBuf::from("C:/users/bob/projects/widget.atmr")),
+        theme: ThemePreference::Dark,
+        accent_color: AccentColor::Purple,
     };
     let parsed = UiSettings::from_text(&s.to_text());
     assert_eq!(s, parsed);

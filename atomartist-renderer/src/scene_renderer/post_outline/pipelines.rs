@@ -141,6 +141,115 @@ impl OutlinePipelines {
             ],
         })
     }
+
+    /// Drive the full ID-prepass + edge-detect chain into `encoder`.
+    /// Caller has already populated `uniforms` (with the jittered MVP)
+    /// and verified there's a mesh to outline.
+    ///
+    /// Order of operations:
+    /// 1. Upload uniforms via [`Self::write_uniforms`].
+    /// 2. ID prepass clears `id_mask` to 0, `selected_depth` to 1.0,
+    ///    and writes a constant `1.0` mask + per-pixel depth from the
+    ///    selected mesh.
+    /// 3. Edge-detect quad reads the mask + selected depth + the
+    ///    full-scene depth mirror, alpha-blends an outline ring over
+    ///    `output_view` (typically the per-sample HDR target so the
+    ///    outline gets folded into the accumulation chain).
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute<'a>(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        uniforms: &OutlineUniforms,
+        targets: &super::OutlineTargets,
+        scene_depth_color: &wgpu::TextureView,
+        output_view: &'a wgpu::TextureView,
+        mesh: super::pipelines_mesh::Mesh<'a>,
+        viewport: (u32, u32),
+    ) {
+        let (w, h) = viewport;
+        self.write_uniforms(queue, uniforms);
+
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("atomartist outline id prepass"),
+                color_attachments: &[
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &targets.id_mask_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &targets.selected_depth_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 1.0,
+                                g: 0.0,
+                                b: 0.0,
+                                a: 1.0,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                ],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &targets.id_depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_viewport(0.0, 0.0, w as f32, h as f32, 0.0, 1.0);
+            pass.set_scissor_rect(0, 0, w, h);
+            pass.set_pipeline(&self.id_pipeline);
+            pass.set_bind_group(0, &self.id_bg, &[]);
+            pass.set_vertex_buffer(0, mesh.vbuf.slice(..));
+            pass.set_index_buffer(mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+        }
+
+        let edge_bg = self.build_edge_bind_group(
+            device,
+            &targets.id_mask_view,
+            &targets.selected_depth_view,
+            scene_depth_color,
+        );
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("atomartist outline edge detect"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: output_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_viewport(0.0, 0.0, w as f32, h as f32, 0.0, 1.0);
+            pass.set_scissor_rect(0, 0, w, h);
+            pass.set_pipeline(&self.edge_pipeline);
+            pass.set_bind_group(0, &edge_bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+    }
 }
 
 fn vertex_layout() -> wgpu::VertexBufferLayout<'static> {

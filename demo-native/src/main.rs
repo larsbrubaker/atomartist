@@ -476,7 +476,34 @@ fn main() {
             match event {
                 Event::WindowEvent {
                     event: WindowEvent::CloseRequested, ..
-                } => elwt.exit(),
+                } => {
+                    // Flush pending settings before exiting so the
+                    // last-opened project path (and theme / accent /
+                    // window bounds the user just changed) survives
+                    // even when the close happens between paints —
+                    // a native modal dialog can leave AutoSave with
+                    // a non-zero `mouse_buttons_held` count that
+                    // would otherwise skip the final write.
+                    if let Some(ref path) = settings_path {
+                        let mut s = state_for_save.ui_settings();
+                        s.debug_windows = debug_for_save.current_state();
+                        let mut main = normal_bounds_for_save.get();
+                        main.maximized = window_for_save.is_maximized();
+                        s.main_window = main;
+                        let blob = s.to_text();
+                        if let Some(parent) = path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        if let Err(e) = std::fs::write(path, blob) {
+                            eprintln!(
+                                "warning: failed to save UI settings to {}: {}",
+                                path.display(),
+                                e
+                            );
+                        }
+                    }
+                    elwt.exit();
+                }
                 Event::WindowEvent {
                     event: WindowEvent::Resized(new_size), ..
                 } => {

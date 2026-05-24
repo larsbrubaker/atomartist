@@ -33,6 +33,18 @@ pub mod shaders;
 
 pub use pipelines::{OutlinePipelines, OutlineUniforms};
 
+/// Mesh-handle bundle the renderer hands to
+/// [`OutlinePipelines::execute`]. Lives in its own module so the
+/// pipeline module can import it without depending on `mod.rs`.
+pub mod pipelines_mesh {
+    #[derive(Clone, Copy)]
+    pub struct Mesh<'a> {
+        pub vbuf: &'a wgpu::Buffer,
+        pub ibuf: &'a wgpu::Buffer,
+        pub index_count: u32,
+    }
+}
+
 /// Wgpu textures + views the outline chain needs. Held inside the
 /// renderer's GpuState; reallocated on resize via
 /// [`OutlineTargets::ensure_size`].
