@@ -12,6 +12,8 @@ use manifold_rust::types::MeshGL;
 use crate::geometry::{Geometry3d, DEFAULT_GEOMETRY_COLOR};
 use crate::graph::node::{identity_matrix, PortValue};
 
+use crate::graph::node::PortValue as _PortValue;
+
 use super::{EditorKind, EvalCtx, PropDef};
 
 /// Standard `matrix` + `color` properties every geometry-producing
@@ -49,8 +51,19 @@ pub fn geometry_props() -> Vec<PropDef> {
 /// out.set("out", PortValue::Geometry3d(Arc::new(wrap_mesh(ctx, mesh))));
 /// ```
 pub fn wrap_mesh(ctx: &EvalCtx, mesh: MeshGL) -> Geometry3d {
-    let matrix = ctx.properties.matrix4x4("matrix", identity_matrix());
-    let color = ctx.properties.color("color", DEFAULT_GEOMETRY_COLOR);
+    // Color and Matrix can come from either an upstream input socket
+    // (nodes that declared "Color" / "Matrix" inputs in `instantiate`)
+    // or the node's own property store. Inputs win when wired —
+    // matches the Extrude node's "socket-or-property" pattern so the
+    // resolution rule is consistent across every geometry node.
+    let color = match ctx.input_named("Color") {
+        _PortValue::Color(c) => *c,
+        _ => ctx.properties.color("color", DEFAULT_GEOMETRY_COLOR),
+    };
+    let matrix = match ctx.input_named("Matrix") {
+        _PortValue::Matrix4x4(m) => *m,
+        _ => ctx.properties.matrix4x4("matrix", identity_matrix()),
+    };
     Geometry3d {
         mesh: Arc::new(mesh),
         matrix,

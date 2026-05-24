@@ -77,21 +77,27 @@ impl Default for CylinderProps {
 }
 
 impl CylinderProps {
-    /// Read a snapshot from an evaluation context. No input-socket
-    /// overrides for now — the cylinder primitive has no input sockets;
-    /// every value comes from the property panel. (Extrude is the model
-    /// for adding socket overrides when we wire those in.)
+    /// Read a snapshot from an evaluation context. Each numeric
+    /// property has a matching input socket — when wired, the
+    /// upstream value wins; otherwise the property's stored value (or
+    /// the type default) feeds the geometry. Matches the Extrude
+    /// node's "socket-or-property" pattern so connection flow is
+    /// consistent across every geometry-producing node.
     pub fn resolve(ctx: &EvalCtx) -> Self {
         let def = Self::default();
         let p = ctx.properties;
+        let num = |socket: &str, prop: &str, fallback: f64| match ctx.input_named(socket) {
+            PortValue::Number(n) => *n,
+            _ => p.number(prop, fallback),
+        };
         Self {
-            diameter: p.number("diameter", def.diameter),
-            height: p.number("height", def.height),
-            sides: p.number("sides", def.sides),
+            diameter: num("Diameter", "diameter", def.diameter),
+            height: num("Height", "height", def.height),
+            sides: num("Sides", "sides", def.sides),
             advanced: p.bool_("advanced", def.advanced),
-            diameter_top: p.number("diameter_top", def.diameter_top),
-            starting_angle: p.number("starting_angle", def.starting_angle),
-            ending_angle: p.number("ending_angle", def.ending_angle),
+            diameter_top: num("Diameter Top", "diameter_top", def.diameter_top),
+            starting_angle: num("Starting Angle", "starting_angle", def.starting_angle),
+            ending_angle: num("Ending Angle", "ending_angle", def.ending_angle),
         }
     }
 }
@@ -114,7 +120,8 @@ fn props_layout() -> Vec<(&'static str, PortValue, NodeFieldAttrs)> {
                         .with_ease_in(2.0)
                         .with_snap_grid()
                         .with_decimal_places(2),
-                )),
+                ))
+                .bound_to("Diameter"),
         ),
         (
             "height",
@@ -126,7 +133,8 @@ fn props_layout() -> Vec<(&'static str, PortValue, NodeFieldAttrs)> {
                         .with_ease_in(2.0)
                         .with_snap_grid()
                         .with_decimal_places(2),
-                )),
+                ))
+                .bound_to("Height"),
         ),
         (
             "sides",
@@ -139,7 +147,8 @@ fn props_layout() -> Vec<(&'static str, PortValue, NodeFieldAttrs)> {
                         .integer()
                         .with_step(1.0)
                         .with_ease_in(2.0),
-                )),
+                ))
+                .bound_to("Sides"),
         ),
         (
             "advanced",
@@ -173,6 +182,7 @@ fn props_layout() -> Vec<(&'static str, PortValue, NodeFieldAttrs)> {
                         .with_snap_grid()
                         .with_decimal_places(2),
                 ))
+                .bound_to("Diameter Top")
                 .advanced(),
         ),
         (
@@ -185,6 +195,7 @@ fn props_layout() -> Vec<(&'static str, PortValue, NodeFieldAttrs)> {
                         .with_step(1.0)
                         .with_decimal_places(2),
                 ))
+                .bound_to("Starting Angle")
                 .advanced(),
         ),
         (
@@ -197,6 +208,7 @@ fn props_layout() -> Vec<(&'static str, PortValue, NodeFieldAttrs)> {
                         .with_step(1.0)
                         .with_decimal_places(2),
                 ))
+                .bound_to("Ending Angle")
                 .advanced(),
         ),
     ]
@@ -210,21 +222,44 @@ impl NodeDef for CylinderNode {
     fn category(&self) -> &'static str { "Primitives 3D" }
 
     fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
+        // Every editable numeric / color / matrix property carries a
+        // matching optional input socket so any of them can be driven
+        // by an upstream connection — the same "socket-or-property"
+        // shape Extrude uses. The `advanced` toggle and the read-only
+        // `easy_mode_message` row stay property-only since they're
+        // UI controls, not data inputs.
         InstanceTemplate::builder(alloc)
+            .input_with_label("Color", "Color", SocketType::Color, true)
+            .input_with_label("Matrix", "Matrix", SocketType::Matrix4x4, true)
+            .input_with_label("Diameter", "Diameter", SocketType::Number, true)
+            .input_with_label("Height", "Height", SocketType::Number, true)
+            .input_with_label("Sides", "Sides", SocketType::Number, true)
+            .input_with_label("Diameter Top", "Diameter Top", SocketType::Number, true)
+            .input_with_label("Starting Angle", "Starting Angle", SocketType::Number, true)
+            .input_with_label("Ending Angle", "Ending Angle", SocketType::Number, true)
             .output("out", SocketType::Geometry3d)
             .build()
     }
 
     fn properties(&self) -> Vec<PropDef> {
-        let mut p: Vec<PropDef> = props_layout()
+        let p: Vec<PropDef> = props_layout()
             .into_iter()
             .map(|(name, default, attrs)| PropDef::from_attrs(name, default, &attrs))
             .collect();
-        // Shared `matrix` + `color` properties tacked onto every
-        // 3D-geometry-producing node, same as Box / Sphere / Extrude.
-        // Prepend color + matrix so they render as the first two rows.
-        let mut p = { let mut g = geometry_props(); g.extend(p); g };
-        p
+        // Shared `color` + `matrix` properties — bind them to the
+        // matching input sockets minted in `instantiate`, then place
+        // them first so the panel renders them as the leading rows.
+        let mut geom = geometry_props();
+        for prop in &mut geom {
+            let socket = match prop.name.as_ref() {
+                "color" => "Color",
+                "matrix" => "Matrix",
+                _ => continue,
+            };
+            *prop = prop.clone().bind_input(socket);
+        }
+        geom.extend(p);
+        geom
     }
 
     fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
