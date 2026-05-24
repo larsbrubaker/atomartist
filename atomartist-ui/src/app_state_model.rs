@@ -27,7 +27,7 @@ use agg_gui_node_editor as ne;
 use atomartist_lib::graph::graph::{Noodle, GraphError};
 use atomartist_lib::graph::node::{NodeId as DomainNodeId, PortValue};
 use atomartist_lib::graph::socket::SocketUid;
-use atomartist_lib::registry::{EditorKind, VisibleWhen};
+use atomartist_lib::registry::EditorKind;
 use atomartist_lib::SocketType;
 
 use crate::app_state::AppState;
@@ -150,22 +150,24 @@ impl ne::NodeGraphModel for AppStateModel {
                         display_label: s.display_label.as_ref().map(|l| l.to_string()),
                     })
                     .collect();
-                // Live "advanced" toggle value drives `VisibleWhen`
-                // gating. MatterCAD's `IPropertyGridModifier.UpdateControls`
-                // hook is replaced here by a declarative filter.
-                let live_advanced = matches!(
-                    n.properties.get("advanced"),
-                    Some(PortValue::Bool(true))
-                );
+                // Row-by-row visibility runs through `NodeDef::row_visible`,
+                // the Rust analogue of MatterCAD's
+                // `IPropertyGridModifier.UpdateControls(change)`. The
+                // default impl applies each `PropDef.visible_when`
+                // against the live `advanced` toggle; nodes with
+                // complex inter-property predicates (e.g. an Align
+                // node where `XOffset` depends on both `XAlign` and
+                // `XMode`) override the hook to express the full
+                // logic. Build a `NodeProperties` snapshot once per
+                // node, then ask the def whether each row is visible.
+                let mut snapshot = atomartist_lib::registry::NodeProperties::default();
+                for (k, v) in &n.properties {
+                    snapshot.insert(k.clone(), v.clone());
+                }
                 let properties: Vec<ne::PropertyView> = def
                     .properties()
                     .into_iter()
-                    .filter(|p| match p.visible_when {
-                        VisibleWhen::Always => true,
-                        VisibleWhen::Never => false,
-                        VisibleWhen::AdvancedOn => live_advanced,
-                        VisibleWhen::AdvancedOff => !live_advanced,
-                    })
+                    .filter(|p| def.row_visible(&p.name, &snapshot))
                     .map(|p| {
                         let current = n
                             .properties
@@ -180,6 +182,11 @@ impl ne::NodeGraphModel for AppStateModel {
                             max: p.max,
                             bound_input: p.bound_input.as_ref().map(|s| s.to_string()),
                             editor: Self::editor_kind_to_ne(&p.editor),
+                            // Forward the full schema-side editor so
+                            // the per-kind row renderers (`paint_row`)
+                            // can mount the right pill, toggle,
+                            // swatch, etc.
+                            editor_kind: Some(p.editor.clone()),
                         }
                     })
                     .collect();

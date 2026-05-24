@@ -377,6 +377,44 @@ pub trait NodeDef: Send + Sync {
     /// Default is no-op; dynamic-input nodes override to collapse the
     /// now-orphan slot.
     fn on_input_disconnected(&self, _ctx: &mut DisconnectCtx) {}
+
+    /// Decide whether a property row should appear in the panel right
+    /// now. This is the dynamic, host-defined visibility hook —
+    /// MatterCAD's `IPropertyGridModifier.UpdateControls(change)`
+    /// expressed as a per-name predicate.
+    ///
+    /// The default implementation applies the static
+    /// [`VisibleWhen`](crate::registry::VisibleWhen) on the row's
+    /// [`PropDef`] (Always / AdvancedOn / AdvancedOff / Never).
+    /// Nodes whose row visibility depends on multiple sibling
+    /// properties (`XMode` depends on `XAlign`, `XSubAlign` depends
+    /// on both, etc.) override this method to express the full
+    /// predicate.
+    ///
+    /// When overriding, call [`default_row_visible`](Self::default_row_visible)
+    /// for any rows you want to fall through to the declarative
+    /// rule.
+    fn row_visible(&self, name: &str, props: &NodeProperties) -> bool {
+        self.default_row_visible(name, props)
+    }
+
+    /// Provided helper: the declarative visibility check using each
+    /// property's `visible_when` tag and the live `advanced` toggle.
+    /// Override-friendly: `row_visible` can call this for any rows it
+    /// doesn't have custom logic for.
+    fn default_row_visible(&self, name: &str, props: &NodeProperties) -> bool {
+        let p = match self.properties().into_iter().find(|p| p.name.as_ref() == name) {
+            Some(p) => p,
+            None => return true,
+        };
+        let advanced = props.bool_("advanced", false);
+        match p.visible_when {
+            VisibleWhen::Always => true,
+            VisibleWhen::Never => false,
+            VisibleWhen::AdvancedOn => advanced,
+            VisibleWhen::AdvancedOff => !advanced,
+        }
+    }
 }
 
 /// Map of `type_id` to `Arc<dyn NodeDef>`. Constructed once at startup and
@@ -471,6 +509,114 @@ mod tests {
         fn evaluate(&self, _ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
             Ok(NodeOutputs::default())
         }
+    }
+
+    /// Fixture mirroring MatterCAD's `AlignObject3D_3.UpdateControls`:
+    /// `mode` is visible iff `align != "None"`; `sub_align` visible iff
+    /// `align != "None"` AND `mode == "Offset"`; `offset` visible iff
+    /// `align != "None"` AND (`mode == "Offset"` OR `mode == "Stacked"`).
+    struct AlignAxisNode;
+    impl NodeDef for AlignAxisNode {
+        fn type_id(&self) -> &'static str { "AlignAxis" }
+        fn category(&self) -> &'static str { "Test" }
+        fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
+            InstanceTemplate::builder(alloc).build()
+        }
+        fn evaluate(&self, _ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
+            Ok(NodeOutputs::default())
+        }
+        fn properties(&self) -> Vec<PropDef> {
+            vec![
+                PropDef::new("align", PortValue::StringVal(Arc::new("None".into())))
+                    .with_editor(EditorKind::EnumDropdown {
+                        variants: vec!["None".into(), "Min".into(), "Center".into(), "Max".into()],
+                    }),
+                PropDef::new("mode", PortValue::StringVal(Arc::new("Simple".into())))
+                    .with_editor(EditorKind::EnumButtons {
+                        variants: vec!["Simple".into(), "Offset".into(), "Stacked".into()],
+                    }),
+                PropDef::new("sub_align", PortValue::StringVal(Arc::new("None".into())))
+                    .with_editor(EditorKind::EnumDropdown {
+                        variants: vec!["None".into(), "Min".into(), "Center".into(), "Max".into()],
+                    }),
+                PropDef::new("offset", PortValue::Number(0.0)).with_range(-20.0, 20.0),
+            ]
+        }
+        fn row_visible(&self, name: &str, props: &NodeProperties) -> bool {
+            let align = match props.get("align") {
+                PortValue::StringVal(s) => s.as_str().to_string(),
+                _ => "None".into(),
+            };
+            let mode = match props.get("mode") {
+                PortValue::StringVal(s) => s.as_str().to_string(),
+                _ => "Simple".into(),
+            };
+            match name {
+                "mode" => align != "None",
+                "sub_align" => align != "None" && mode == "Offset",
+                "offset" => {
+                    align != "None" && (mode == "Offset" || mode == "Stacked")
+                }
+                // `align` itself + anything else (color / matrix
+                // future addition) fall through to the declarative
+                // VisibleWhen rule.
+                _ => self.default_row_visible(name, props),
+            }
+        }
+    }
+
+    /// Build a `NodeProperties` snapshot from the given (name, value)
+    /// pairs. Helper for the visibility tests below.
+    fn props_with(pairs: &[(&str, PortValue)]) -> NodeProperties {
+        let mut p = NodeProperties::default();
+        for (k, v) in pairs {
+            p.insert(*k, v.clone());
+        }
+        p
+    }
+
+    #[test]
+    fn row_visible_defaults_to_visible_when() {
+        // DummyNode's `out` has no PropDef → defaults to visible.
+        let n = DummyNode;
+        let props = NodeProperties::default();
+        assert!(n.row_visible("missing_name", &props));
+    }
+
+    #[test]
+    fn row_visible_override_reads_sibling_properties() {
+        let n = AlignAxisNode;
+        // align = None → only `align` itself is visible.
+        let props = props_with(&[("align", PortValue::StringVal(Arc::new("None".into())))]);
+        assert!(n.row_visible("align", &props));
+        assert!(!n.row_visible("mode", &props));
+        assert!(!n.row_visible("sub_align", &props));
+        assert!(!n.row_visible("offset", &props));
+
+        // align = Min → `mode` becomes visible.
+        let props = props_with(&[("align", PortValue::StringVal(Arc::new("Min".into())))]);
+        assert!(n.row_visible("mode", &props));
+        // mode defaults to Simple → sub_align/offset still hidden.
+        assert!(!n.row_visible("sub_align", &props));
+        assert!(!n.row_visible("offset", &props));
+
+        // align = Min, mode = Offset → sub_align + offset both show.
+        let props = props_with(&[
+            ("align", PortValue::StringVal(Arc::new("Min".into()))),
+            ("mode", PortValue::StringVal(Arc::new("Offset".into()))),
+        ]);
+        assert!(n.row_visible("mode", &props));
+        assert!(n.row_visible("sub_align", &props));
+        assert!(n.row_visible("offset", &props));
+
+        // align = Min, mode = Stacked → offset shows, sub_align does not.
+        let props = props_with(&[
+            ("align", PortValue::StringVal(Arc::new("Min".into()))),
+            ("mode", PortValue::StringVal(Arc::new("Stacked".into()))),
+        ]);
+        assert!(n.row_visible("mode", &props));
+        assert!(!n.row_visible("sub_align", &props));
+        assert!(n.row_visible("offset", &props));
     }
 
     #[test]
