@@ -130,11 +130,35 @@ impl ne::NodeGraphModel for AppStateModel {
         g.nodes()
             .filter_map(|n| {
                 let def = reg.get(&n.type_id)?;
-                // Sockets live on the instance now — that's where dynamic
-                // nodes track their per-instance configuration.
+                // Row-by-row visibility runs through `NodeDef::row_visible`,
+                // the Rust analogue of MatterCAD's
+                // `IPropertyGridModifier.UpdateControls(change)`. The
+                // default impl applies each `PropDef.visible_when`
+                // against the live `advanced` toggle; nodes with
+                // complex inter-property predicates (e.g. an Align
+                // node where `XOffset` depends on both `XAlign` and
+                // `XMode`) override the hook to express the full
+                // logic. Build a `NodeProperties` snapshot once per
+                // node, then ask the def whether each row is visible.
+                let mut snapshot = atomartist_lib::registry::NodeProperties::default();
+                for (k, v) in &n.properties {
+                    snapshot.insert(k.clone(), v.clone());
+                }
+                // Sockets whose bound property is currently filtered
+                // out should disappear too — otherwise the canvas
+                // renders them as bare input rows at the top of the
+                // node body. Compute that set up-front and use it to
+                // prune the input list before SocketView translation.
+                let hidden_sockets: std::collections::HashSet<String> = def
+                    .properties()
+                    .into_iter()
+                    .filter(|p| !def.row_visible(&p.name, &snapshot))
+                    .filter_map(|p| p.bound_input.as_ref().map(|s| s.to_string()))
+                    .collect();
                 let inputs: Vec<ne::SocketView> = n
                     .inputs
                     .iter()
+                    .filter(|s| !hidden_sockets.contains(s.name.as_ref()))
                     .map(|s| ne::SocketView {
                         name: s.name.to_string(),
                         socket_type: Self::socket_type_to_id(s.socket_type),
@@ -150,20 +174,6 @@ impl ne::NodeGraphModel for AppStateModel {
                         display_label: s.display_label.as_ref().map(|l| l.to_string()),
                     })
                     .collect();
-                // Row-by-row visibility runs through `NodeDef::row_visible`,
-                // the Rust analogue of MatterCAD's
-                // `IPropertyGridModifier.UpdateControls(change)`. The
-                // default impl applies each `PropDef.visible_when`
-                // against the live `advanced` toggle; nodes with
-                // complex inter-property predicates (e.g. an Align
-                // node where `XOffset` depends on both `XAlign` and
-                // `XMode`) override the hook to express the full
-                // logic. Build a `NodeProperties` snapshot once per
-                // node, then ask the def whether each row is visible.
-                let mut snapshot = atomartist_lib::registry::NodeProperties::default();
-                for (k, v) in &n.properties {
-                    snapshot.insert(k.clone(), v.clone());
-                }
                 let properties: Vec<ne::PropertyView> = def
                     .properties()
                     .into_iter()
