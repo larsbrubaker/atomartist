@@ -50,6 +50,9 @@ pub fn generate_box(width: f64, height: f64, depth: f64) -> MeshGL {
 /// Cylinder along the Y axis, centered at origin. Radius applied in XZ.
 /// `segments` controls the side count. Top + bottom caps are flat-shaded.
 pub fn generate_cylinder(radius: f64, height: f64, segments: u32) -> MeshGL {
+    // Z-up cylinder: rotation axis along +Z, matching MatterCAD's
+    // `CylinderObject3D` convention. The ring lies in the XY plane;
+    // `height` extends along Z from `-h/2` to `+h/2`.
     let segments = segments.max(3);
     let r = radius as f32;
     let h = (height * 0.5) as f32;
@@ -62,56 +65,58 @@ pub fn generate_cylinder(radius: f64, height: f64, segments: u32) -> MeshGL {
     for i in 0..segments {
         let a0 = (i as f32) / (segments as f32) * std::f32::consts::TAU;
         let a1 = ((i + 1) as f32) / (segments as f32) * std::f32::consts::TAU;
-        let (x0, z0) = (a0.cos() * r, a0.sin() * r);
-        let (x1, z1) = (a1.cos() * r, a1.sin() * r);
+        let (x0, y0) = (a0.cos() * r, a0.sin() * r);
+        let (x1, y1) = (a1.cos() * r, a1.sin() * r);
         // Side normal at midpoint of the segment (averaged across the quad).
         let nx = (a0.cos() + a1.cos()) * 0.5;
-        let nz = (a0.sin() + a1.sin()) * 0.5;
-        let n_len = (nx * nx + nz * nz).sqrt().max(1e-6);
-        let n = [nx / n_len, 0.0, nz / n_len];
+        let ny = (a0.sin() + a1.sin()) * 0.5;
+        let n_len = (nx * nx + ny * ny).sqrt().max(1e-6);
+        let n = [nx / n_len, ny / n_len, 0.0];
 
         let base = (verts.len() / NUM_PROP as usize) as u32;
-        // bottom-back, top-back, top-front, bottom-front (CCW from outside)
-        for &(x, y, z) in &[(x0, -h, z0), (x0, h, z0), (x1, h, z1), (x1, -h, z1)] {
+        // bottom-back, top-back, top-front, bottom-front. For Z-up the
+        // XY-plane rotation has opposite handedness from the Y-up
+        // primitives' XZ-plane rotation, so the side winding flips
+        // relative to the historic order to keep outward normals
+        // facing out.
+        for &(x, y, z) in &[(x0, y0, -h), (x0, y0, h), (x1, y1, h), (x1, y1, -h)] {
             verts.extend_from_slice(&[x, y, z]);
             verts.extend_from_slice(&n);
         }
-        tris.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        tris.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
     }
 
-    // Top cap: triangle fan from center (normal +Y).
+    // Top cap: triangle fan from centre (normal +Z).
     let top_center = (verts.len() / NUM_PROP as usize) as u32;
-    verts.extend_from_slice(&[0.0, h, 0.0, 0.0, 1.0, 0.0]);
+    verts.extend_from_slice(&[0.0, 0.0, h, 0.0, 0.0, 1.0]);
     let top_ring_start = (verts.len() / NUM_PROP as usize) as u32;
     for i in 0..segments {
         let a = (i as f32) / (segments as f32) * std::f32::consts::TAU;
-        verts.extend_from_slice(&[a.cos() * r, h, a.sin() * r, 0.0, 1.0, 0.0]);
+        verts.extend_from_slice(&[a.cos() * r, a.sin() * r, h, 0.0, 0.0, 1.0]);
     }
     for i in 0..segments {
         let v0 = top_center;
         let v1 = top_ring_start + i;
         let v2 = top_ring_start + ((i + 1) % segments);
-        // CCW from above (+Y looking down): center → ring[i] → ring[i+1].
-        // But +Y looking down has +X right, +Z up in the projected view,
-        // so going around 0°→90°→180° increasing-angle CCW. That means
-        // i+1 then i — we want (center, ring[i+1], ring[i]).
-        tris.extend_from_slice(&[v0, v2, v1]);
+        // CCW from above (+Z looking down): center → ring[i] → ring[i+1].
+        tris.extend_from_slice(&[v0, v1, v2]);
     }
 
-    // Bottom cap: triangle fan from center (normal -Y).
+    // Bottom cap: triangle fan from centre (normal -Z).
     let bot_center = (verts.len() / NUM_PROP as usize) as u32;
-    verts.extend_from_slice(&[0.0, -h, 0.0, 0.0, -1.0, 0.0]);
+    verts.extend_from_slice(&[0.0, 0.0, -h, 0.0, 0.0, -1.0]);
     let bot_ring_start = (verts.len() / NUM_PROP as usize) as u32;
     for i in 0..segments {
         let a = (i as f32) / (segments as f32) * std::f32::consts::TAU;
-        verts.extend_from_slice(&[a.cos() * r, -h, a.sin() * r, 0.0, -1.0, 0.0]);
+        verts.extend_from_slice(&[a.cos() * r, a.sin() * r, -h, 0.0, 0.0, -1.0]);
     }
     for i in 0..segments {
         let v0 = bot_center;
         let v1 = bot_ring_start + i;
         let v2 = bot_ring_start + ((i + 1) % segments);
-        // CCW from below (looking +Y from -Y): center → ring[i] → ring[i+1].
-        tris.extend_from_slice(&[v0, v1, v2]);
+        // CCW from below (-Z looking up): reverse winding to keep
+        // outward face culling correct.
+        tris.extend_from_slice(&[v0, v2, v1]);
     }
 
     make_mesh(verts, tris)
@@ -126,9 +131,12 @@ pub fn generate_cylinder(radius: f64, height: f64, segments: u32) -> MeshGL {
 ///     "wedge" side walls close the volume (one at `start_angle`, one
 ///     at `end_angle`).
 ///
-/// Coordinate system follows the rest of `primitives.rs`: Y up, the
-/// cylinder is centred on the origin, bottom face at `y = -height/2`,
-/// top face at `y = +height/2`. Returns a flat-shaded `MeshGL`.
+/// Coordinate system: **Z up** for cylinders (matches MatterCAD's
+/// `CylinderObject3D` convention) — the rotation axis runs along +Z,
+/// bottom face at `z = -height/2`, top face at `z = +height/2`. The
+/// ring lies in the XY plane. Other primitives in this module remain
+/// Y-up; only the cylinders flip to Z-up so the user-set "height" of
+/// the cylinder reads vertically in MatterCAD-style scenes.
 pub fn generate_cylinder_advanced(
     diameter_bottom: f64,
     diameter_top: f64,
@@ -147,6 +155,7 @@ pub fn generate_cylinder_advanced(
     let mut verts: Vec<f32> = Vec::new();
     let mut tris: Vec<u32> = Vec::new();
 
+    // Z-up cylinder: ring lies in XY plane, height extends along Z.
     // Side quads — `sides` evenly spaced over the swept arc.
     for i in 0..sides {
         let t0 = i as f64 / sides as f64;
@@ -160,47 +169,50 @@ pub fn generate_cylinder_advanced(
         // for now (the difference is small for typical tapers and tests
         // don't depend on it).
         let nx = (cb0 + cb1) * 0.5;
-        let nz = (sb0 + sb1) * 0.5;
-        let nlen = (nx * nx + nz * nz).sqrt().max(1e-6);
-        let n = [nx / nlen, 0.0, nz / nlen];
+        let ny = (sb0 + sb1) * 0.5;
+        let nlen = (nx * nx + ny * ny).sqrt().max(1e-6);
+        let n = [nx / nlen, ny / nlen, 0.0];
 
         let base = (verts.len() / NUM_PROP as usize) as u32;
-        let p_bb = (cb0 * r_bot, -h, sb0 * r_bot);
-        let p_bt = (cb0 * r_top, h, sb0 * r_top);
-        let p_ft = (cb1 * r_top, h, sb1 * r_top);
-        let p_fb = (cb1 * r_bot, -h, sb1 * r_bot);
+        let p_bb = (cb0 * r_bot, sb0 * r_bot, -h);
+        let p_bt = (cb0 * r_top, sb0 * r_top, h);
+        let p_ft = (cb1 * r_top, sb1 * r_top, h);
+        let p_fb = (cb1 * r_bot, sb1 * r_bot, -h);
         for (x, y, z) in [p_bb, p_bt, p_ft, p_fb] {
             verts.extend_from_slice(&[x, y, z]);
             verts.extend_from_slice(&n);
         }
-        tris.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        // Z-up winding: reverse the bb→bt→ft order so the outward
+        // normal faces correctly (see `generate_cylinder` for the
+        // handedness analysis).
+        tris.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
     }
 
-    // Top cap — triangle fan from centre, normal +Y.
+    // Top cap — triangle fan from centre, normal +Z.
     let top_center = (verts.len() / NUM_PROP as usize) as u32;
-    verts.extend_from_slice(&[0.0, h, 0.0, 0.0, 1.0, 0.0]);
+    verts.extend_from_slice(&[0.0, 0.0, h, 0.0, 0.0, 1.0]);
     let top_ring_start = (verts.len() / NUM_PROP as usize) as u32;
     for i in 0..=sides {
         let t = i as f64 / sides as f64;
         let a = (start_angle_rad + arc * t) as f32;
-        verts.extend_from_slice(&[a.cos() * r_top, h, a.sin() * r_top, 0.0, 1.0, 0.0]);
+        verts.extend_from_slice(&[a.cos() * r_top, a.sin() * r_top, h, 0.0, 0.0, 1.0]);
     }
     for i in 0..sides {
-        // CCW from above (+Y looking down).
-        tris.extend_from_slice(&[top_center, top_ring_start + i + 1, top_ring_start + i]);
+        // CCW when viewed from +Z looking toward -Z.
+        tris.extend_from_slice(&[top_center, top_ring_start + i, top_ring_start + i + 1]);
     }
 
-    // Bottom cap — triangle fan from centre, normal -Y. Reversed winding.
+    // Bottom cap — triangle fan from centre, normal -Z. Reversed winding.
     let bot_center = (verts.len() / NUM_PROP as usize) as u32;
-    verts.extend_from_slice(&[0.0, -h, 0.0, 0.0, -1.0, 0.0]);
+    verts.extend_from_slice(&[0.0, 0.0, -h, 0.0, 0.0, -1.0]);
     let bot_ring_start = (verts.len() / NUM_PROP as usize) as u32;
     for i in 0..=sides {
         let t = i as f64 / sides as f64;
         let a = (start_angle_rad + arc * t) as f32;
-        verts.extend_from_slice(&[a.cos() * r_bot, -h, a.sin() * r_bot, 0.0, -1.0, 0.0]);
+        verts.extend_from_slice(&[a.cos() * r_bot, a.sin() * r_bot, -h, 0.0, 0.0, -1.0]);
     }
     for i in 0..sides {
-        tris.extend_from_slice(&[bot_center, bot_ring_start + i, bot_ring_start + i + 1]);
+        tris.extend_from_slice(&[bot_center, bot_ring_start + i + 1, bot_ring_start + i]);
     }
 
     // Wedge walls for partial revolves — two quads from centre axis
@@ -208,18 +220,19 @@ pub fn generate_cylinder_advanced(
     if partial {
         let emit_wedge = |verts: &mut Vec<f32>, tris: &mut Vec<u32>, angle: f32, outward: bool| {
             let (ca, sa) = (angle.cos(), angle.sin());
-            // Wedge normal is perpendicular to the rim ray, pointing
-            // out of the missing arc. `outward = true` faces away from
-            // the included arc on the start side; the end side flips.
+            // Wedge normal is perpendicular to the rim ray in XY plane,
+            // pointing out of the missing arc. `outward = true` faces
+            // away from the included arc on the start side; the end
+            // side flips.
             let sign = if outward { 1.0 } else { -1.0 };
-            let n = [sign * -sa, 0.0, sign * ca];
+            let n = [sign * -sa, sign * ca, 0.0];
             let base = (verts.len() / NUM_PROP as usize) as u32;
             // axis bottom, axis top, outer top, outer bottom — CCW when
             // viewed from the normal side.
-            let p_ab = (0.0, -h, 0.0);
-            let p_at = (0.0, h, 0.0);
-            let p_ot = (ca * r_top, h, sa * r_top);
-            let p_ob = (ca * r_bot, -h, sa * r_bot);
+            let p_ab = (0.0, 0.0, -h);
+            let p_at = (0.0, 0.0, h);
+            let p_ot = (ca * r_top, sa * r_top, h);
+            let p_ob = (ca * r_bot, sa * r_bot, -h);
             for (x, y, z) in [p_ab, p_at, p_ot, p_ob] {
                 verts.extend_from_slice(&[x, y, z]);
                 verts.extend_from_slice(&n);
@@ -332,7 +345,12 @@ pub fn generate_torus(major_r: f64, minor_r: f64, segments_major: u32, segments_
             let v10 = j * stride_u + (i + 1);
             let v01 = (j + 1) * stride_u + i;
             let v11 = (j + 1) * stride_u + (i + 1);
-            tris.extend_from_slice(&[v00, v10, v11, v00, v11, v01]);
+            // Reversed from the natural (v00, v10, v11) order — the
+            // torus parametrization here goes theta CCW around +Y and
+            // phi CCW around the minor ring; that handedness makes the
+            // cross product of (v10-v00, v11-v00) point INWARD. Flip
+            // each triangle's winding so the outward face is the front.
+            tris.extend_from_slice(&[v00, v11, v10, v00, v01, v11]);
         }
     }
     make_mesh(verts, tris)
@@ -571,6 +589,140 @@ mod tests {
             // n parallel to p? Check via dot product against normalized p.
             let dot = (p[0] * n[0] + p[1] * n[1] + p[2] * n[2]) / pl.max(1e-6);
             assert!(dot > 0.999, "normal not outward; dot={}", dot);
+        }
+    }
+
+    /// Compute the cross-product face normal of triangle `tri` in mesh `m`.
+    /// Returns `(unit_normal, twice_area)` — `twice_area` is the raw cross
+    /// magnitude, useful for detecting degenerate triangles where the
+    /// normalized direction is meaningless.
+    fn face_normal(m: &MeshGL, tri: usize) -> ([f32; 3], f32) {
+        let i0 = m.tri_verts[tri * 3] as usize;
+        let i1 = m.tri_verts[tri * 3 + 1] as usize;
+        let i2 = m.tri_verts[tri * 3 + 2] as usize;
+        let p0 = get_pos(m, i0);
+        let p1 = get_pos(m, i1);
+        let p2 = get_pos(m, i2);
+        let e1 = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+        let e2 = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
+        let n = [
+            e1[1] * e2[2] - e1[2] * e2[1],
+            e1[2] * e2[0] - e1[0] * e2[2],
+            e1[0] * e2[1] - e1[1] * e2[0],
+        ];
+        let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        if l < 1e-12 {
+            return ([0.0, 0.0, 0.0], 0.0);
+        }
+        ([n[0] / l, n[1] / l, n[2] / l], l)
+    }
+
+    fn face_centroid(m: &MeshGL, tri: usize) -> [f32; 3] {
+        let i0 = m.tri_verts[tri * 3] as usize;
+        let i1 = m.tri_verts[tri * 3 + 1] as usize;
+        let i2 = m.tri_verts[tri * 3 + 2] as usize;
+        let p0 = get_pos(m, i0);
+        let p1 = get_pos(m, i1);
+        let p2 = get_pos(m, i2);
+        [
+            (p0[0] + p1[0] + p2[0]) / 3.0,
+            (p0[1] + p1[1] + p2[1]) / 3.0,
+            (p0[2] + p1[2] + p2[2]) / 3.0,
+        ]
+    }
+
+    /// For origin-centered convex primitives: every face's outward normal
+    /// (computed from triangle winding via cross product) must point away
+    /// from the origin — i.e. `dot(centroid, face_normal) > 0`.
+    fn assert_origin_centered_outward(m: &MeshGL, label: &str) {
+        let nt = num_tris(m);
+        for t in 0..nt {
+            let c = face_centroid(m, t);
+            let (n, area2) = face_normal(m, t);
+            // Skip near-degenerate triangles (e.g. at sphere poles where
+            // adjacent ring verts collapse to nearly the same point).
+            if area2 < 1e-6 { continue; }
+            let d = c[0] * n[0] + c[1] * n[1] + c[2] * n[2];
+            assert!(
+                d > 1e-4,
+                "{label}: tri {t} winding inward — centroid={:?} face_n={:?} dot={}",
+                c, n, d
+            );
+        }
+    }
+
+    #[test]
+    fn box_faces_wind_outward() {
+        assert_origin_centered_outward(&generate_box(2.0, 3.0, 4.0), "box");
+    }
+
+    #[test]
+    fn cylinder_faces_wind_outward() {
+        assert_origin_centered_outward(&generate_cylinder(1.5, 4.0, 16), "cylinder");
+    }
+
+    #[test]
+    fn cylinder_advanced_full_revolve_winds_outward() {
+        let m = generate_cylinder_advanced(
+            2.0, 2.0, 3.0, 12, 0.0, std::f64::consts::TAU,
+        );
+        assert_origin_centered_outward(&m, "cylinder_advanced full");
+    }
+
+    #[test]
+    fn cone_faces_wind_outward() {
+        assert_origin_centered_outward(&generate_cone(1.0, 2.0, 12), "cone");
+    }
+
+    #[test]
+    fn pyramid_faces_wind_outward() {
+        assert_origin_centered_outward(&generate_pyramid(2.0, 2.0, 2.0), "pyramid");
+    }
+
+    #[test]
+    fn sphere_faces_wind_outward() {
+        assert_origin_centered_outward(&generate_sphere(1.0, 16, 8), "sphere");
+    }
+
+    #[test]
+    fn torus_faces_wind_outward() {
+        // Torus centroid-from-origin test is too lax (inner faces point
+        // toward the donut hole, which is still "away from ring center"
+        // but their centroid may dot poorly with origin). Use the stored
+        // smooth normal as the truth and verify face_normal agrees in
+        // direction (positive dot).
+        let m = generate_torus(2.0, 0.5, 16, 8);
+        for t in 0..num_tris(&m) {
+            let (fn_, _) = face_normal(&m, t);
+            // Average the three vert normals — they're all outward.
+            let i0 = m.tri_verts[t * 3] as usize;
+            let i1 = m.tri_verts[t * 3 + 1] as usize;
+            let i2 = m.tri_verts[t * 3 + 2] as usize;
+            let n0 = get_normal(&m, i0);
+            let n1 = get_normal(&m, i1);
+            let n2 = get_normal(&m, i2);
+            let avg = [
+                (n0[0] + n1[0] + n2[0]) / 3.0,
+                (n0[1] + n1[1] + n2[1]) / 3.0,
+                (n0[2] + n1[2] + n2[2]) / 3.0,
+            ];
+            let d = fn_[0] * avg[0] + fn_[1] * avg[1] + fn_[2] * avg[2];
+            assert!(d > 0.0, "torus tri {t} cross-normal disagrees with stored normal: dot={}", d);
+        }
+    }
+
+    #[test]
+    fn wedge_faces_wind_outward() {
+        // Wedge — same issue as torus. Use stored normal vs cross-product
+        // direction match.
+        let m = generate_wedge(2.0, 2.0, 2.0);
+        for t in 0..num_tris(&m) {
+            let (fn_, _) = face_normal(&m, t);
+            let i0 = m.tri_verts[t * 3] as usize;
+            let stored = get_normal(&m, i0);
+            let d = fn_[0] * stored[0] + fn_[1] * stored[1] + fn_[2] * stored[2];
+            assert!(d > 0.9, "wedge tri {t} cross disagrees stored: dot={} cross={:?} stored={:?}",
+                    d, fn_, stored);
         }
     }
 

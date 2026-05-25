@@ -263,6 +263,7 @@ impl NodeDef for ExtrudeNode {
             mesh: Arc::new(mesh),
             matrix: resolved.matrix,
             color: resolved.color,
+            vertex_colors: None,
         });
         let mut out = NodeOutputs::default();
         out.set("Geometry", PortValue::Geometry3d(Arc::new(geom)));

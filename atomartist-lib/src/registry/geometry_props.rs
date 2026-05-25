@@ -68,5 +68,6 @@ pub fn wrap_mesh(ctx: &EvalCtx, mesh: MeshGL) -> Geometry3d {
         mesh: Arc::new(mesh),
         matrix,
         color,
+        vertex_colors: None,
     })
 }

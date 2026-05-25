@@ -96,6 +96,7 @@ impl NodeDef for MeshNode {
                 mesh: cached.first().map(|b| b.mesh.clone()).unwrap_or_default(),
                 matrix,
                 color,
+                vertex_colors: None,
             });
             out.set("out", PortValue::Geometry3d(Arc::new(geom)));
         }

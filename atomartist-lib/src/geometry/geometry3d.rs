@@ -31,29 +31,62 @@ use crate::graph::node::identity_matrix;
 /// so unconfigured nodes look identical to the pre-refactor view.
 pub const DEFAULT_GEOMETRY_COLOR: [f32; 4] = [0.62, 0.66, 0.78, 1.0];
 
-/// One renderable body: a mesh plus its per-body transform + tint.
+/// One renderable body: a mesh plus its per-body transform + tint and
+/// an optional per-vertex colour attribute.
 ///
 /// Every body in a `Geometry3d` paints independently — the renderer
 /// iterates and emits a draw call per body with its own `base_color`
-/// uniform. Multi-body groups can therefore carry different colours
-/// per body without per-vertex paint tricks.
+/// uniform and `model` matrix. Multi-body groups can therefore carry
+/// different colours per body without per-vertex paint tricks.
+///
+/// ## Per-body vs per-vertex colour
+///
+/// Both NodeDesigner and MatterCAD support **both** colouring modes:
+///
+/// * **Per-body** (`color` field) — single RGBA uniform applied across
+///   the whole body. This is what colour-override nodes set, what 3MF
+///   per-body material entries provide, and what users see when no
+///   per-vertex data is present. Default tint.
+///
+/// * **Per-vertex** (`vertex_colors` field, RGBA flat-packed at
+///   `4 * num_verts(mesh)` floats) — used when an operation paints
+///   geometry at the vertex level (e.g. Boolean ops where each output
+///   vertex inherits colour from whichever input it came from).
+///   When present, the renderer multiplies the per-vertex value by
+///   `color` (which the operation typically leaves at white so the
+///   per-vertex value passes through unmodified).
+///
+/// The two modes coexist: if `vertex_colors` is `Some`, the shader
+/// path is the vertex-colour path; if `None`, the shader uses `color`
+/// alone. See [`crate::geometry::geometry3d::Body::with_vertex_colors`].
 #[derive(Clone, Debug)]
 pub struct Body {
     /// Triangle mesh. Shared so cloning a `Body` is cheap.
     pub mesh: Arc<MeshGL>,
     /// Column-major 4×4 transform (OpenGL / wgpu convention).
     pub matrix: [f32; 16],
-    /// RGBA tint in 0..=1.
+    /// RGBA tint in 0..=1. When `vertex_colors` is `Some`, this acts
+    /// as a multiplier on the per-vertex value — leave at white
+    /// `[1,1,1,1]` to pass the per-vertex colour through unchanged.
     pub color: [f32; 4],
+    /// Optional per-vertex RGBA, flat-packed `[r,g,b,a, r,g,b,a, ...]`
+    /// with length `4 * num_verts(mesh)`. `Arc` so a body can be
+    /// cloned cheaply even with large colour buffers — Boolean ops in
+    /// particular allocate the colour buffer once and share it across
+    /// the cached output bodies. `None` means "use `color` uniform
+    /// for every vertex" — the common case for primitive nodes.
+    pub vertex_colors: Option<Arc<Vec<f32>>>,
 }
 
 impl Body {
-    /// Body with identity transform and the default tint.
+    /// Body with identity transform, the default tint, and no
+    /// per-vertex colour overlay.
     pub fn from_mesh(mesh: Arc<MeshGL>) -> Self {
         Self {
             mesh,
             matrix: identity_matrix(),
             color: DEFAULT_GEOMETRY_COLOR,
+            vertex_colors: None,
         }
     }
 
@@ -67,6 +100,22 @@ impl Body {
     pub fn with_color(mut self, color: [f32; 4]) -> Self {
         self.color = color;
         self
+    }
+
+    /// Attach a per-vertex RGBA colour buffer. Length must be
+    /// `4 * num_verts(self.mesh)`. The renderer takes the per-vertex
+    /// path when this is `Some` — see the type-level doc for the
+    /// per-body vs per-vertex distinction.
+    pub fn with_vertex_colors(mut self, colors: Arc<Vec<f32>>) -> Self {
+        self.vertex_colors = Some(colors);
+        self
+    }
+
+    /// True when this body should render through the per-vertex
+    /// colour path. The renderer mirrors this into its
+    /// `use_vertex_colors` shader uniform.
+    pub fn has_vertex_colors(&self) -> bool {
+        self.vertex_colors.is_some()
     }
 }
 
@@ -182,6 +231,26 @@ mod tests {
         let g = Geometry3d::from_bodies(bodies);
         assert_eq!(g.len(), 3);
         assert_eq!(g.iter().nth(1).unwrap().color[1], 1.0);
+    }
+
+    #[test]
+    fn body_default_has_no_vertex_colors() {
+        let mesh = Arc::new(MeshGL::default());
+        let b = Body::from_mesh(mesh);
+        assert!(b.vertex_colors.is_none());
+        assert!(!b.has_vertex_colors());
+    }
+
+    #[test]
+    fn with_vertex_colors_enables_vertex_path() {
+        let mesh = Arc::new(MeshGL::default());
+        let colors = Arc::new(vec![1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0]);
+        let b = Body::from_mesh(mesh).with_vertex_colors(colors.clone());
+        assert!(b.has_vertex_colors());
+        let v = b.vertex_colors.as_ref().unwrap();
+        assert_eq!(v.len(), 8);
+        // Body keeps an Arc to the original buffer (no copy).
+        assert!(Arc::ptr_eq(v, &colors));
     }
 
     #[test]
