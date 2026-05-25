@@ -80,11 +80,18 @@ fn schedule_evaluate_eventually_populates_last_mesh() {
     // This test uses the synchronous evaluate_now to keep the test
     // deterministic on both native and WASM. schedule_evaluate is
     // exercised in interactive widget tests.
+    //
+    // The viewport only shows geometry that's wired into the Output
+    // node — an unconnected primitive is "not outputting" and won't
+    // populate `last_mesh_output`. Set the cylinder as the explicit
+    // display node so the test exercises the populate-on-eval path
+    // without needing a full Output-node wiring.
     let state = fresh_state();
-    {
+    let cyl = {
         let mut g = state.graph.lock().unwrap();
-        add_node_with_defaults(&mut g, &state.registry, "Cylinder", [0.0, 0.0]).unwrap();
-    }
+        add_node_with_defaults(&mut g, &state.registry, "Cylinder", [0.0, 0.0]).unwrap()
+    };
+    state.set_display_node(Some(cyl));
     state.evaluate_now();
     assert!(state.last_mesh_output.lock().unwrap().is_some());
     assert!(state.take_viewport_dirty(), "viewport_dirty should be set after eval");

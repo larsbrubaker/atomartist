@@ -361,6 +361,38 @@ impl ne::NodeGraphModel for AppStateModel {
         result
     }
 
+    fn remove_noodle(
+        &mut self,
+        from_node: ne::NodeId,
+        from_socket: &str,
+        to_node: ne::NodeId,
+        to_socket: &str,
+    ) -> bool {
+        let from_uid = match self.lookup_output_uid(Self::from_ne(from_node), from_socket) {
+            Some(u) => u,
+            None => return false,
+        };
+        let to_uid = match self.lookup_input_uid(Self::from_ne(to_node), to_socket) {
+            Some(u) => u,
+            None => return false,
+        };
+        let noodle = Noodle::new(
+            Self::from_ne(from_node),
+            from_uid,
+            Self::from_ne(to_node),
+            to_uid,
+        );
+        let mut g = self.state.graph.lock().unwrap();
+        let removed = g
+            .disconnect(&noodle, &self.state.registry)
+            .unwrap_or(false);
+        drop(g);
+        if removed {
+            self.state.schedule_evaluate();
+        }
+        removed
+    }
+
     fn set_property(&mut self, id: ne::NodeId, name: &str, value: ne::PropertyValue) {
         let domain_id = Self::from_ne(id);
         let port_value = match value {

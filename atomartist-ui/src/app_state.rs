@@ -244,6 +244,11 @@ impl EvalTask {
                 _ => None,
             })
         };
+
+        // Explicit user override: clicking a node sets `display_node`,
+        // which pins the viewport to that node's first geometry
+        // regardless of whether anything is wired to Output. Useful
+        // for "preview just this node" while building.
         let display_id = *self.display_node.lock().unwrap();
         if let Some(id) = display_id {
             if let Some(n) = g.get(id) {
@@ -252,15 +257,24 @@ impl EvalTask {
                 }
             }
         }
-        let mut best: Option<(NodeId, Arc<Geometry3d>)> = None;
-        for n in g.nodes() {
-            if let Some(m) = first_geometry(n) {
-                if best.as_ref().map(|(id, _)| n.id > *id).unwrap_or(true) {
-                    best = Some((n.id, m));
-                }
-            }
+
+        // Default: only render what's wired into the Output node. An
+        // unconnected primitive sitting on the canvas is "not
+        // outputting" and should NOT show in the viewport — matches
+        // NodeDesigner / MatterCAD semantics. The Output node's
+        // synthetic `__display__` socket carries the merged geometry
+        // of everything wired into its input slots; an empty Output
+        // (no connections, or zero-tri merged mesh) returns `None` so
+        // the viewport renders nothing.
+        let output_node = g.nodes().find(|n| n.type_id.as_ref() == "Output")?;
+        let display_geom = output_node.cached_outputs.values().find_map(|v| match v {
+            PortValue::Geometry3d(g) => Some(g.clone()),
+            _ => None,
+        })?;
+        if atomartist_lib::geometry::num_tris(&display_geom.mesh) == 0 {
+            return None;
         }
-        best.map(|(_, m)| m)
+        Some(display_geom)
     }
 }
 
