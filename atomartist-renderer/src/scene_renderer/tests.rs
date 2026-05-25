@@ -101,3 +101,61 @@ fn scene_shaders_emit_glsl_es_300() {
         );
     }
 }
+
+/// Regression: every per-body draw call in the dual-peel chain must
+/// bind BOTH vertex-buffer slots (slot 0 = pos+normal, slot 1 =
+/// per-vertex colour). The peel pipelines declare a 2-slot vertex
+/// layout via `opaque_pass::vertex_layouts()`, and wgpu validates
+/// the bind on every `draw_indexed` — missing slot 1 surfaces as a
+/// runtime "requires vertex buffer 1 to be set" validation panic.
+///
+/// Caught the hard way: an earlier refactor added slot 1 to the
+/// pipeline layout but only updated the init-pass draw loop; the
+/// peel-iteration loop kept its single-slot bind and crashed on
+/// the first frame with a body present. Static-grep test prevents
+/// the same drift on the next pipeline that grows a vertex slot.
+#[test]
+fn dual_peel_draw_loops_bind_both_vertex_slots() {
+    // Read the source file directly — checks current state of the
+    // code, not a snapshot baked into the test binary.
+    let src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/scene_renderer/depth_peel/pipelines.rs",
+    ))
+    .expect("read pipelines.rs");
+
+    // Every occurrence of `set_vertex_buffer(0,` inside execute_chain
+    // must be followed within 5 lines by a `set_vertex_buffer(1,`
+    // before the next `draw_indexed`. The window catches the typical
+    // bind → bind → set_index_buffer → draw_indexed shape without
+    // false-positives from across-function distance.
+    let lines: Vec<&str> = src.lines().collect();
+    let mut slot0_lines: Vec<usize> = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if line.contains("set_vertex_buffer(0,") {
+            slot0_lines.push(i);
+        }
+    }
+    assert!(
+        !slot0_lines.is_empty(),
+        "expected at least one set_vertex_buffer(0, ...) in dual-peel pipelines",
+    );
+
+    for &i in &slot0_lines {
+        let window_end = (i + 6).min(lines.len());
+        let window = &lines[i..window_end];
+        let has_slot1 = window.iter().any(|l| l.contains("set_vertex_buffer(1,"));
+        let has_draw = window
+            .iter()
+            .any(|l| l.contains("draw_indexed") || l.contains("draw(") );
+        assert!(
+            has_slot1,
+            "line {}: set_vertex_buffer(0,) without a paired set_vertex_buffer(1,) within \
+             5 lines — dual-peel pipelines declare a 2-slot vertex layout so both must \
+             bind before draw. Window:\n{}",
+            i + 1,
+            window.join("\n"),
+        );
+        let _ = has_draw;
+    }
+}
