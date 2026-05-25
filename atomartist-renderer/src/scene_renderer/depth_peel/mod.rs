@@ -31,6 +31,7 @@
 //! helper that mirrors the cheap-when-stable pattern used by
 //! [`demo_wgpu::SsaaFramebuffer::ensure_size`].
 
+mod pipeline_build;
 pub mod pipelines;
 pub mod shaders;
 

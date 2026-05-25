@@ -47,6 +47,7 @@ pub(super) fn alloc_chain_tex(
 pub(super) fn build_shadow_caster_pipeline(
     device: &wgpu::Device,
     color_format: wgpu::TextureFormat,
+    body_bgl: &wgpu::BindGroupLayout,
 ) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout) {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("atomartist bed shadow caster shader"),
@@ -67,34 +68,20 @@ pub(super) fn build_shadow_caster_pipeline(
     });
     let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("atomartist bed shadow caster pl"),
-        bind_group_layouts: &[Some(&bgl)],
+        bind_group_layouts: &[Some(&bgl), Some(body_bgl)],
         immediate_size: 0,
     });
-    // Vertex layout matches `scene_renderer::Vertex` so the same mesh
-    // vbuf/ibuf can drive the silhouette without re-uploading.
-    let vert_layout = wgpu::VertexBufferLayout {
-        array_stride: 24, // 3 floats pos + 3 floats normal
-        step_mode: wgpu::VertexStepMode::Vertex,
-        attributes: &[
-            wgpu::VertexAttribute {
-                offset: 0,
-                shader_location: 0,
-                format: wgpu::VertexFormat::Float32x3,
-            },
-            wgpu::VertexAttribute {
-                offset: 12,
-                shader_location: 1,
-                format: wgpu::VertexFormat::Float32x3,
-            },
-        ],
-    };
+    // Two-slot per-body layout — matches the scene + peel pipelines
+    // so a single per-body draw call can bind the same vbuf+cbuf
+    // pair regardless of which pipeline is active.
+    let vert_layouts = crate::scene_renderer::opaque_pass::vertex_layouts();
     let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("atomartist bed shadow caster pipeline"),
         layout: Some(&pl),
         vertex: wgpu::VertexState {
             module: &shader,
             entry_point: Some("vs"),
-            buffers: &[vert_layout],
+            buffers: &vert_layouts,
             compilation_options: Default::default(),
         },
         // No cull — silhouette must capture both sides (matches

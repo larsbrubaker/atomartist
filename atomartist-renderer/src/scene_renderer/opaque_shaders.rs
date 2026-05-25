@@ -51,16 +51,28 @@ struct U {
     light_specular1: vec4<f32>,
     global_ambient: vec4<f32>,
     material_specular: vec4<f32>,
-    base_color: vec4<f32>,
-    params: vec4<f32>,     // x = shininess
-    resolution: vec4<f32>, // xy = pixel size, zw = pad
+    base_color: vec4<f32>,    // fallback when no bodies are bound
+    params: vec4<f32>,        // x = shininess
+    resolution: vec4<f32>,    // xy = pixel size, zw = pad
+};
+
+// Per-body uniform — selected via the dynamic-offset bind group at
+// group(1). One slot per renderer body; the caller passes the slot's
+// byte offset on every draw. See `body_uniform.rs` for the host-side
+// layout and `BodyUniformBuffer` for the storage strategy.
+struct B {
+    model: mat4x4<f32>,
+    color: vec4<f32>,
+    flags: vec4<u32>,         // x = use_vertex_colors (0 or 1)
 };
 
 @group(0) @binding(0) var<uniform> u: U;
+@group(1) @binding(0) var<uniform> b: B;
 
 struct VOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) view_pos: vec3<f32>,
+    @location(1) v_color: vec4<f32>,
 };
 
 struct FsOut {
@@ -69,11 +81,19 @@ struct FsOut {
 };
 
 @vertex
-fn vs(@location(0) pos: vec3<f32>, @location(1) _normal: vec3<f32>) -> VOut {
+fn vs(
+    @location(0) pos: vec3<f32>,
+    @location(1) _normal: vec3<f32>,
+    @location(2) v_color: vec4<f32>,
+) -> VOut {
     var o: VOut;
-    let view_pos4 = u.view * vec4<f32>(pos, 1.0);
+    // Apply the per-body model matrix before the camera view so each
+    // body can have its own translation / rotation / scale.
+    let world_pos4 = b.model * vec4<f32>(pos, 1.0);
+    let view_pos4 = u.view * world_pos4;
     o.view_pos = view_pos4.xyz;
     o.clip = u.proj * view_pos4;
+    o.v_color = v_color;
     return o;
 }
 
@@ -116,9 +136,14 @@ fn shade(view_pos: vec3<f32>, base_color_srgb: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs(in: VOut) -> FsOut {
-    let lit = shade(in.view_pos, u.base_color.rgb);
+    // The per-vertex colour attribute (slot 1) is always populated:
+    // when the source body has a `vertex_colors` overlay the buffer
+    // carries it verbatim; otherwise the buffer is filled with the
+    // body's uniform tint repeated per vertex. Either way the
+    // fragment shader uses `v_color` directly — no branch needed.
+    let lit = shade(in.view_pos, in.v_color.rgb);
     var out: FsOut;
-    out.color = vec4<f32>(lit, u.base_color.a);
+    out.color = vec4<f32>(lit, in.v_color.a);
     out.depth_color = vec4<f32>(in.clip.z, 0.0, 0.0, 1.0);
     return out;
 }

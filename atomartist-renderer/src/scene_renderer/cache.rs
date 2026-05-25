@@ -36,8 +36,38 @@
 //! * World positions (bed Z, outline width): `1e-5` — same reasoning
 //!   as the camera matrices.
 
+use std::hash::{Hash, Hasher};
+
+use atomartist_lib::geometry::Body;
+
 use super::gizmo_pass::hash_gizmos;
 use super::{RenderStyle, WgpuSceneRenderer};
+
+/// Hash every input the renderer depends on for a body list:
+/// mesh pointer (geometry identity), per-vertex colour pointer
+/// (vertex-colour swap = different output), per-body matrix (transform
+/// change), per-body colour (tint change). The order matters — adding
+/// or removing a body, or reordering them, shifts the hash.
+pub fn hash_bodies(bodies: &[Body]) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for b in bodies {
+        let mesh_ptr = b.mesh.vert_properties.as_ptr() as usize as u64;
+        let vc_ptr = b
+            .vertex_colors
+            .as_ref()
+            .map(|v| v.as_ptr() as usize as u64)
+            .unwrap_or(0);
+        mesh_ptr.hash(&mut h);
+        vc_ptr.hash(&mut h);
+        // Quantise floats so trivial reproject noise doesn't roll
+        // the hash — matches the rest of `SceneFingerprint`.
+        for &v in &b.matrix {
+            quantise(v, FLOAT_Q).hash(&mut h);
+        }
+        pack_color(b.color).hash(&mut h);
+    }
+    h.finish()
+}
 
 /// All-encompassing fingerprint of the 3-D scene state. Two frames
 /// that produce a byte-identical fingerprint are guaranteed to render
@@ -61,10 +91,12 @@ pub struct SceneFingerprint {
     /// Camera projection matrix, quantised. Captures fov / aspect /
     /// near/far adjustments.
     proj_q: [i32; 16],
-    /// Identity of the mesh's vertex buffer — when the host swaps to
-    /// a different `MeshGL`, this changes and the cache rebuilds.
-    /// `0` when no mesh is present.
-    mesh_ptr: u64,
+    /// Combined hash of every renderer body's identity: mesh pointer
+    /// + per-body matrix + per-body colour + vertex-colour pointer.
+    /// When ANY body's geometry / transform / tint changes — or when
+    /// a body is added or removed — this changes and the accumulator
+    /// resets. `0` when `bodies` is empty.
+    bodies_hash: u64,
     /// Pixel size of the offscreen framebuffer. A resize invalidates
     /// every accumulation slot.
     fb_size: (u32, u32),
@@ -134,11 +166,7 @@ impl SceneFingerprint {
         Self::from_inputs(SceneFingerprintInputs {
             view: r.camera.view_matrix(),
             proj: r.camera.projection_matrix(aspect),
-            mesh_ptr: r
-                .mesh
-                .as_ref()
-                .map(|m| m.vert_properties.as_ptr() as usize as u64)
-                .unwrap_or(0),
+            bodies_hash: hash_bodies(&r.bodies),
             fb_size: r.viewport_size,
             render_style: r.render_style,
             outline_enabled: r.outline_enabled,
@@ -167,7 +195,7 @@ impl SceneFingerprint {
         Self {
             view_q: quantise_mat4(&i.view, FLOAT_Q),
             proj_q: quantise_mat4(&i.proj, FLOAT_Q),
-            mesh_ptr: i.mesh_ptr,
+            bodies_hash: i.bodies_hash,
             fb_size: i.fb_size,
             render_style: render_style_id(i.render_style),
             outline_enabled: i.outline_enabled,
@@ -208,7 +236,7 @@ impl SceneFingerprint {
 pub struct SceneFingerprintInputs {
     pub view: [f32; 16],
     pub proj: [f32; 16],
-    pub mesh_ptr: u64,
+    pub bodies_hash: u64,
     pub fb_size: (u32, u32),
     pub render_style: RenderStyle,
     pub outline_enabled: bool,
@@ -244,7 +272,7 @@ impl SceneFingerprintInputs {
         Self {
             view: identity_mat4(),
             proj: identity_mat4(),
-            mesh_ptr: 0,
+            bodies_hash: 0,
             fb_size: (800, 600),
             render_style: RenderStyle::Shaded,
             outline_enabled: false,
@@ -378,13 +406,52 @@ mod tests {
     #[test]
     fn fingerprint_invalidates_on_mesh_change() {
         let mut a = SceneFingerprintInputs::baseline_for_tests();
-        a.mesh_ptr = 0xDEAD_BEEF;
+        a.bodies_hash = 0xDEAD_BEEF;
         let mut b = SceneFingerprintInputs::baseline_for_tests();
-        b.mesh_ptr = 0xCAFE_BABE;
+        b.bodies_hash = 0xCAFE_BABE;
         assert_ne!(
             SceneFingerprint::from_inputs(a),
             SceneFingerprint::from_inputs(b),
         );
+    }
+
+    /// Multi-body change detection: different body lists must hash
+    /// to different values. Two bodies with the same mesh but
+    /// different transforms / tints must produce distinct
+    /// fingerprints.
+    #[test]
+    fn hash_bodies_invalidates_on_transform_change() {
+        use std::sync::Arc;
+        use atomartist_lib::geometry::Body;
+        use manifold_rust::types::MeshGL;
+        let mesh = Arc::new(MeshGL {
+            num_prop: 6,
+            vert_properties: vec![0.0; 12],
+            tri_verts: vec![0, 1, 0],
+            ..Default::default()
+        });
+        let a = Body::from_mesh(mesh.clone());
+        let mut translated = a.matrix;
+        translated[12] = 5.0;
+        let b = Body::from_mesh(mesh.clone()).with_matrix(translated);
+        assert_ne!(hash_bodies(&[a]), hash_bodies(&[b]));
+    }
+
+    /// Adding a second body must change the hash.
+    #[test]
+    fn hash_bodies_grows_with_body_count() {
+        use std::sync::Arc;
+        use atomartist_lib::geometry::Body;
+        use manifold_rust::types::MeshGL;
+        let mesh = Arc::new(MeshGL {
+            num_prop: 6,
+            vert_properties: vec![0.0; 12],
+            tri_verts: vec![0, 1, 0],
+            ..Default::default()
+        });
+        let one = vec![Body::from_mesh(mesh.clone())];
+        let two = vec![Body::from_mesh(mesh.clone()), Body::from_mesh(mesh)];
+        assert_ne!(hash_bodies(&one), hash_bodies(&two));
     }
 
     /// Confirm the cache does NOT invalidate on inputs that don't reach

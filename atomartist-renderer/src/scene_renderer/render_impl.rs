@@ -14,7 +14,7 @@ use super::accumulation::{
     apply_jitter_to_proj, jitter_offset, MAX_SAMPLES,
 };
 use super::cache::{handle_cache_hit, CacheOutcome, SceneFingerprint};
-use super::depth_peel::pipelines::{MeshHandles, PeelUniforms};
+use super::depth_peel::pipelines::{BodyDrawHandle, PeelUniforms};
 use super::depth_peel::{iteration_count, DEFAULT_LAYERS};
 use super::opaque_pass::Uniforms;
 use super::post_outline::{self, OutlineUniforms};
@@ -42,7 +42,22 @@ impl WgpuCustomRender for WgpuSceneRenderer {
         self.ensure_framebuffer(ctx.device, fb_w, fb_h);
         let fb_ms = elapsed_ms(t_fb);
         let t_mesh = web_time::Instant::now();
-        self.ensure_mesh_buffers(ctx.device);
+        let body_buffer_realloc = self.ensure_body_buffers(ctx.device, ctx.queue);
+        // Rebuild the per-pipeline body bind groups whenever the
+        // underlying uniform buffer reallocates — the bind group
+        // resource pointer would otherwise dangle. Cheap on stable
+        // body counts (no rebuild) and at worst once per body-count
+        // growth (powers of two).
+        if body_buffer_realloc {
+            if let Some(s) = &mut self.state {
+                if let Some(buf) = s.body_uniforms.buffer.as_ref() {
+                    let buf_clone = buf.clone();
+                    s.opaque.rebuild_body_bg(ctx.device, &buf_clone);
+                    s.dual_peel.rebuild_body_bg(ctx.device, &buf_clone);
+                    s.bed.rebuild_body_bg(ctx.device, &buf_clone);
+                }
+            }
+        }
         let mesh_ms = elapsed_ms(t_mesh);
 
         // Forward theme inputs to the bed before any pass runs — these
@@ -153,23 +168,44 @@ impl WgpuCustomRender for WgpuSceneRenderer {
         let _ = cast_slice::<f32, u8>;
 
         // ── Pass 0: refresh the bed composite (grid + contact shadow) ──────
+        //
+        // Multi-body bed shadow: every body casts. Same dynamic
+        // uniform buffer feeds the shadow caster shader's per-body
+        // model matrix, so each body's silhouette appears at its
+        // world-space position. NodeDesigner's contact-shadows.js
+        // does the equivalent — every transparentGroup mesh is
+        // material-swapped to the shadow caster and rendered into a
+        // single shadow texture before the blur + composite.
         let t_bed_composite = web_time::Instant::now();
         let mut bed_ran_chain = false;
         if self.draw_grid {
-            let mesh_ref = match (&s.vbuf, &s.ibuf) {
-                (Some(vbuf), Some(ibuf)) if s.index_count > 0 => Some(crate::bed::MeshRef {
-                    vbuf,
-                    ibuf,
-                    index_count: s.index_count,
-                }),
-                _ => None,
-            };
+            let shadow_bodies: Vec<super::body_uniform::BodyDrawHandle> = s
+                .bodies_gpu
+                .iter()
+                .enumerate()
+                .filter(|(_, b)| b.index_count > 0)
+                .map(|(i, b)| super::body_uniform::BodyDrawHandle {
+                    vbuf: &b.vbuf,
+                    ibuf: &b.ibuf,
+                    cbuf: &b.cbuf,
+                    index_count: b.index_count,
+                    body_index: i as u32,
+                })
+                .collect();
+            // Composite cache key: hash all body mesh_ptrs so the
+            // shadow chain rebuilds when any body changes.
+            let shadow_caster_key = s
+                .bodies_gpu
+                .iter()
+                .fold(0u64, |acc, b| {
+                    acc.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (b.mesh_ptr as u64)
+                });
             bed_ran_chain = s.bed.render_to_composite(
                 ctx.device,
                 ctx.queue,
                 ctx.encoder,
-                mesh_ref,
-                s.mesh_ptr as u64,
+                &shadow_bodies,
+                shadow_caster_key,
                 // Locked to 0 alongside `bed_render_z` while the
                 // bed-Z offset is reworked.
                 0.0,
@@ -225,27 +261,45 @@ impl WgpuCustomRender for WgpuSceneRenderer {
                 let bed_z = self.bed_render_z();
                 s.bed.draw_bed(ctx.queue, &mut pass, mvp, bed_z);
             }
-            if let (Some(vbuf), Some(ibuf)) = (&s.vbuf, &s.ibuf) {
-                if s.index_count > 0 && draw_surface {
-                    s.opaque
-                        .draw_depth_only(&mut pass, vbuf, ibuf, s.index_count);
+            if draw_surface {
+                // Per-body depth-only — populates the opaque depth
+                // attachment + R32Float depth-colour mirror for the
+                // dual-peel discard. Each body's model matrix lives
+                // in its slot of the dynamic uniform buffer
+                // (`body_index` indexes the slot).
+                for (body_index, body) in s.bodies_gpu.iter().enumerate() {
+                    if body.index_count == 0 {
+                        continue;
+                    }
+                    s.opaque.draw_body_depth_only(
+                        &mut pass,
+                        &body.vbuf,
+                        &body.ibuf,
+                        &body.cbuf,
+                        body.index_count,
+                        body_index as u32,
+                    );
                 }
             }
         }
 
         // ── Pass 2: dual depth-peeling chain ──────────────────────────────
         let t_peel = web_time::Instant::now();
-        let mesh_handles = if draw_surface {
-            match (&s.vbuf, &s.ibuf) {
-                (Some(vbuf), Some(ibuf)) if s.index_count > 0 => Some(MeshHandles {
-                    vbuf,
-                    ibuf,
-                    index_count: s.index_count,
-                }),
-                _ => None,
-            }
+        let body_handles: Vec<BodyDrawHandle> = if draw_surface {
+            s.bodies_gpu
+                .iter()
+                .enumerate()
+                .filter(|(_, b)| b.index_count > 0)
+                .map(|(i, b)| BodyDrawHandle {
+                    vbuf: &b.vbuf,
+                    ibuf: &b.ibuf,
+                    cbuf: &b.cbuf,
+                    index_count: b.index_count,
+                    body_index: i as u32,
+                })
+                .collect()
         } else {
-            None
+            Vec::new()
         };
         let peel_uniforms: PeelUniforms = uniforms;
         let iterations = iteration_count(DEFAULT_LAYERS as i32);
@@ -257,19 +311,28 @@ impl WgpuCustomRender for WgpuSceneRenderer {
             scene_depth_color_view,
             fb.render_view(),
             &accum_targets.sample_view,
-            mesh_handles,
+            &body_handles,
             &peel_uniforms,
             iterations,
         );
         let peel_ms = elapsed_ms(t_peel);
 
         // ── Pass 2.5: post-process selection outline ─────────────────────
+        //
+        // Multi-body outline: phase-1 outlines just the first body
+        // (the original single-mesh behaviour). Full multi-body
+        // outline — every selected body contributes its silhouette
+        // to the same ID texture — lands in a follow-up. The
+        // outline pipeline needs the same body-uniform binding as
+        // opaque + peel before it can iterate bodies; until then,
+        // outline ignores `body.matrix` and inherits the camera MVP
+        // alone.
         let want_outline = self.outline_enabled
             && self.render_style == RenderStyle::Shaded
-            && s.index_count > 0;
+            && !s.bodies_gpu.is_empty();
         if want_outline {
-            if let (Some(vbuf), Some(ibuf), Some(outline_targets)) =
-                (&s.vbuf, &s.ibuf, &s.outline_targets)
+            if let (Some(body), Some(outline_targets)) =
+                (s.bodies_gpu.first(), &s.outline_targets)
             {
                 let outline_u = OutlineUniforms {
                     mvp,
@@ -286,9 +349,9 @@ impl WgpuCustomRender for WgpuSceneRenderer {
                     scene_depth_color_view,
                     &accum_targets.sample_view,
                     post_outline::pipelines_mesh::Mesh {
-                        vbuf,
-                        ibuf,
-                        index_count: s.index_count,
+                        vbuf: &body.vbuf,
+                        ibuf: &body.ibuf,
+                        index_count: body.index_count,
                     },
                     (fb_w, fb_h),
                 );

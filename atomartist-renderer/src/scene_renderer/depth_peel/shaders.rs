@@ -45,6 +45,14 @@ struct U {
     resolution: vec4<f32>, // xy = pixel size, zw = pad
 };
 
+// Per-body uniform — same layout as the opaque shader's `B` block,
+// dispatched via the dynamic-offset bind group at group(1).
+struct B {
+    model: mat4x4<f32>,
+    color: vec4<f32>,
+    flags: vec4<u32>,
+};
+
 @group(0) @binding(0) var<uniform> u: U;
 // `opaque_depth_color` is the R32Float mirror of the opaque depth
 // attachment populated by the scene / bed pipelines. We sample it
@@ -52,15 +60,29 @@ struct U {
 // backend can't load directly from `texture_depth_2d` — see the
 // long-form rationale in `scene_renderer::opaque_shaders`.
 @group(0) @binding(1) var opaque_depth_color: texture_2d<f32>;
+@group(1) @binding(0) var<uniform> b: B;
 
 struct VOut {
     @builtin(position) clip: vec4<f32>,
 };
 
 @vertex
-fn vs(@location(0) pos: vec3<f32>, @location(1) _normal: vec3<f32>) -> VOut {
+fn vs(
+    @location(0) pos: vec3<f32>,
+    @location(1) _normal: vec3<f32>,
+    // Init shader doesn't read the per-vertex colour, but the
+    // attribute must be declared so a single vertex layout serves
+    // every per-body pipeline (opaque + depth-only + init + peel +
+    // shadow). The argument is bound to the slot-1 buffer the caller
+    // provided; ignored here.
+    @location(2) _v_color: vec4<f32>,
+) -> VOut {
     var o: VOut;
-    o.clip = u.mvp * vec4<f32>(pos, 1.0);
+    // Apply the per-body model BEFORE the cached `mvp`. mvp here is
+    // proj*view — the host doesn't fold model into it because that
+    // would require N mvps per frame (one per body) on top of the
+    // dynamic-offset uniform we already use.
+    o.clip = u.mvp * b.model * vec4<f32>(pos, 1.0);
     return o;
 }
 
@@ -109,9 +131,15 @@ struct U {
     light_specular1: vec4<f32>,
     global_ambient: vec4<f32>,
     material_specular: vec4<f32>,
-    base_color: vec4<f32>,
-    params: vec4<f32>,     // x = shininess
-    resolution: vec4<f32>, // xy = pixel size
+    base_color: vec4<f32>,    // fallback only — body colour preferred
+    params: vec4<f32>,        // x = shininess
+    resolution: vec4<f32>,    // xy = pixel size
+};
+
+struct B {
+    model: mat4x4<f32>,
+    color: vec4<f32>,
+    flags: vec4<u32>,
 };
 
 @group(0) @binding(0) var<uniform> u: U;
@@ -120,18 +148,26 @@ struct U {
 // WebGL2 backend can't translate `textureLoad` on depth textures.
 @group(0) @binding(1) var opaque_depth_color: texture_2d<f32>;
 @group(0) @binding(2) var src_dual_depth: texture_2d<f32>;
+@group(1) @binding(0) var<uniform> b: B;
 
 struct VOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) view_pos: vec3<f32>,
+    @location(1) v_color: vec4<f32>,
 };
 
 @vertex
-fn vs(@location(0) pos: vec3<f32>, @location(1) _normal: vec3<f32>) -> VOut {
+fn vs(
+    @location(0) pos: vec3<f32>,
+    @location(1) _normal: vec3<f32>,
+    @location(2) v_color: vec4<f32>,
+) -> VOut {
     var o: VOut;
-    let view_pos4 = u.view * vec4<f32>(pos, 1.0);
+    let world_pos4 = b.model * vec4<f32>(pos, 1.0);
+    let view_pos4 = u.view * world_pos4;
     o.view_pos = view_pos4.xyz;
     o.clip = u.proj * view_pos4;
+    o.v_color = v_color;
     return o;
 }
 
@@ -151,8 +187,8 @@ fn srgb_to_linear(srgb: vec3<f32>) -> vec3<f32> {
     return mix(low, high, step(vec3<f32>(0.04045), srgb));
 }
 
-fn shade(view_pos: vec3<f32>) -> vec4<f32> {
-    let base = srgb_to_linear(u.base_color.rgb);
+fn shade(view_pos: vec3<f32>, base_color: vec4<f32>) -> vec4<f32> {
+    let base = srgb_to_linear(base_color.rgb);
     let fdx = dpdx(view_pos);
     let fdy = dpdy(view_pos);
     let n = normalize(cross(fdx, fdy));
@@ -180,7 +216,7 @@ fn shade(view_pos: vec3<f32>) -> vec4<f32> {
 
     let global_amb = u.global_ambient.rgb * base;
     let lit = global_amb + ambient0 + diffuse0 + specular0 + diffuse1 + specular1;
-    return vec4<f32>(lit, u.base_color.a);
+    return vec4<f32>(lit, base_color.a);
 }
 
 @fragment
@@ -212,7 +248,9 @@ fn fs(in: VOut) -> PeelOut {
         return out;
     }
 
-    let shaded = shade(in.view_pos);
+    // Per-vertex colour (always populated — see the matching note
+    // in the opaque shader's `fs`) drives the surface base colour.
+    let shaded = shade(in.view_pos, in.v_color);
     if (abs(cur_z - front_z) <= PEEL_BIAS) {
         // Front-layer hit: premultiply (per MatterCAD's UnderBlend).
         out.front_color = vec4<f32>(shaded.rgb * shaded.a, shaded.a);

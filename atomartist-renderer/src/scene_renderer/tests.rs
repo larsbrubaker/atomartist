@@ -7,7 +7,7 @@ use super::WgpuSceneRenderer;
 #[test]
 fn renderer_is_constructible() {
     let r = WgpuSceneRenderer::new();
-    assert!(r.mesh.is_none());
+    assert!(r.bodies.is_empty());
 }
 
 /// Bed is currently hard-locked to `0.0` (ignoring `grid_z` too) so

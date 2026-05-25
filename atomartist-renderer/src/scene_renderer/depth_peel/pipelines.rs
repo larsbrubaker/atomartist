@@ -22,11 +22,11 @@
 use bytemuck::{Pod, Zeroable};
 use glam::Mat4;
 
-use super::shaders::{
-    DUAL_DEPTH_INIT_SHADER, DUAL_PEEL_COLOR_SHADER, DUAL_PEEL_RESOLVE_SHADER,
-};
+use super::pipeline_build::{build_init_pipeline, build_peel_pipeline, build_resolve_pipeline};
 use super::DualPeelTargets;
-use crate::scene_renderer::opaque_pass::Vertex;
+pub use crate::scene_renderer::body_uniform::BodyDrawHandle;
+use crate::scene_renderer::body_uniform::{BodyUniform, DYN_OFFSET_ALIGN};
+use crate::scene_renderer::opaque_pass::build_body_bgl;
 
 /// Push-constants-style uniform consumed by the dual-depth init shader.
 /// The `resolution` field is the framebuffer pixel size — the fragment
@@ -94,6 +94,17 @@ pub struct DualPeelPipelines {
 
     resolve_pipeline: wgpu::RenderPipeline,
     resolve_bgl: wgpu::BindGroupLayout,
+
+    /// Per-body bind-group layout — shared with the opaque pass so a
+    /// single dynamic uniform buffer drives every per-body pipeline
+    /// in the chain. Built via
+    /// [`crate::scene_renderer::opaque_pass::build_body_bgl`].
+    body_bgl: wgpu::BindGroupLayout,
+
+    /// Per-body bind group resolved against the renderer's dynamic
+    /// uniform buffer. Rebuilt by [`Self::rebuild_body_bg`] whenever
+    /// that buffer reallocates. `None` until the first body lands.
+    body_bg: Option<wgpu::BindGroup>,
 }
 
 impl DualPeelPipelines {
@@ -105,7 +116,8 @@ impl DualPeelPipelines {
     /// viewport this is the accumulation chain's HDR sample target
     /// (`Rgba16Float`), not the surface format.
     pub fn new(device: &wgpu::Device, resolve_output_format: wgpu::TextureFormat) -> Self {
-        let (init_pipeline, init_bgl) = build_init_pipeline(device);
+        let body_bgl = build_body_bgl(device);
+        let (init_pipeline, init_bgl) = build_init_pipeline(device, &body_bgl);
         let init_ub = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("atomartist dual-peel init ub"),
             size: std::mem::size_of::<InitUniforms>() as u64,
@@ -113,7 +125,7 @@ impl DualPeelPipelines {
             mapped_at_creation: false,
         });
 
-        let (peel_pipeline, peel_bgl) = build_peel_pipeline(device);
+        let (peel_pipeline, peel_bgl) = build_peel_pipeline(device, &body_bgl);
         let peel_ub = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("atomartist dual-peel ub"),
             size: std::mem::size_of::<PeelUniforms>() as u64,
@@ -133,7 +145,28 @@ impl DualPeelPipelines {
             peel_ub,
             resolve_pipeline,
             resolve_bgl,
+            body_bgl,
+            body_bg: None,
         }
+    }
+
+    /// Resolve the per-body bind group. Called by the renderer once
+    /// per frame after the dynamic uniform buffer is allocated /
+    /// reallocated, identical signature to
+    /// [`crate::scene_renderer::opaque_pass::OpaquePipelines::rebuild_body_bg`].
+    pub fn rebuild_body_bg(&mut self, device: &wgpu::Device, body_buffer: &wgpu::Buffer) {
+        self.body_bg = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("atomartist dual-peel body bg"),
+            layout: &self.body_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: body_buffer,
+                    offset: 0,
+                    size: std::num::NonZeroU64::new(std::mem::size_of::<BodyUniform>() as u64),
+                }),
+            }],
+        }));
     }
 
     pub fn resolve_output_format(&self) -> wgpu::TextureFormat {
@@ -143,9 +176,17 @@ impl DualPeelPipelines {
     /// Drive the full peel chain into `encoder`:
     /// init → `iterations` peel passes → resolve into `output_view`.
     ///
-    /// Skips silently when `mesh` is `None` — the resolve still runs
-    /// against the (cleared) accumulators so `output_view` receives a
-    /// correct passthrough of the opaque scene colour.
+    /// Multi-body iteration: each peel pass draws EVERY body in
+    /// `bodies` before the next iteration starts. Per-body uniforms
+    /// (model matrix, colour, flags) come from the renderer's
+    /// dynamic uniform buffer via the bind group resolved by
+    /// [`Self::rebuild_body_bg`] — the caller is responsible for
+    /// invoking that on a buffer realloc.
+    ///
+    /// Skips body draws silently when `bodies` is empty — the
+    /// resolve still runs against the (cleared) accumulators so
+    /// `output_view` receives a correct passthrough of the opaque
+    /// scene colour.
     #[allow(clippy::too_many_arguments)]
     pub fn execute_chain(
         &self,
@@ -156,7 +197,7 @@ impl DualPeelPipelines {
         opaque_depth_color_view: &wgpu::TextureView,
         opaque_color_view: &wgpu::TextureView,
         output_view: &wgpu::TextureView,
-        mesh: Option<MeshHandles<'_>>,
+        bodies: &[BodyDrawHandle<'_>],
         peel_uniforms: &PeelUniforms,
         iterations: u32,
     ) {
@@ -198,12 +239,17 @@ impl DualPeelPipelines {
             let (w, h) = targets.size();
             pass.set_viewport(0.0, 0.0, w as f32, h as f32, 0.0, 1.0);
             pass.set_scissor_rect(0, 0, w, h);
-            if let Some(m) = mesh {
+            if let Some(body_bg) = &self.body_bg {
                 pass.set_pipeline(&self.init_pipeline);
                 pass.set_bind_group(0, &init_bg, &[]);
-                pass.set_vertex_buffer(0, m.vbuf.slice(..));
-                pass.set_index_buffer(m.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..m.index_count, 0, 0..1);
+                for h in bodies {
+                    let off = h.body_index * DYN_OFFSET_ALIGN;
+                    pass.set_bind_group(1, body_bg, &[off]);
+                    pass.set_vertex_buffer(0, h.vbuf.slice(..));
+                    pass.set_vertex_buffer(1, h.cbuf.slice(..));
+                    pass.set_index_buffer(h.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..h.index_count, 0, 0..1);
+                }
             }
         }
 
@@ -259,12 +305,16 @@ impl DualPeelPipelines {
                 let (w, h) = targets.size();
                 pass.set_viewport(0.0, 0.0, w as f32, h as f32, 0.0, 1.0);
                 pass.set_scissor_rect(0, 0, w, h);
-                if let Some(m) = mesh {
+                if let Some(body_bg) = &self.body_bg {
                     pass.set_pipeline(&self.peel_pipeline);
                     pass.set_bind_group(0, &peel_bg, &[]);
-                    pass.set_vertex_buffer(0, m.vbuf.slice(..));
-                    pass.set_index_buffer(m.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..m.index_count, 0, 0..1);
+                    for h in bodies {
+                        let off = h.body_index * DYN_OFFSET_ALIGN;
+                        pass.set_bind_group(1, body_bg, &[off]);
+                        pass.set_vertex_buffer(0, h.vbuf.slice(..));
+                        pass.set_index_buffer(h.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.draw_indexed(0..h.index_count, 0, 0..1);
+                    }
                 }
             }
             accum_load = (wgpu::LoadOp::Load, wgpu::LoadOp::Load);
@@ -429,342 +479,6 @@ pub struct MeshHandles<'a> {
     pub index_count: u32,
 }
 
-fn vertex_layout() -> wgpu::VertexBufferLayout<'static> {
-    static ATTRS: [wgpu::VertexAttribute; 2] = [
-        wgpu::VertexAttribute {
-            offset: 0,
-            shader_location: 0,
-            format: wgpu::VertexFormat::Float32x3,
-        },
-        wgpu::VertexAttribute {
-            offset: 12,
-            shader_location: 1,
-            format: wgpu::VertexFormat::Float32x3,
-        },
-    ];
-    wgpu::VertexBufferLayout {
-        array_stride: std::mem::size_of::<Vertex>() as u64,
-        step_mode: wgpu::VertexStepMode::Vertex,
-        attributes: &ATTRS,
-    }
-}
-
-fn build_init_pipeline(device: &wgpu::Device) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout) {
-    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("atomartist dual-peel init bgl"),
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-            // Opaque-pass depth mirrored into an R32Float colour
-            // attachment by the opaque pipelines. Sampled with
-            // `textureLoad` so no sampler binding is needed —
-            // Naga emits `texelFetch(sampler2D, …)` in GLSL which
-            // WebGL2 supports cleanly.
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-        ],
-    });
-    let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("atomartist dual-peel init pl"),
-        bind_group_layouts: &[Some(&bgl)],
-        immediate_size: 0,
-    });
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("atomartist dual-peel init shader"),
-        source: wgpu::ShaderSource::Wgsl(DUAL_DEPTH_INIT_SHADER.into()),
-    });
-    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("atomartist dual-peel init pipeline"),
-        layout: Some(&pl),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vs"),
-            buffers: &[vertex_layout()],
-            compilation_options: Default::default(),
-        },
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            cull_mode: None,
-            ..Default::default()
-        },
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState {
-            count: 1,
-            mask: !0,
-            alpha_to_coverage_enabled: false,
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: DUAL_DEPTH_FORMAT,
-                blend: Some(max_blend()),
-                write_mask: wgpu::ColorWrites::RED | wgpu::ColorWrites::GREEN,
-            })],
-            compilation_options: Default::default(),
-        }),
-        multiview_mask: None,
-        cache: None,
-    });
-    (pipeline, bgl)
-}
-
-fn build_peel_pipeline(device: &wgpu::Device) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout) {
-    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("atomartist dual-peel bgl"),
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-            // Mirrored R32Float opaque-pass depth — see init bgl.
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 2,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-        ],
-    });
-    let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("atomartist dual-peel pl"),
-        bind_group_layouts: &[Some(&bgl)],
-        immediate_size: 0,
-    });
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("atomartist dual-peel shader"),
-        source: wgpu::ShaderSource::Wgsl(DUAL_PEEL_COLOR_SHADER.into()),
-    });
-    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("atomartist dual-peel pipeline"),
-        layout: Some(&pl),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vs"),
-            buffers: &[vertex_layout()],
-            compilation_options: Default::default(),
-        },
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            cull_mode: Some(wgpu::Face::Back),
-            ..Default::default()
-        },
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState {
-            count: 1,
-            mask: !0,
-            alpha_to_coverage_enabled: false,
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs"),
-            targets: &[
-                Some(wgpu::ColorTargetState {
-                    format: DUAL_DEPTH_FORMAT,
-                    blend: Some(max_blend()),
-                    write_mask: wgpu::ColorWrites::RED | wgpu::ColorWrites::GREEN,
-                }),
-                Some(wgpu::ColorTargetState {
-                    format: ACCUM_FORMAT,
-                    blend: Some(front_under_blend()),
-                    write_mask: wgpu::ColorWrites::ALL,
-                }),
-                Some(wgpu::ColorTargetState {
-                    format: ACCUM_FORMAT,
-                    blend: Some(back_over_blend()),
-                    write_mask: wgpu::ColorWrites::ALL,
-                }),
-            ],
-            compilation_options: Default::default(),
-        }),
-        multiview_mask: None,
-        cache: None,
-    });
-    (pipeline, bgl)
-}
-
-fn build_resolve_pipeline(
-    device: &wgpu::Device,
-    surface_format: wgpu::TextureFormat,
-) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout) {
-    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("atomartist dual-peel resolve bgl"),
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 2,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 3,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
-                count: None,
-            },
-        ],
-    });
-    let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("atomartist dual-peel resolve pl"),
-        bind_group_layouts: &[Some(&bgl)],
-        immediate_size: 0,
-    });
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("atomartist dual-peel resolve shader"),
-        source: wgpu::ShaderSource::Wgsl(DUAL_PEEL_RESOLVE_SHADER.into()),
-    });
-    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("atomartist dual-peel resolve pipeline"),
-        layout: Some(&pl),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vs"),
-            buffers: &[],
-            compilation_options: Default::default(),
-        },
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            cull_mode: None,
-            ..Default::default()
-        },
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState {
-            count: 1,
-            mask: !0,
-            alpha_to_coverage_enabled: false,
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: surface_format,
-                // No blending — the resolve fully replaces the output
-                // texture's contents on every run. The accumulation
-                // chain (next step) handles temporal blending; here we
-                // just write the per-sample composite.
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: Default::default(),
-        }),
-        multiview_mask: None,
-        cache: None,
-    });
-    (pipeline, bgl)
-}
-
-#[inline]
-fn max_blend() -> wgpu::BlendState {
-    wgpu::BlendState {
-        color: wgpu::BlendComponent {
-            src_factor: wgpu::BlendFactor::One,
-            dst_factor: wgpu::BlendFactor::One,
-            operation: wgpu::BlendOperation::Max,
-        },
-        alpha: wgpu::BlendComponent {
-            src_factor: wgpu::BlendFactor::One,
-            dst_factor: wgpu::BlendFactor::One,
-            operation: wgpu::BlendOperation::Max,
-        },
-    }
-}
-
-#[inline]
-fn front_under_blend() -> wgpu::BlendState {
-    // Matches MatterCAD's RenderTarget[1] (premultiplied "under" blend):
-    //   colour = dstAlpha * srcRGB + 1 * dstRGB
-    //   alpha  =        0 * srcA   + (1 - srcA) * dstA
-    // Clear front_accum to (0, 0, 0, 1) so the first fragment uses
-    // dstAlpha = 1 (full transmittance).
-    wgpu::BlendState {
-        color: wgpu::BlendComponent {
-            src_factor: wgpu::BlendFactor::DstAlpha,
-            dst_factor: wgpu::BlendFactor::One,
-            operation: wgpu::BlendOperation::Add,
-        },
-        alpha: wgpu::BlendComponent {
-            src_factor: wgpu::BlendFactor::Zero,
-            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-            operation: wgpu::BlendOperation::Add,
-        },
-    }
-}
-
-#[inline]
-fn back_over_blend() -> wgpu::BlendState {
-    // Matches MatterCAD's RenderTarget[2] (straight "over" blend):
-    //   colour = srcA * srcRGB + (1 - srcA) * dstRGB
-    //   alpha  =    1 * srcA   + (1 - srcA) * dstA
-    wgpu::BlendState {
-        color: wgpu::BlendComponent {
-            src_factor: wgpu::BlendFactor::SrcAlpha,
-            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-            operation: wgpu::BlendOperation::Add,
-        },
-        alpha: wgpu::BlendComponent {
-            src_factor: wgpu::BlendFactor::One,
-            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-            operation: wgpu::BlendOperation::Add,
-        },
-    }
-}
+// `BodyDrawHandle` re-exported above — defined in
+// `scene_renderer::body_uniform` so it's shared with the bed shadow
+// caster + future outline multi-body iteration.

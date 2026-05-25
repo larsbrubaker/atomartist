@@ -22,6 +22,7 @@
 
 use bytemuck::{Pod, Zeroable};
 
+use super::body_uniform::{BodyUniform, DYN_OFFSET_ALIGN};
 use super::opaque_shaders::SCENE_SHADER;
 use super::util::SCENE_DEPTH_COLOR_FORMAT;
 
@@ -71,10 +72,38 @@ pub struct Vertex {
 /// uniforms are rewritten via [`wgpu::Queue::write_buffer`] rather than
 /// reallocated, matching the cost-saving pattern documented on the
 /// original `GpuState::scene_ub` field.
+///
+/// Multi-body layout: pipelines bind TWO bind groups —
+///
+/// * group(0) = scene uniforms (proj, view, lights, params) and the
+///   single shared scene uniform buffer `scene_ub`. Rebuilt once per
+///   `OpaquePipelines::new` and reused every frame.
+/// * group(1) = per-body uniforms (model, colour, flags) — pointed
+///   at by `body_bg` whose underlying buffer comes from the
+///   renderer's [`super::body_uniform::BodyUniformBuffer`].
+///   `has_dynamic_offset = true` so the caller passes the body's
+///   slot offset on every draw without rebuilding the bind group.
+///
+/// `body_bg` is `Option` because the renderer might be running with
+/// `bodies.is_empty()`, in which case there's nothing to bind. When
+/// the body uniform buffer is reallocated (capacity grows), the
+/// renderer rebuilds this group via [`OpaquePipelines::rebuild_body_bg`].
 pub struct OpaquePipelines {
     pub scene_pipeline: wgpu::RenderPipeline,
     pub scene_ub: wgpu::Buffer,
     pub scene_bg: wgpu::BindGroup,
+
+    /// Bind-group layout for the per-body uniform — held so the
+    /// renderer can rebuild `body_bg` when the body uniform buffer
+    /// reallocates. Shared with the dual-peel + depth-only
+    /// pipelines (identical layout — see
+    /// [`super::depth_peel::pipelines::DualPeelPipelines`]).
+    pub body_bgl: wgpu::BindGroupLayout,
+
+    /// Per-body bind group resolved against the renderer's dynamic
+    /// uniform buffer. `None` until the first body-buffer alloc;
+    /// rebuilt whenever the buffer reallocates.
+    pub body_bg: Option<wgpu::BindGroup>,
 
     /// Depth-only twin of `scene_pipeline`: runs the same vertex
     /// shader, writes depth + `scene_depth_color` (the R32Float mirror
@@ -98,65 +127,144 @@ impl OpaquePipelines {
         surface_format: wgpu::TextureFormat,
         sample_count: u32,
     ) -> Self {
+        let body_bgl = build_body_bgl(device);
         let (scene_pipeline, scene_bgl) =
-            build_scene_pipeline(device, surface_format, sample_count);
+            build_scene_pipeline(device, surface_format, sample_count, &body_bgl);
         let (scene_ub, scene_bg) = build_scene_uniforms(device, &scene_bgl);
 
         let depth_only_pipeline =
-            build_depth_only_pipeline(device, &scene_bgl, surface_format, sample_count);
+            build_depth_only_pipeline(device, &scene_bgl, surface_format, sample_count, &body_bgl);
 
         Self {
             scene_pipeline,
             scene_ub,
             scene_bg,
+            body_bgl,
+            body_bg: None,
             depth_only_pipeline,
         }
+    }
+
+    /// Resolve the per-body bind group against the renderer's
+    /// dynamic body-uniform buffer. The renderer calls this once
+    /// per frame after [`super::WgpuSceneRenderer::ensure_body_buffers`],
+    /// only when the buffer reallocates (the bind group's resolved
+    /// pointer would otherwise dangle).
+    pub fn rebuild_body_bg(&mut self, device: &wgpu::Device, body_buffer: &wgpu::Buffer) {
+        let entry = wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                buffer: body_buffer,
+                offset: 0,
+                size: std::num::NonZeroU64::new(std::mem::size_of::<BodyUniform>() as u64),
+            }),
+        };
+        self.body_bg = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("atomartist opaque body bg"),
+            layout: &self.body_bgl,
+            entries: &[entry],
+        }));
     }
 
     pub fn write_scene_uniforms(&self, queue: &wgpu::Queue, u: &Uniforms) {
         queue.write_buffer(&self.scene_ub, 0, bytemuck::bytes_of(u));
     }
 
-    /// Draw the indexed mesh as a shaded surface. Caller must have already
-    /// uploaded scene uniforms via [`Self::write_scene_uniforms`] and have
-    /// bound viewport / scissor on `pass`.
-    pub fn draw_scene<'rpass>(
+    /// Draw one body as a shaded surface. Caller has already uploaded
+    /// scene uniforms via [`Self::write_scene_uniforms`] and bound
+    /// viewport / scissor on `pass`. `body_index` indexes into the
+    /// dynamic uniform buffer — see [`super::body_uniform::slot_offset`].
+    pub fn draw_body<'rpass>(
         &'rpass self,
         pass: &mut wgpu::RenderPass<'rpass>,
         vbuf: &'rpass wgpu::Buffer,
         ibuf: &'rpass wgpu::Buffer,
+        cbuf: &'rpass wgpu::Buffer,
         index_count: u32,
+        body_index: u32,
     ) {
+        let body_bg = match &self.body_bg {
+            Some(bg) => bg,
+            None => return,
+        };
         pass.set_pipeline(&self.scene_pipeline);
         pass.set_bind_group(0, &self.scene_bg, &[]);
+        pass.set_bind_group(1, body_bg, &[body_index * DYN_OFFSET_ALIGN]);
         pass.set_vertex_buffer(0, vbuf.slice(..));
+        pass.set_vertex_buffer(1, cbuf.slice(..));
         pass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
         pass.draw_indexed(0..index_count, 0, 0..1);
     }
 
-    /// Draw the indexed mesh depth-only (no color, depth-write on). Used
-    /// to seed the opaque depth attachment + R32Float mirror so the
-    /// dual-peel chain can discard fragments behind the mesh; the
-    /// mesh's *color* is produced by the dual-peel chain.
-    pub fn draw_depth_only<'rpass>(
+    /// Depth-only twin of [`Self::draw_body`]: writes depth + the
+    /// R32Float depth-colour mirror so the dual-peel chain has a
+    /// per-pixel opaque-depth value to discard against. Colour
+    /// write-mask is empty in the pipeline so the mesh's surface
+    /// colour stays the responsibility of the dual-peel chain.
+    pub fn draw_body_depth_only<'rpass>(
         &'rpass self,
         pass: &mut wgpu::RenderPass<'rpass>,
         vbuf: &'rpass wgpu::Buffer,
         ibuf: &'rpass wgpu::Buffer,
+        cbuf: &'rpass wgpu::Buffer,
         index_count: u32,
+        body_index: u32,
     ) {
+        let body_bg = match &self.body_bg {
+            Some(bg) => bg,
+            None => return,
+        };
         pass.set_pipeline(&self.depth_only_pipeline);
         pass.set_bind_group(0, &self.scene_bg, &[]);
+        pass.set_bind_group(1, body_bg, &[body_index * DYN_OFFSET_ALIGN]);
         pass.set_vertex_buffer(0, vbuf.slice(..));
+        pass.set_vertex_buffer(1, cbuf.slice(..));
         pass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
         pass.draw_indexed(0..index_count, 0, 0..1);
     }
 }
 
+/// Vertex layouts for the per-body pipelines. Slot 0 carries
+/// position + normal (the `Vertex` struct); slot 1 carries per-vertex
+/// RGBA colour (`@location(2)`). Both slots are required: the
+/// renderer always populates the colour VBO, either with per-vertex
+/// overlay data or with the body's uniform tint repeated — see
+/// [`super::BodyGpu`] for the build-time branch.
+pub fn vertex_layouts() -> [wgpu::VertexBufferLayout<'static>; 2] {
+    static SLOT0_ATTRS: [wgpu::VertexAttribute; 2] = [
+        wgpu::VertexAttribute {
+            offset: 0,
+            shader_location: 0,
+            format: wgpu::VertexFormat::Float32x3,
+        },
+        wgpu::VertexAttribute {
+            offset: 12,
+            shader_location: 1,
+            format: wgpu::VertexFormat::Float32x3,
+        },
+    ];
+    static SLOT1_ATTRS: [wgpu::VertexAttribute; 1] = [wgpu::VertexAttribute {
+        offset: 0,
+        shader_location: 2,
+        format: wgpu::VertexFormat::Float32x4,
+    }];
+    [
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Vertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &SLOT0_ATTRS,
+        },
+        wgpu::VertexBufferLayout {
+            array_stride: 16,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &SLOT1_ATTRS,
+        },
+    ]
+}
+
 fn vertex_layout() -> wgpu::VertexBufferLayout<'static> {
-    // Defined as a function (not a const) because `VertexBufferLayout`
-    // borrows its attribute slice — the slice lives in static storage
-    // through this function's literal so the borrow is `'static`.
+    // Legacy single-slot layout retained for any callers that still
+    // need it. New per-body pipelines use [`vertex_layouts`] above.
     static ATTRS: [wgpu::VertexAttribute; 2] = [
         wgpu::VertexAttribute {
             offset: 0,
@@ -192,10 +300,33 @@ fn shared_bgl(device: &wgpu::Device, label: &'static str) -> wgpu::BindGroupLayo
     })
 }
 
+/// Per-body uniform binding layout — shared across the opaque,
+/// depth-only, dual-peel init, and dual-peel colour pipelines.
+/// `has_dynamic_offset = true` so a single bind group walks the
+/// per-body slots via [`super::body_uniform::slot_offset`].
+pub fn build_body_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("atomartist per-body bgl"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: true,
+                min_binding_size: std::num::NonZeroU64::new(
+                    std::mem::size_of::<BodyUniform>() as u64,
+                ),
+            },
+            count: None,
+        }],
+    })
+}
+
 fn build_scene_pipeline(
     device: &wgpu::Device,
     surface_format: wgpu::TextureFormat,
     sample_count: u32,
+    body_bgl: &wgpu::BindGroupLayout,
 ) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout) {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("atomartist scene shader"),
@@ -204,16 +335,17 @@ fn build_scene_pipeline(
     let bgl = shared_bgl(device, "atomartist scene bgl");
     let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("atomartist scene pl"),
-        bind_group_layouts: &[Some(&bgl)],
+        bind_group_layouts: &[Some(&bgl), Some(body_bgl)],
         immediate_size: 0,
     });
+    let layouts = vertex_layouts();
     let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("atomartist scene pipeline"),
         layout: Some(&pl),
         vertex: wgpu::VertexState {
             module: &shader,
             entry_point: Some("vs"),
-            buffers: &[vertex_layout()],
+            buffers: &layouts,
             compilation_options: Default::default(),
         },
         primitive: wgpu::PrimitiveState {
@@ -291,6 +423,7 @@ fn build_depth_only_pipeline(
     scene_bgl: &wgpu::BindGroupLayout,
     surface_format: wgpu::TextureFormat,
     sample_count: u32,
+    body_bgl: &wgpu::BindGroupLayout,
 ) -> wgpu::RenderPipeline {
     // Reuse the scene shader's vertex + fragment stages; the fragment
     // shader still runs (cheap, no varying / texture work) but the
@@ -306,16 +439,17 @@ fn build_depth_only_pipeline(
     });
     let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("atomartist depth-only pl"),
-        bind_group_layouts: &[Some(scene_bgl)],
+        bind_group_layouts: &[Some(scene_bgl), Some(body_bgl)],
         immediate_size: 0,
     });
+    let layouts = vertex_layouts();
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("atomartist depth-only pipeline"),
         layout: Some(&pl),
         vertex: wgpu::VertexState {
             module: &shader,
             entry_point: Some("vs"),
-            buffers: &[vertex_layout()],
+            buffers: &layouts,
             compilation_options: Default::default(),
         },
         primitive: wgpu::PrimitiveState {

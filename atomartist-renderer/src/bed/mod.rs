@@ -275,12 +275,12 @@ impl BedRenderer {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
-        mesh: Option<MeshRef<'_>>,
-        mesh_id: u64,
+        bodies: &[crate::scene_renderer::body_uniform::BodyDrawHandle<'_>],
+        bodies_id: u64,
         bed_z: f32,
     ) -> bool {
         let key = CompositeKey {
-            mesh_id: if mesh.is_some() { mesh_id } else { 0 },
+            mesh_id: if bodies.is_empty() { 0 } else { bodies_id },
             invert_flag: u8::from(self.is_dark),
             color_key: pack_rgba8(self.grid_line_color),
         };
@@ -291,10 +291,16 @@ impl BedRenderer {
         }
         log_cache_miss(prev, key);
         self.chain
-            .render(device, queue, encoder, mesh, &self.grid_view, bed_z);
+            .render(device, queue, encoder, bodies, &self.grid_view, bed_z);
         self.last_composite_key.set(Some(key));
         self.frame_counter.set(self.frame_counter.get().wrapping_add(1));
         true
+    }
+
+    /// Forward to the shadow chain — called by the scene renderer
+    /// when its dynamic body uniform buffer reallocates.
+    pub fn rebuild_body_bg(&mut self, device: &wgpu::Device, body_buffer: &wgpu::Buffer) {
+        self.chain.rebuild_body_bg(device, body_buffer);
     }
 
     /// Draw the bed quad into the currently-bound render pass. Caller

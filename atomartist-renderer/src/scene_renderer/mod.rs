@@ -45,10 +45,13 @@ use wgpu::util::DeviceExt;
 
 use glam::Mat4;
 
+use atomartist_lib::geometry::Body;
+
 use crate::bed::BedRenderer;
 use crate::camera::OrbitCamera;
 
 pub mod accumulation;
+pub mod body_uniform;
 pub mod cache;
 pub mod depth_peel;
 pub mod gizmo_pass;
@@ -95,6 +98,60 @@ impl Default for RenderStyle {
     }
 }
 
+/// One body's worth of cached GPU buffers + the source-Body
+/// fingerprint we use to detect changes.
+///
+/// The cache key is `(mesh_ptr, vertex_colors_ptr, body_color_q)` —
+/// swapping any of those rebuilds this entry. The body's transform
+/// rides on the uniform write path and does NOT invalidate the
+/// vertex/index/colour buffers.
+///
+/// ## Colour buffer is always allocated
+///
+/// Every body carries a `cbuf` at vertex-buffer slot 1, regardless
+/// of whether the source [`atomartist_lib::geometry::Body`] has a
+/// `vertex_colors` overlay:
+///
+/// * Source body has `vertex_colors = Some(v)` — `cbuf` mirrors `v`
+///   (per-vertex RGBA carried directly).
+/// * Source body has `vertex_colors = None` — `cbuf` is filled with
+///   the body's uniform `color` repeated per vertex.
+///
+/// Either way, the shader's `@location(2)` color attribute reads a
+/// valid value per vertex and the fragment shader's
+/// `v_color * b.color` math produces the right result without a
+/// branch. Keeps the pipeline cache to a single variant — the
+/// alternative (two pipelines selecting on `has_vertex_colors`) was
+/// considered and rejected because the colour-fill cost is small
+/// compared with the pipeline-switching overhead and binding-group
+/// rebuild on a real multi-body scene.
+pub struct BodyGpu {
+    /// Pointer to the source `MeshGL::vert_properties` buffer.
+    /// Doubles as the primary cache key.
+    pub mesh_ptr: usize,
+    /// Pointer to the source `Body::vertex_colors` buffer (0 when
+    /// the body has no per-vertex colour overlay). Secondary cache
+    /// key so a colour-only swap rebuilds the colour VBO.
+    pub vertex_colors_ptr: usize,
+    /// Quantised body colour — tertiary cache key so the cbuf
+    /// rebuilds when a Color-node-tinted body has no per-vertex
+    /// data but its uniform tint changes.
+    pub body_color_q: u32,
+    /// Position + normal vertex buffer (slot 0).
+    pub vbuf: wgpu::Buffer,
+    /// Triangle index buffer.
+    pub ibuf: wgpu::Buffer,
+    /// Per-vertex RGBA colour buffer (slot 1). Always populated —
+    /// see the type-level doc for the per-vertex vs uniform-fill
+    /// branch at build time.
+    pub cbuf: wgpu::Buffer,
+    /// Triangle index count for `draw_indexed`.
+    pub index_count: u32,
+    /// Vertex count — used to size the colour-fill when the source
+    /// body lacks per-vertex data.
+    pub vert_count: u32,
+}
+
 /// Sample count for the offscreen 3-D framebuffer.
 ///
 /// Must stay at 1 — see the "Why single-sample" note at the top of this
@@ -124,12 +181,14 @@ struct GpuState {
     /// composite pipeline that runs each frame before the main pass.
     bed: BedRenderer,
 
-    /// Cached vertex/index buffers and the source mesh pointer they were
-    /// built from. The pointer doubles as the cache key.
-    mesh_ptr: usize,
-    vbuf: Option<wgpu::Buffer>,
-    ibuf: Option<wgpu::Buffer>,
-    index_count: u32,
+    /// Per-body GPU cache. One entry per `WgpuSceneRenderer::bodies`
+    /// element, rebuilt lazily when the source mesh pointer changes.
+    /// See [`BodyGpu`] for the per-body field breakdown.
+    bodies_gpu: Vec<BodyGpu>,
+
+    /// Dynamic-offset uniform buffer holding one [`BodyUniform`] slot
+    /// per body. Sized via [`BodyUniformBuffer::ensure_capacity`].
+    body_uniforms: body_uniform::BodyUniformBuffer,
 
     /// Offscreen framebuffer (color only) for the opaque pass — bed,
     /// mesh depth-only, and outline render into this. The resolve pass
@@ -193,8 +252,19 @@ struct GpuState {
 pub struct WgpuSceneRenderer {
     state: Option<GpuState>,
     pub camera: OrbitCamera,
-    pub mesh: Option<Arc<MeshGL>>,
+    /// Bodies to render this frame. The viewport widget pushes a
+    /// `Geometry3d`'s `bodies` here verbatim; the renderer iterates
+    /// them per peel pass (matching NodeDesigner /
+    /// MatterCAD: each peel iteration draws every body).
+    ///
+    /// Empty = "nothing to draw" — the chain still runs (the bed
+    /// composite + accumulation), but every per-body pipeline is
+    /// skipped.
+    pub bodies: Vec<Body>,
     pub viewport_size: (u32, u32),
+    /// Fallback tint used when `bodies` is empty (so the bed pass
+    /// still has a sane background colour). Per-body tint lives on
+    /// each `Body::color`.
     pub base_color: [f32; 4],
     /// Light 0 (key light) direction — used as a *view-space* (camera-
     /// fixed) directional light, matching NodeDesigner's
@@ -285,7 +355,7 @@ impl WgpuSceneRenderer {
         Self {
             state: None,
             camera: OrbitCamera::default(),
-            mesh: None,
+            bodies: Vec::new(),
             viewport_size: (0, 0),
             base_color: [0.62, 0.66, 0.78, 1.0],
             // NodeDesigner `lightDir0 = (-1, -1, 1).normalize()`.
@@ -368,10 +438,8 @@ impl WgpuSceneRenderer {
             dual_peel,
             accum_pipes,
             bed,
-            mesh_ptr: 0,
-            vbuf: None,
-            ibuf: None,
-            index_count: 0,
+            bodies_gpu: Vec::new(),
+            body_uniforms: body_uniform::BodyUniformBuffer::new(),
             framebuffer: None,
             scene_depth: None,
             scene_depth_color: None,
@@ -452,53 +520,174 @@ impl WgpuSceneRenderer {
         0.0
     }
 
-    /// Re-upload mesh buffers if the mesh changed since the last frame.
-    fn ensure_mesh_buffers(&mut self, device: &wgpu::Device) {
-        let mesh = match &self.mesh {
-            Some(m) => m.clone(),
-            None => return,
-        };
+    /// Refresh the per-body GPU cache + the dynamic body-uniform
+    /// buffer so they reflect `self.bodies`.
+    ///
+    /// Strategy: for each body in declaration order, reuse the
+    /// existing `bodies_gpu` entry when its `(mesh_ptr, vertex_colors_ptr)`
+    /// matches; rebuild otherwise. Surplus entries are dropped.
+    ///
+    /// Per-body uniforms (model + colour + flags) are repacked into
+    /// the dynamic uniform buffer every frame — the body Vec is small
+    /// (typically ≤ 16) and the slot write is one `queue.write_buffer`
+    /// call, so amortising further isn't worth the bookkeeping.
+    ///
+    /// Returns `true` when the underlying uniform buffer reallocated
+    /// (capacity grew). Callers rebuild any bind group that resolves
+    /// against the buffer's identity on a `true` return.
+    pub(crate) fn ensure_body_buffers(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> bool {
+        let bodies = self.bodies.clone();
         let s = match &mut self.state {
             Some(s) => s,
-            None => return,
+            None => return false,
         };
-        let ptr = mesh.vert_properties.as_ptr() as usize;
-        if s.mesh_ptr == ptr && s.vbuf.is_some() {
-            return;
-        }
-        if mesh.num_prop < 6 || mesh.vert_properties.is_empty() {
-            return;
-        }
-        let stride = mesh.num_prop as usize;
-        let n_verts = mesh.vert_properties.len() / stride;
-        let mut verts: Vec<Vertex> = Vec::with_capacity(n_verts);
-        for i in 0..n_verts {
-            verts.push(Vertex {
-                pos: [
-                    mesh.vert_properties[i * stride],
-                    mesh.vert_properties[i * stride + 1],
-                    mesh.vert_properties[i * stride + 2],
-                ],
-                normal: [
-                    mesh.vert_properties[i * stride + 3],
-                    mesh.vert_properties[i * stride + 4],
-                    mesh.vert_properties[i * stride + 5],
-                ],
+
+        let mut new_cache: Vec<BodyGpu> = Vec::with_capacity(bodies.len());
+        let mut taken = vec![false; s.bodies_gpu.len()];
+
+        for body in bodies.iter() {
+            let mesh = &body.mesh;
+            if mesh.num_prop < 6 || mesh.vert_properties.is_empty() {
+                // Skip — degenerate body. Slot still consumes a
+                // `BodyUniform` entry below for index parity.
+                continue;
+            }
+            let mesh_ptr = mesh.vert_properties.as_ptr() as usize;
+            let vc_ptr = body
+                .vertex_colors
+                .as_ref()
+                .map(|v| v.as_ptr() as usize)
+                .unwrap_or(0);
+            let color_q = pack_color_q(body.color);
+
+            // Reuse an existing cache entry with matching pointers
+            // AND matching tint (the tint participates in the
+            // cbuf fill when there's no per-vertex overlay).
+            let mut reused = false;
+            for (i, prev) in s.bodies_gpu.iter().enumerate() {
+                if !taken[i]
+                    && prev.mesh_ptr == mesh_ptr
+                    && prev.vertex_colors_ptr == vc_ptr
+                    && prev.body_color_q == color_q
+                {
+                    taken[i] = true;
+                    let clone = BodyGpu {
+                        mesh_ptr: prev.mesh_ptr,
+                        vertex_colors_ptr: prev.vertex_colors_ptr,
+                        body_color_q: prev.body_color_q,
+                        vbuf: prev.vbuf.clone(),
+                        ibuf: prev.ibuf.clone(),
+                        cbuf: prev.cbuf.clone(),
+                        index_count: prev.index_count,
+                        vert_count: prev.vert_count,
+                    };
+                    new_cache.push(clone);
+                    reused = true;
+                    break;
+                }
+            }
+            if reused {
+                continue;
+            }
+
+            // Build fresh — pos+normal VBO, index, then the colour
+            // VBO at slot 1.
+            let stride = mesh.num_prop as usize;
+            let n_verts = mesh.vert_properties.len() / stride;
+            let mut verts: Vec<Vertex> = Vec::with_capacity(n_verts);
+            for i in 0..n_verts {
+                verts.push(Vertex {
+                    pos: [
+                        mesh.vert_properties[i * stride],
+                        mesh.vert_properties[i * stride + 1],
+                        mesh.vert_properties[i * stride + 2],
+                    ],
+                    normal: [
+                        mesh.vert_properties[i * stride + 3],
+                        mesh.vert_properties[i * stride + 4],
+                        mesh.vert_properties[i * stride + 5],
+                    ],
+                });
+            }
+            let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("atomartist body vb"),
+                contents: cast_slice(&verts),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            let ibuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("atomartist body ib"),
+                contents: cast_slice(&mesh.tri_verts),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+
+            // Colour VBO — per-vertex when the source body has one,
+            // otherwise fill with the body's uniform colour. See the
+            // `BodyGpu` doc for why we always allocate this rather
+            // than gating on `has_vertex_colors`.
+            let cbuf_data: Vec<f32> = match body.vertex_colors.as_ref() {
+                Some(colors) if colors.len() == n_verts * 4 => (**colors).clone(),
+                _ => {
+                    // Either no per-vertex overlay OR length mismatch
+                    // (defensive — a mis-sized overlay falls back to
+                    // the uniform tint rather than risking a buffer
+                    // overrun in the shader).
+                    let mut v = Vec::with_capacity(n_verts * 4);
+                    for _ in 0..n_verts {
+                        v.extend_from_slice(&body.color);
+                    }
+                    v
+                }
+            };
+            let cbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("atomartist body cb"),
+                contents: cast_slice(&cbuf_data),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+
+            new_cache.push(BodyGpu {
+                mesh_ptr,
+                vertex_colors_ptr: vc_ptr,
+                body_color_q: color_q,
+                vbuf,
+                ibuf,
+                cbuf,
+                index_count: mesh.tri_verts.len() as u32,
+                vert_count: n_verts as u32,
             });
         }
-        s.vbuf = Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("atomartist scene vb"),
-            contents: cast_slice(&verts),
-            usage: wgpu::BufferUsages::VERTEX,
-        }));
-        s.ibuf = Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("atomartist scene ib"),
-            contents: cast_slice(&mesh.tri_verts),
-            usage: wgpu::BufferUsages::INDEX,
-        }));
-        s.index_count = mesh.tri_verts.len() as u32;
-        s.mesh_ptr = ptr;
+
+        s.bodies_gpu = new_cache;
+
+        // Resize + repopulate the dynamic uniform buffer. One slot
+        // per body — the slot order matches `bodies_gpu` so a draw
+        // call's body index doubles as the uniform-slot index.
+        let needed = bodies.len() as u32;
+        let realloc = s.body_uniforms.ensure_capacity(device, needed);
+        let mut slots: Vec<body_uniform::BodyUniform> = Vec::with_capacity(bodies.len());
+        for body in bodies.iter() {
+            slots.push(body_uniform::BodyUniform {
+                model: body.matrix,
+                color: body.color,
+                flags: [body.has_vertex_colors() as u32, 0, 0, 0],
+            });
+        }
+        if !slots.is_empty() {
+            s.body_uniforms.write_slots(queue, &slots);
+        }
+        realloc
     }
+}
+
+/// Quantise an RGBA colour to a 32-bit packed key — 8 bits per
+/// channel. Same packing as the cache fingerprint so cbuf rebuilds
+/// align with accumulation restarts.
+fn pack_color_q(c: [f32; 4]) -> u32 {
+    let to_u8 = |x: f32| (x.clamp(0.0, 1.0) * 255.0).round() as u32;
+    (to_u8(c[0]) << 24) | (to_u8(c[1]) << 16) | (to_u8(c[2]) << 8) | to_u8(c[3])
 }
 
 impl Default for WgpuSceneRenderer {

@@ -29,6 +29,7 @@ use super::shadow_pipelines::{
     build_shadow_caster_pipeline, BlitVertex,
 };
 use super::texture::mip_level_count;
+use crate::scene_renderer::body_uniform::{BodyDrawHandle, BodyUniform, DYN_OFFSET_ALIGN};
 
 /// Size of the offscreen shadow / blur / composite textures. NodeDesigner
 /// uses 1024 — a good trade-off between blur quality and bandwidth.
@@ -119,6 +120,15 @@ pub(super) struct ShadowChain {
     shadow_caster_ub: wgpu::Buffer,
     shadow_caster_bg: wgpu::BindGroup,
 
+    /// Per-body bind-group layout, mirrored from the scene renderer
+    /// so the shadow caster shares the same dynamic uniform buffer.
+    /// Stored so [`Self::rebuild_body_bg`] can refresh `body_bg` on
+    /// buffer realloc.
+    body_bgl: wgpu::BindGroupLayout,
+    /// Resolved bind group against the renderer's dynamic uniform
+    /// buffer. `None` until the first body lands; rebuilt on realloc.
+    body_bg: Option<wgpu::BindGroup>,
+
     blur_pipeline: wgpu::RenderPipeline,
     /// Persistent UB + BGs for the two blur passes (H + V) — uniforms
     /// differ only in the `direction` field which is rewritten per
@@ -159,6 +169,10 @@ impl ShadowChain {
         device: &wgpu::Device,
         composite_format: wgpu::TextureFormat,
     ) -> Self {
+        // Build our own body bind-group layout — structurally
+        // identical to the scene renderer's so a single dynamic
+        // uniform buffer feeds both pipelines.
+        let body_bgl = crate::scene_renderer::opaque_pass::build_body_bgl(device);
         // ── Offscreen attachments ─────────────────────────────────────
         let shadow_view = alloc_chain_tex(device, "atomartist bed shadow", CHAIN_FORMAT, 1)
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -219,7 +233,7 @@ impl ShadowChain {
 
         // ── Shadow caster pipeline ───────────────────────────────────
         let (shadow_caster_pipeline, shadow_caster_bgl) =
-            build_shadow_caster_pipeline(device, CHAIN_FORMAT);
+            build_shadow_caster_pipeline(device, CHAIN_FORMAT, &body_bgl);
         let shadow_caster_ub = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("atomartist bed shadow ub"),
             size: std::mem::size_of::<ShadowCasterUniforms>() as u64,
@@ -288,6 +302,8 @@ impl ShadowChain {
             shadow_caster_pipeline,
             shadow_caster_ub,
             shadow_caster_bg,
+            body_bgl,
+            body_bg: None,
             blur_pipeline,
             blur_h_ub,
             blur_h_bg,
@@ -337,16 +353,39 @@ impl ShadowChain {
     /// itself is fixed at `(0, 0)` like the build plate in MatterCAD
     /// and NodeDesigner, so the silhouette stays aligned with the
     /// (unmoving) bed grid regardless of how the user pans the camera.
+    /// Resolve the per-body bind group against the renderer's
+    /// dynamic uniform buffer. Called by [`super::BedRenderer`]
+    /// once per frame after [`crate::scene_renderer::WgpuSceneRenderer::ensure_body_buffers`]
+    /// reports a buffer realloc — otherwise this is a no-op.
+    pub(super) fn rebuild_body_bg(
+        &mut self,
+        device: &wgpu::Device,
+        body_buffer: &wgpu::Buffer,
+    ) {
+        self.body_bg = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("atomartist bed shadow body bg"),
+            layout: &self.body_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: body_buffer,
+                    offset: 0,
+                    size: std::num::NonZeroU64::new(std::mem::size_of::<BodyUniform>() as u64),
+                }),
+            }],
+        }));
+    }
+
     pub(super) fn render(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
-        mesh: Option<MeshRef<'_>>,
+        bodies: &[BodyDrawHandle<'_>],
         grid_view: &wgpu::TextureView,
         bed_z: f32,
     ) {
-        self.run_shadow_pass(queue, encoder, mesh, bed_z);
+        self.run_shadow_pass(queue, encoder, bodies, bed_z);
         self.run_blur_h(queue, encoder);
         self.run_blur_v(queue, encoder);
         self.run_composite_pass(device, queue, encoder, grid_view);
@@ -357,7 +396,7 @@ impl ShadowChain {
         &self,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
-        mesh: Option<MeshRef<'_>>,
+        bodies: &[BodyDrawHandle<'_>],
         bed_z: f32,
     ) {
         // Top-down ortho looking from +Z toward -Z in our Z-up world,
@@ -399,13 +438,27 @@ impl ShadowChain {
             1.0,
         );
         pass.set_scissor_rect(0, 0, SHADOW_TEX_SIZE, SHADOW_TEX_SIZE);
-        if let Some(m) = mesh {
-            if m.index_count > 0 {
+        // Multi-body shadow: every body contributes its silhouette
+        // to the same `shadow_view`. NodeDesigner's contact-shadows.js
+        // does the same thing — every transparentGroup mesh swaps
+        // material to the shadow caster and gets drawn into the
+        // single shadow target. Per-body model matrix is read from
+        // the dynamic uniform buffer at slot `body_index`.
+        if let Some(body_bg) = &self.body_bg {
+            if !bodies.is_empty() {
                 pass.set_pipeline(&self.shadow_caster_pipeline);
                 pass.set_bind_group(0, &self.shadow_caster_bg, &[]);
-                pass.set_vertex_buffer(0, m.vbuf.slice(..));
-                pass.set_index_buffer(m.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..m.index_count, 0, 0..1);
+                for h in bodies {
+                    if h.index_count == 0 {
+                        continue;
+                    }
+                    let off = h.body_index * DYN_OFFSET_ALIGN;
+                    pass.set_bind_group(1, body_bg, &[off]);
+                    pass.set_vertex_buffer(0, h.vbuf.slice(..));
+                    pass.set_vertex_buffer(1, h.cbuf.slice(..));
+                    pass.set_index_buffer(h.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..h.index_count, 0, 0..1);
+                }
             }
         }
     }

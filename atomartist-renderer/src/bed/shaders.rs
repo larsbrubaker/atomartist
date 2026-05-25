@@ -17,11 +17,31 @@ struct U {
     mvp: mat4x4<f32>,
 };
 
+// Per-body uniform — same layout as the scene shaders' `B` block;
+// see `scene_renderer/body_uniform.rs` for the host-side struct and
+// the dynamic-offset binding rationale. Selected via group(1)
+// binding(0) so each body's shadow uses its own model matrix.
+struct B {
+    model: mat4x4<f32>,
+    color: vec4<f32>,
+    flags: vec4<u32>,
+};
+
 @group(0) @binding(0) var<uniform> u: U;
+@group(1) @binding(0) var<uniform> b: B;
 
 @vertex
-fn vs(@location(0) pos: vec3<f32>, @location(1) _normal: vec3<f32>) -> @builtin(position) vec4<f32> {
-    return u.mvp * vec4<f32>(pos, 1.0);
+fn vs(
+    @location(0) pos: vec3<f32>,
+    @location(1) _normal: vec3<f32>,
+    // Shadow caster doesn't read per-vertex colour but the layout
+    // must match the rest of the per-body pipelines — see the
+    // init shader's matching `_v_color` comment.
+    @location(2) _v_color: vec4<f32>,
+) -> @builtin(position) vec4<f32> {
+    // Apply the body's model BEFORE the shadow projection so each
+    // body casts a shadow at its world-space position.
+    return u.mvp * b.model * vec4<f32>(pos, 1.0);
 }
 
 @fragment
