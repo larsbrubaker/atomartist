@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use manifold_rust::types::MeshGL;
 
-use crate::geometry::{Geometry3d, DEFAULT_GEOMETRY_COLOR};
+use crate::geometry::{Body, Geometry3d, DEFAULT_GEOMETRY_COLOR};
 use crate::graph::node::{identity_matrix, PortValue};
 
 use crate::graph::node::PortValue as _PortValue;
@@ -64,9 +64,9 @@ pub fn wrap_mesh(ctx: &EvalCtx, mesh: MeshGL) -> Geometry3d {
         _PortValue::Matrix4x4(m) => *m,
         _ => ctx.properties.matrix4x4("matrix", identity_matrix()),
     };
-    Geometry3d {
+    Geometry3d::from_body(Body {
         mesh: Arc::new(mesh),
         matrix,
         color,
-    }
+    })
 }

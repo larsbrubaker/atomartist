@@ -46,7 +46,18 @@ impl NodeDef for FitToBoundsNode {
                 "FitToBounds: expected Geometry3d, got {:?}", other.socket_type()
             ))),
         };
-        let (mn, mx) = match bounds(&input.mesh) {
+        // Multi-body inputs: operate on the first body. The remaining
+        // bodies pass through untouched in the output group. Re-fitting
+        // the bounds across all bodies is a future enhancement.
+        let first = match input.first() {
+            Some(b) => b,
+            None => {
+                let mut o = NodeOutputs::default();
+                o.set("out", PortValue::Geometry3d(input));
+                return Ok(o);
+            }
+        };
+        let (mn, mx) = match bounds(&first.mesh) {
             Some(b) => b,
             None => {
                 let mut o = NodeOutputs::default();
@@ -80,7 +91,7 @@ impl NodeDef for FitToBoundsNode {
         let cy = (mn[1] + mx[1]) * 0.5;
         let cz = (mn[2] + mx[2]) * 0.5;
         let m = scale_about([cx, cy, cz], [sx, sy, sz]);
-        let result = apply_transform(&input.mesh, &m);
+        let result = apply_transform(&first.mesh, &m);
         let mut out = NodeOutputs::default();
         out.set("out", PortValue::Geometry3d(Arc::new(wrap_mesh(ctx, result))));
         Ok(out)

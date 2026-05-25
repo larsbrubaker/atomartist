@@ -63,7 +63,11 @@ fn dropping_an_stl_on_the_canvas_adds_a_mesh_node() {
     );
     match mesh_node_instance.properties.get("mesh") {
         Some(PortValue::Geometry3d(g)) => {
-            assert_eq!(g.mesh.tri_verts.len() / 3, 12, "Simple Box has 12 triangles");
+            assert_eq!(
+                g.first().unwrap().mesh.tri_verts.len() / 3,
+                12,
+                "Simple Box has 12 triangles"
+            );
         }
         other => panic!(
             "mesh cache should be populated immediately on drop, got {:?}",
@@ -131,7 +135,7 @@ fn dropped_mesh_propagates_through_evaluate_now() {
     let out = h.state().last_mesh_output.lock().unwrap();
     let geom = out.as_ref().expect("viewport geometry must be populated");
     assert_eq!(
-        geom.mesh.tri_verts.len() / 3,
+        geom.first().unwrap().mesh.tri_verts.len() / 3,
         12,
         "viewport should receive the 12-triangle cube",
     );

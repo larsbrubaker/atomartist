@@ -46,7 +46,7 @@ fn align_default_sits_on_floor_plane_centered() {
     let outs = AlignNode.evaluate(&ctx).unwrap();
     match outs.by_name.get("out").unwrap() {
         PortValue::Geometry3d(t) => {
-            let (mn, mx) = bounds(&t.mesh).unwrap();
+            let (mn, mx) = bounds(&t.first().unwrap().mesh).unwrap();
             assert!((mn[1] - 0.0).abs() < 1e-4, "y_min should be 0, got {}", mn[1]);
             assert!((mx[1] - 6.0).abs() < 1e-4, "y_max should be 6, got {}", mx[1]);
             assert!(((mn[0] + mx[0]) * 0.5).abs() < 1e-4);
@@ -64,7 +64,7 @@ fn align_max_y_puts_top_at_origin() {
     let outs = AlignNode.evaluate(&ctx).unwrap();
     match outs.by_name.get("out").unwrap() {
         PortValue::Geometry3d(t) => {
-            let (_, mx) = bounds(&t.mesh).unwrap();
+            let (_, mx) = bounds(&t.first().unwrap().mesh).unwrap();
             assert!((mx[1] - 0.0).abs() < 1e-4, "y_max should be 0, got {}", mx[1]);
         }
         _ => panic!(),
@@ -88,7 +88,7 @@ fn fit_to_bounds_uniform_keeps_aspect() {
     let outs = FitToBoundsNode.evaluate(&ctx).unwrap();
     match outs.by_name.get("out").unwrap() {
         PortValue::Geometry3d(t) => {
-            let (mn, mx) = bounds(&t.mesh).unwrap();
+            let (mn, mx) = bounds(&t.first().unwrap().mesh).unwrap();
             let dx = mx[0] - mn[0];
             let dy = mx[1] - mn[1];
             let dz = mx[2] - mn[2];
@@ -117,7 +117,7 @@ fn fit_to_bounds_stretch_fills_each_axis() {
     let outs = FitToBoundsNode.evaluate(&ctx).unwrap();
     match outs.by_name.get("out").unwrap() {
         PortValue::Geometry3d(t) => {
-            let (mn, mx) = bounds(&t.mesh).unwrap();
+            let (mn, mx) = bounds(&t.first().unwrap().mesh).unwrap();
             assert!((mx[0] - mn[0] - 10.0).abs() < 1e-3);
             assert!((mx[1] - mn[1] - 10.0).abs() < 1e-3);
             assert!((mx[2] - mn[2] - 10.0).abs() < 1e-3);

@@ -176,44 +176,28 @@ impl NodeDef for OutputNode {
             out.set(slot.name.clone(), value);
         }
 
-        // 2) Merge every connected Geometry3d input into __display__ so
-        //    the viewport renders the union. Each upstream geometry
-        //    carries its own matrix + colour; the merge baked the
-        //    matrices via `apply_transform` so the merged result is
-        //    world-space and uses the first input's colour as the
-        //    representative tint.
-        let mut meshes = Vec::new();
-        let mut first_geom: Option<Arc<crate::geometry::Geometry3d>> = None;
+        // 2) Concatenate every connected Geometry3d input's bodies
+        //    into the __display__ group. The viewport iterates the
+        //    bodies and renders each with its own colour + transform,
+        //    so multiple upstream nodes (or a single multi-body group
+        //    like a 3MF import) survive intact instead of being
+        //    collapsed into a single tinted mesh.
+        let mut bodies = Vec::new();
         for slot in &ctx.instance.inputs {
             if slot.name.as_ref().is_empty() {
                 continue;
             }
             if let PortValue::Geometry3d(g) = ctx.input(slot.uid) {
-                if num_verts(&g.mesh) > 0 && num_tris(&g.mesh) > 0 {
-                    if first_geom.is_none() {
-                        first_geom = Some(g.clone());
-                    }
-                    if g.matrix == crate::graph::node::identity_matrix() {
-                        meshes.push(g.mesh.clone());
-                    } else {
-                        let baked = crate::geometry::apply_transform(&g.mesh, &g.matrix);
-                        meshes.push(Arc::new(baked));
+                for b in g.iter() {
+                    if num_verts(&b.mesh) > 0 && num_tris(&b.mesh) > 0 {
+                        bodies.push(b.clone());
                     }
                 }
             }
         }
-        let merged = merge_meshes(&meshes);
-        let merged_geom = match first_geom {
-            Some(g) => crate::geometry::Geometry3d {
-                mesh: Arc::new(merged),
-                matrix: crate::graph::node::identity_matrix(),
-                color: g.color,
-            },
-            None => crate::geometry::Geometry3d::from_mesh(Arc::new(merged)),
-        };
         out.set(
             DISPLAY_OUTPUT_NAME,
-            PortValue::Geometry3d(Arc::new(merged_geom)),
+            PortValue::Geometry3d(Arc::new(crate::geometry::Geometry3d::from_bodies(bodies))),
         );
 
         Ok(out)
@@ -375,7 +359,7 @@ mod tests {
     }
 
     #[test]
-    fn evaluate_merges_two_boxes_into_display_output() {
+    fn evaluate_collects_two_boxes_into_display_output() {
         let reg = registry();
         let mut g = Graph::new();
         let bx1 = g.add_new_node("Box", [0.0, 0.0], &reg).unwrap();
@@ -395,11 +379,19 @@ mod tests {
         let display_uid = n.output_by_name(DISPLAY_OUTPUT_NAME).unwrap().uid;
         match n.cached_outputs.get(&display_uid) {
             Some(PortValue::Geometry3d(g)) => {
-                // Two default boxes: 24 verts each, 12 tris each.
-                assert_eq!(num_verts(&g.mesh), 48);
-                assert_eq!(num_tris(&g.mesh), 24);
+                // Output no longer merges meshes — each input becomes
+                // its own body so per-body colour survives downstream
+                // rendering. Two boxes wired in → two bodies, each
+                // with the per-box vert/tri count.
+                assert_eq!(g.len(), 2, "two boxes → two bodies");
+                let total_verts: usize =
+                    g.iter().map(|b| num_verts(&b.mesh)).sum();
+                let total_tris: usize =
+                    g.iter().map(|b| num_tris(&b.mesh)).sum();
+                assert_eq!(total_verts, 48, "24+24 verts across bodies");
+                assert_eq!(total_tris, 24, "12+12 tris across bodies");
             }
-            other => panic!("expected merged Geometry3d, got {:?}", other),
+            other => panic!("expected multi-body Geometry3d, got {:?}", other),
         }
     }
 

@@ -69,8 +69,20 @@ impl NodeDef for BooleanNode {
             _ => OpType::Add,
         };
 
-        let stripped_a = strip_normals(&geom_a.mesh);
-        let stripped_b = strip_normals(&geom_b.mesh);
+        // Booleans operate on the first body of each input. Multi-body
+        // boolean (e.g. union every body of A with every body of B) is
+        // a planned follow-up; for now the rest of the bodies pass
+        // through untouched in the result group.
+        let mesh_a = match geom_a.first() {
+            Some(b) => &b.mesh,
+            None => return Ok(NodeOutputs::default()),
+        };
+        let mesh_b = match geom_b.first() {
+            Some(b) => &b.mesh,
+            None => return Ok(NodeOutputs::default()),
+        };
+        let stripped_a = strip_normals(mesh_a);
+        let stripped_b = strip_normals(mesh_b);
         let ma = Manifold::from_mesh_gl(&stripped_a);
         let mb = Manifold::from_mesh_gl(&stripped_b);
         let result = ma.boolean(&mb, op);
@@ -188,8 +200,9 @@ mod tests {
         let outs = n.evaluate(&ctx).unwrap();
         match outs.by_name.get("out").unwrap() {
             PortValue::Geometry3d(g) => {
-                assert!(!g.mesh.vert_properties.is_empty());
-                assert!(g.mesh.tri_verts.len() / 3 >= 12);
+                let mesh = &g.first().unwrap().mesh;
+                assert!(!mesh.vert_properties.is_empty());
+                assert!(mesh.tri_verts.len() / 3 >= 12);
             }
             _ => panic!(),
         }

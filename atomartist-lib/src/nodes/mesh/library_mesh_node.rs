@@ -112,7 +112,7 @@ mod tests {
         let outs = n.evaluate(&ctx).unwrap();
         match outs.by_name.get("out").unwrap() {
             PortValue::Geometry3d(g) => {
-                assert_eq!(g.mesh.tri_verts.len() / 3, 12, "box has 12 tris");
+                assert_eq!(g.first().unwrap().mesh.tri_verts.len() / 3, 12, "box has 12 tris");
             }
             _ => panic!(),
         }

@@ -271,7 +271,15 @@ impl EvalTask {
             PortValue::Geometry3d(g) => Some(g.clone()),
             _ => None,
         })?;
-        if atomartist_lib::geometry::num_tris(&display_geom.mesh) == 0 {
+        // Multi-body group: keep the geometry when at least one body
+        // has triangles. An Output node wired to nothing produces an
+        // empty bodies vec, which collapses to `None` here so the
+        // viewport draws nothing.
+        if display_geom.is_empty()
+            || display_geom
+                .iter()
+                .all(|b| atomartist_lib::geometry::num_tris(&b.mesh) == 0)
+        {
             return None;
         }
         Some(display_geom)
@@ -534,7 +542,13 @@ impl AppState {
             .unwrap()
             .clone()
             .ok_or_else(|| "no geometry to export — wire up a node with a 3D output".to_string())?;
-        let bytes = export_stl(&geom.mesh);
+        // STL has no per-body / per-colour notion — concatenate the
+        // group's triangles into a single mesh before encoding. For a
+        // single-body group this is identical to the pre-multi-body
+        // behaviour; multi-body groups land as one merged STL.
+        let meshes: Vec<_> = geom.iter().map(|b| b.mesh.clone()).collect();
+        let merged = atomartist_lib::geometry::merge_meshes(&meshes);
+        let bytes = export_stl(&merged);
         std::fs::write(path, bytes).map_err(|e| format!("write {}: {}", path.display(), e))?;
         Ok(())
     }

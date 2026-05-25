@@ -499,8 +499,8 @@ mod tests {
             .expect("Cylinder must emit `out`");
         match geom {
             PortValue::Geometry3d(g) => {
-                assert!(crate::geometry::num_verts(&g.mesh) > 0);
-                assert!(crate::geometry::num_tris(&g.mesh) > 0);
+                assert!(crate::geometry::num_verts(&g.first().unwrap().mesh) > 0);
+                assert!(crate::geometry::num_tris(&g.first().unwrap().mesh) > 0);
             }
             other => panic!("expected Geometry3d, got {:?}", other),
         }
@@ -539,7 +539,7 @@ mod tests {
         if let Some(PortValue::Geometry3d(g)) = outputs.by_name.get("out") {
             // Two wedge quads = 4 triangles on top of the full mesh, so
             // the half-arc must still produce a mesh.
-            assert!(crate::geometry::num_tris(&g.mesh) > 0);
+            assert!(crate::geometry::num_tris(&g.first().unwrap().mesh) > 0);
         } else {
             panic!("advanced evaluate must produce Geometry3d");
         }

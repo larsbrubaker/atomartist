@@ -400,7 +400,11 @@ fn add_zoom_to_sel_button(overlay: &mut ViewportOverlay, state: &AppState, font:
         .with_image_icon(MatterCadIcon::Select)
         .on_click(move || {
             let Some(geom) = mesh_slot.lock().unwrap().clone() else { return };
-            let mesh = &geom.mesh;
+            // Fit-to-view operates on the first body for now —
+            // multi-body fit (union bounds across every body) is a
+            // viewport follow-up.
+            let Some(first) = geom.first() else { return };
+            let mesh = &first.mesh;
             if mesh.num_prop < 3 || mesh.vert_properties.is_empty() {
                 return;
             }

@@ -117,22 +117,29 @@ impl NodeDef for CombineNode {
 
     fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
         // Iterate the instance's input slots, skipping the trailing
-        // empty placeholder. Concatenate every non-empty Geometry3d
-        // value into the merged mesh.
-        let mut parts = Vec::new();
+        // empty placeholder. Accumulate every input's bodies into the
+        // output group — Combine no longer merges meshes into a single
+        // tinted body; that lost per-body colour. Each upstream body
+        // keeps its own mesh + colour + matrix, and the resulting
+        // multi-body group flows downstream intact.
+        let mut bodies: Vec<crate::geometry::Body> = Vec::new();
         for slot in &ctx.instance.inputs {
             if slot.name.as_ref().is_empty() {
                 continue;
             }
             if let PortValue::Geometry3d(g) = ctx.input(slot.uid) {
-                if num_verts(&g.mesh) > 0 && num_tris(&g.mesh) > 0 {
-                    parts.push(g.mesh.clone());
+                for b in g.iter() {
+                    if num_verts(&b.mesh) > 0 && num_tris(&b.mesh) > 0 {
+                        bodies.push(b.clone());
+                    }
                 }
             }
         }
-        let merged = merge_meshes(&parts);
         let mut out = NodeOutputs::default();
-        out.set("out", PortValue::Geometry3d(Arc::new(wrap_mesh(ctx, merged))));
+        out.set(
+            "out",
+            PortValue::Geometry3d(Arc::new(crate::geometry::Geometry3d::from_bodies(bodies))),
+        );
         Ok(out)
     }
 }
@@ -285,17 +292,26 @@ mod tests {
         let out_uid = g.get(c).unwrap().output_by_name("out").unwrap().uid;
         match g.get(c).unwrap().cached_outputs.get(&out_uid) {
             Some(PortValue::Geometry3d(geo)) => {
-                assert_eq!(num_verts(&geo.mesh), 48, "two unit boxes → 24+24 vertices");
-                assert_eq!(num_tris(&geo.mesh), 24, "two unit boxes → 12+12 triangles");
+                // Combine now accumulates each input as its own body
+                // instead of merging meshes — two boxes wired in →
+                // two bodies in the group, each with its own
+                // vert/tri count.
+                assert_eq!(geo.len(), 2, "two boxes → two bodies");
+                let total_verts: usize =
+                    geo.iter().map(|b| num_verts(&b.mesh)).sum();
+                let total_tris: usize =
+                    geo.iter().map(|b| num_tris(&b.mesh)).sum();
+                assert_eq!(total_verts, 48, "24+24 vertices across bodies");
+                assert_eq!(total_tris, 24, "12+12 triangles across bodies");
             }
-            other => panic!("expected merged Geometry3d, got {:?}", other),
+            other => panic!("expected multi-body Geometry3d, got {:?}", other),
         }
         let _ = generate_box(1.0, 1.0, 1.0); // silence unused-import lint
     }
 
     #[test]
     fn evaluate_skips_disconnected_slots() {
-        // Just the placeholder slot → empty merged mesh.
+        // Just the placeholder slot → empty body group.
         let reg = registry();
         let mut g = Graph::new();
         let c = g.add_new_node("Combine", [0.0, 0.0], &reg).unwrap();
@@ -303,8 +319,7 @@ mod tests {
         let out_uid = g.get(c).unwrap().output_by_name("out").unwrap().uid;
         match g.get(c).unwrap().cached_outputs.get(&out_uid) {
             Some(PortValue::Geometry3d(geo)) => {
-                assert_eq!(num_verts(&geo.mesh), 0);
-                assert_eq!(num_tris(&geo.mesh), 0);
+                assert!(geo.is_empty(), "no wired inputs → empty body group");
             }
             other => panic!("expected empty Geometry3d, got {:?}", other),
         }

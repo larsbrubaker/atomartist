@@ -92,11 +92,11 @@ impl NodeDef for MeshNode {
             // overridden here.
             let matrix = ctx.properties.matrix4x4("matrix", identity_matrix());
             let color = ctx.properties.color("color", DEFAULT_GEOMETRY_COLOR);
-            let geom = Geometry3d {
-                mesh: cached.mesh.clone(),
+            let geom = Geometry3d::from_body(crate::geometry::Body {
+                mesh: cached.first().map(|b| b.mesh.clone()).unwrap_or_default(),
                 matrix,
                 color,
-            };
+            });
             out.set("out", PortValue::Geometry3d(Arc::new(geom)));
         }
         Ok(out)
@@ -225,7 +225,9 @@ mod tests {
         let ctx = EvalCtx { instance: &inst, properties: &props, inputs: &inputs };
         let out = MeshNode.evaluate(&ctx).unwrap();
         match out.by_name.get("out").unwrap() {
-            PortValue::Geometry3d(g) => assert_eq!(g.mesh.tri_verts.len() / 3, 12),
+            PortValue::Geometry3d(g) => {
+                assert_eq!(g.first().unwrap().mesh.tri_verts.len() / 3, 12)
+            }
             _ => panic!("expected Geometry3d output"),
         }
     }
@@ -244,7 +246,9 @@ mod tests {
 
         let node = graph.get(crate::graph::node::NodeId(1)).unwrap();
         match node.properties.get(MESH_CACHE_KEY) {
-            Some(PortValue::Geometry3d(g)) => assert_eq!(g.mesh.tri_verts.len() / 3, 12),
+            Some(PortValue::Geometry3d(g)) => {
+                assert_eq!(g.first().unwrap().mesh.tri_verts.len() / 3, 12)
+            }
             other => panic!("expected resolved geometry, got {:?}", other),
         }
         assert!(node.dirty, "resolution should flag the node dirty");

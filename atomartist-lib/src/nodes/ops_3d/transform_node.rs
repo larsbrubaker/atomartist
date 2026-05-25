@@ -81,7 +81,14 @@ impl NodeDef for TransformNode {
             ))),
         };
         let matrix = Self::build_matrix(ctx.properties);
-        let out_mesh = apply_transform(&input.mesh, &matrix);
+        // Multi-body inputs: transform the first body. Rest pass
+        // through. (Future: apply to every body and emit a
+        // multi-body group.)
+        let first = match input.first() {
+            Some(b) => b,
+            None => return Ok(NodeOutputs::default()),
+        };
+        let out_mesh = apply_transform(&first.mesh, &matrix);
         let mut out = NodeOutputs::default();
         out.set("out", PortValue::Geometry3d(Arc::new(wrap_mesh(ctx, out_mesh))));
         Ok(out)
@@ -203,8 +210,8 @@ mod tests {
         let outs = n.evaluate(&ctx).unwrap();
         match outs.by_name.get("out").unwrap() {
             PortValue::Geometry3d(t) => {
-                for i in 0..num_verts(&t.mesh) {
-                    let p = get_pos(&t.mesh, i);
+                for i in 0..num_verts(&t.first().unwrap().mesh) {
+                    let p = get_pos(&t.first().unwrap().mesh, i);
                     let p0 = get_pos(&m, i);
                     assert!((p[1] - (p0[1] + 5.0)).abs() < 1e-5,
                             "vert {} y did not shift by 5: was {}, now {}",
@@ -225,8 +232,8 @@ mod tests {
         let outs = n.evaluate(&ctx).unwrap();
         match outs.by_name.get("out").unwrap() {
             PortValue::Geometry3d(t) => {
-                for i in 0..num_verts(&t.mesh) {
-                    let p = get_pos(&t.mesh, i);
+                for i in 0..num_verts(&t.first().unwrap().mesh) {
+                    let p = get_pos(&t.first().unwrap().mesh, i);
                     let p0 = get_pos(&m, i);
                     assert!((p[0] - p0[0] * 2.0).abs() < 1e-5);
                     assert!((p[1] - p0[1]).abs() < 1e-5);

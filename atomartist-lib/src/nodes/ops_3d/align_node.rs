@@ -51,7 +51,19 @@ impl NodeDef for AlignNode {
                 "Align: expected Geometry3d, got {:?}", other.socket_type()
             ))),
         };
-        let (mn, mx) = match bounds(&input.mesh) {
+        // Operate on the first body for now — multi-body Align is a
+        // follow-up. Single-body inputs (every primitive, every
+        // upstream op output) behave identically to the pre-refactor
+        // implementation.
+        let first = match input.first() {
+            Some(b) => b,
+            None => {
+                let mut o = NodeOutputs::default();
+                o.set("out", PortValue::Geometry3d(input));
+                return Ok(o);
+            }
+        };
+        let (mn, mx) = match bounds(&first.mesh) {
             Some(b) => b,
             None => {
                 let mut o = NodeOutputs::default();
@@ -68,7 +80,7 @@ impl NodeDef for AlignNode {
         let anchor_z = (mn[2] + mx[2]) * 0.5 + az * (mx[2] - mn[2]) * 0.5;
 
         let translate = column_major_translate(-anchor_x, -anchor_y, -anchor_z);
-        let result = apply_transform(&input.mesh, &translate);
+        let result = apply_transform(&first.mesh, &translate);
         let mut out = NodeOutputs::default();
         out.set("out", PortValue::Geometry3d(Arc::new(wrap_mesh(ctx, result))));
         Ok(out)

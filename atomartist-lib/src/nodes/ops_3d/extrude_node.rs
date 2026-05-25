@@ -259,11 +259,11 @@ impl NodeDef for ExtrudeNode {
         // than going through `wrap_mesh` because the extrude node
         // has its own typed-resolver path that prefers a connected
         // `Matrix` / `Color` input over the same-named property.
-        let geom = crate::geometry::Geometry3d {
+        let geom = crate::geometry::Geometry3d::from_body(crate::geometry::Body {
             mesh: Arc::new(mesh),
             matrix: resolved.matrix,
             color: resolved.color,
-        };
+        });
         let mut out = NodeOutputs::default();
         out.set("Geometry", PortValue::Geometry3d(Arc::new(geom)));
         Ok(out)
@@ -617,8 +617,9 @@ mod tests {
         let out = ExtrudeNode.evaluate(&ctx).unwrap();
         match out.by_name.get("Geometry").unwrap() {
             PortValue::Geometry3d(g) => {
-                assert_eq!(g.matrix, translate_z10);
-                let m = &g.mesh;
+                let body = g.first().unwrap();
+                assert_eq!(body.matrix, translate_z10);
+                let m = &body.mesh;
                 let stride = m.num_prop as usize;
                 let nv = m.vert_properties.len() / stride;
                 let mut z_min = f32::INFINITY;

@@ -43,7 +43,7 @@ fn box_through_transform_produces_translated_mesh() {
         .cached_outputs.get(&out_uid).cloned().unwrap();
     match out {
         PortValue::Geometry3d(g) => {
-            assert_mesh_translated_y(&g.mesh, 5.0);
+            assert_mesh_translated_y(&g.first().unwrap().mesh, 5.0);
         }
         _ => panic!("expected Geometry3d output"),
     }
@@ -95,7 +95,7 @@ fn rectangle_through_extrude_produces_solid() {
     let geo_uid = g.get(e).unwrap().output_by_name("Geometry").unwrap().uid;
     match g.get(e).unwrap().cached_outputs.get(&geo_uid) {
         Some(PortValue::Geometry3d(geo)) => {
-            let m = &geo.mesh;
+            let m = &geo.first().unwrap().mesh;
             assert!(m.vert_properties.len() > 0);
             assert!(m.tri_verts.len() >= 12);
             let stride = m.num_prop as usize;
@@ -137,15 +137,24 @@ fn combine_two_boxes_via_executor() {
     let out_c = g.get(c).unwrap().output_by_name("out").unwrap().uid;
     match g.get(c).unwrap().cached_outputs.get(&out_c) {
         Some(PortValue::Geometry3d(geo)) => {
-            let m = &geo.mesh;
-            assert_eq!(m.vert_properties.len() / m.num_prop as usize, 48);
-            assert_eq!(m.tri_verts.len() / 3, 24);
+            // Combine accumulates each input as its own body — two
+            // boxes wired in → two bodies with their original vert/tri
+            // counts (no merge into one mesh).
+            assert_eq!(geo.len(), 2);
+            let total_verts: usize = geo
+                .iter()
+                .map(|b| b.mesh.vert_properties.len() / b.mesh.num_prop as usize)
+                .sum();
+            let total_tris: usize =
+                geo.iter().map(|b| b.mesh.tri_verts.len() / 3).sum();
+            assert_eq!(total_verts, 48);
+            assert_eq!(total_tris, 24);
         }
         other => panic!("unexpected output: {:?}", other.map(|v| v.socket_type())),
     }
 
     let _arc: Arc<MeshGL> = match g.get(c).unwrap().cached_outputs.get(&out_c) {
-        Some(PortValue::Geometry3d(geo)) => geo.mesh.clone(),
+        Some(PortValue::Geometry3d(geo)) => geo.first().unwrap().mesh.clone(),
         _ => panic!(),
     };
 }

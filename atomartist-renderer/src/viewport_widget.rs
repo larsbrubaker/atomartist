@@ -265,7 +265,10 @@ impl Viewport3dWidget {
         // standard view matrices and a vector is cheaper.
         let (_right, _up, fwd) = cam.basis();
         let mesh_slot = self.inputs.last_mesh_output.lock().unwrap();
-        let mesh_ref = mesh_slot.as_deref().map(|g| &*g.mesh);
+        // Phase-1 multi-body integration: raycast uses the first
+        // body's mesh. Multi-body raycast (returning which body was
+        // hit) is the next renderer pass.
+        let mesh_ref = mesh_slot.as_deref().and_then(|g| g.first()).map(|b| &*b.mesh);
         resolve_pivot_or_fallback(
             mesh_ref,
             ray_origin,
@@ -313,7 +316,13 @@ impl Viewport3dWidget {
     /// software fallback callers that don't care about the matrix or
     /// colour.
     fn current_mesh(&self) -> Option<Arc<MeshGL>> {
-        self.current_geometry().map(|g| g.mesh.clone())
+        // Single-mesh callers read the first body. Multi-body
+        // viewport rendering (one draw call per body, each with its
+        // own base_color) is a follow-up pass; this fallback keeps
+        // raycast / fit-to-bounds / software-render paths working
+        // through phase 1.
+        self.current_geometry()
+            .and_then(|g| g.first().map(|b| b.mesh.clone()))
     }
 
     /// Re-fit the camera to the last seen mesh's AABB. Used by the Home
@@ -660,7 +669,12 @@ impl Widget for Viewport3dWidget {
         // this the renderer would always paint its `new()` default
         // tint regardless of what the user set on the node.
         let geom_opt = self.current_geometry();
-        let mesh_opt: Option<Arc<MeshGL>> = geom_opt.as_ref().map(|g| g.mesh.clone());
+        // Phase-1 multi-body integration: the scene pipeline currently
+        // renders a single mesh+colour. Push the FIRST body so the
+        // viewport keeps working; phase-2 will extend the renderer to
+        // iterate `geom.bodies` and emit a draw call per body.
+        let first_body = geom_opt.as_ref().and_then(|g| g.first().cloned());
+        let mesh_opt: Option<Arc<MeshGL>> = first_body.as_ref().map(|b| b.mesh.clone());
         if let Some(mesh) = &mesh_opt {
             self.maybe_auto_fit(mesh);
         }
@@ -671,12 +685,12 @@ impl Widget for Viewport3dWidget {
         {
             let mut s = self.scene.borrow_mut();
             s.mesh = mesh_opt.clone();
-            // Drive the renderer's `base_color` from the upstream
-            // node's colour property. Falls back to the default
-            // material tint when no geometry is present so the
-            // viewport's background pass still has a sane colour.
-            if let Some(geom) = &geom_opt {
-                s.base_color = geom.color;
+            // Drive the renderer's `base_color` from the first body's
+            // colour. Falls back to the default material tint when no
+            // geometry is present so the viewport's background pass
+            // still has a sane colour.
+            if let Some(b) = &first_body {
+                s.base_color = b.color;
             }
             s.camera = self.cam();
             s.outline_enabled = selection_active;

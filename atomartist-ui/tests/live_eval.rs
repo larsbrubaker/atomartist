@@ -27,7 +27,7 @@ fn evaluate_now_populates_last_mesh_for_box() {
     let geom = state.last_mesh_output.lock().unwrap().clone();
     assert!(geom.is_some(), "expected last_mesh_output to be populated");
     let geom = geom.unwrap();
-    let mesh = &geom.mesh;
+    let mesh = &geom.first().unwrap().mesh;
     let n_verts = mesh.vert_properties.len() / mesh.num_prop as usize;
     assert_eq!(n_verts, 24);
 }
@@ -42,7 +42,7 @@ fn property_change_then_evaluate_yields_different_mesh() {
     state.set_display_node(Some(id));
     state.evaluate_now();
     let geom_a = state.last_mesh_output.lock().unwrap().clone().unwrap();
-    let mesh_a = &geom_a.mesh;
+    let mesh_a = &geom_a.first().unwrap().mesh;
 
     // Mutate width and re-evaluate.
     {
@@ -51,7 +51,7 @@ fn property_change_then_evaluate_yields_different_mesh() {
     }
     state.evaluate_now();
     let geom_b = state.last_mesh_output.lock().unwrap().clone().unwrap();
-    let mesh_b = &geom_b.mesh;
+    let mesh_b = &geom_b.first().unwrap().mesh;
 
     // Same vertex/triangle counts, different vertex coords.
     assert_eq!(mesh_a.vert_properties.len(), mesh_b.vert_properties.len());
