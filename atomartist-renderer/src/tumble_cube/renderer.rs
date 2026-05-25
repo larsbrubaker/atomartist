@@ -14,7 +14,7 @@
 //! [`crate`] doc → "Anti-aliasing policy"). To still get crisp cube edges
 //! at the small 100 px widget size, the cube renders into an oversized
 //! offscreen backbuffer (`SSAA_SCALE × screen_rect`) and the shared
-//! `MsaaFramebuffer::blit_to` bilinear pipeline downsamples the result
+//! `SsaaFramebuffer::blit_to` bilinear pipeline downsamples the result
 //! onto the active 2-D target. This is the reference implementation for
 //! the SSAA pattern documented at the crate root.
 //!
@@ -25,7 +25,7 @@
 //! cube produces an immediately legible result.
 
 use bytemuck::{Pod, Zeroable};
-use demo_wgpu::{MsaaFramebuffer, WgpuCustomRender, WgpuCustomRenderCtx};
+use demo_wgpu::{SsaaFramebuffer, WgpuCustomRender, WgpuCustomRenderCtx};
 use glam::{Mat4, Quat, Vec3};
 use wgpu::util::DeviceExt;
 
@@ -44,10 +44,10 @@ const SAMPLE_COUNT: u32 = 1;
 ///
 /// Valid values:
 /// - `1` — no SSAA; the cube renders 1:1 with the widget rect.
-/// - `2` — 4× pixel cost. The composite uses `MsaaFramebuffer::blit_to`
+/// - `2` — 4× pixel cost. The composite uses `SsaaFramebuffer::blit_to`
 ///   (single bilinear tap = exact 2×2 box).
 /// - `4` — 16× pixel cost. The composite uses
-///   `MsaaFramebuffer::blit_downsample_4x_to` (4 bilinear taps = exact
+///   `SsaaFramebuffer::blit_downsample_4x_to` (4 bilinear taps = exact
 ///   4×4 box). A single bilinear tap at this scale would drop 12 of 16
 ///   source texels per output pixel — visually identical to `2` at 4×
 ///   the cost — so the dedicated 4× pipeline is required.
@@ -137,7 +137,7 @@ struct GpuState {
     ibuf: wgpu::Buffer,
     sampler: wgpu::Sampler,
     faces: Vec<GpuFace>,
-    framebuffer: Option<MsaaFramebuffer>,
+    framebuffer: Option<SsaaFramebuffer>,
 }
 
 /// Tumble-cube custom render renderer.
@@ -339,8 +339,9 @@ impl TumbleCubeRenderer {
         match &mut s.framebuffer {
             Some(fb) => fb.ensure_size(device, w, h),
             None => {
-                s.framebuffer = Some(MsaaFramebuffer::new(
-                    device, w, h, SAMPLE_COUNT, format, true,
+                // SSAA API has no sample-count argument.
+                s.framebuffer = Some(SsaaFramebuffer::new(
+                    device, w, h, format, true,
                 ));
             }
         }
@@ -480,7 +481,7 @@ impl WgpuCustomRender for TumbleCubeRenderer {
                 label: Some("tumble cube offscreen"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: fb.render_view(),
-                    resolve_target: fb.resolve_target(),
+                    resolve_target: None, // SSAA: no MSAA resolve; downsample is a later blit
                     depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),

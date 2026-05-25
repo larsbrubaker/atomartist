@@ -7,7 +7,7 @@
 //! view that the 2-D UI pipeline uses (which couples 3-D anti-aliasing
 //! settings to the 2-D pipeline and forces every viewport-overlay control
 //! to live inside the 3-D pass), the renderer owns a dedicated
-//! [`MsaaFramebuffer`] sized to the viewport widget's pixel rect:
+//! [`SsaaFramebuffer`] sized to the viewport widget's pixel rect:
 //!
 //! 1. Allocate an offscreen colour texture + matching depth at the widget's
 //!    pixel size.
@@ -39,7 +39,7 @@
 use std::sync::Arc;
 
 use bytemuck::cast_slice;
-use demo_wgpu::{MsaaFramebuffer, WgpuCustomRender, WgpuCustomRenderCtx};
+use demo_wgpu::{SsaaFramebuffer, WgpuCustomRender, WgpuCustomRenderCtx};
 use manifold_rust::types::MeshGL;
 use wgpu::util::DeviceExt;
 
@@ -136,7 +136,7 @@ struct GpuState {
     /// samples this texture as `scene_color`. We allocate the depth
     /// attachment separately so it can be made `TEXTURE_BINDING`
     /// sample-able by the dual-peel shaders.
-    framebuffer: Option<MsaaFramebuffer>,
+    framebuffer: Option<SsaaFramebuffer>,
 
     /// Hardware depth attachment for the opaque pass — used for
     /// regular depth testing during scene / bed / outline draws.
@@ -165,10 +165,10 @@ struct GpuState {
     accum_targets: Option<AccumulationTargets>,
 
     /// Final composited output — the accumulation copy pass writes
-    /// here. Held as an `MsaaFramebuffer` (with `sample_count = 1`,
-    /// no depth) so the existing `MsaaFramebuffer::blit_to` path
+    /// here. Held as an `SsaaFramebuffer` (with `sample_count = 1`,
+    /// no depth) so the existing `SsaaFramebuffer::blit_to` path
     /// keeps working for the final surface composite.
-    output_fb: Option<MsaaFramebuffer>,
+    output_fb: Option<SsaaFramebuffer>,
 
     /// Pipelines + uniforms for the Blender-style post-process
     /// selection outline. Built once during `ensure_state`; runs
@@ -398,11 +398,15 @@ impl WgpuSceneRenderer {
         match &mut s.framebuffer {
             Some(fb) => fb.ensure_size(device, w, h),
             None => {
-                s.framebuffer = Some(MsaaFramebuffer::new(
+                // SSAA has no MSAA sample-count — the upstream
+                // `demo_wgpu` API renamed `MsaaFramebuffer` to
+                // `SsaaFramebuffer` and dropped the sample-count
+                // arg. The downsample that used to happen via MSAA
+                // resolve now runs as an explicit blit later.
+                s.framebuffer = Some(SsaaFramebuffer::new(
                     device,
                     w,
                     h,
-                    SAMPLE_COUNT,
                     format,
                     // Depth lives in `scene_depth` so it can be marked
                     // TEXTURE_BINDING for the dual-peel discard sampler.
@@ -423,11 +427,10 @@ impl WgpuSceneRenderer {
         match &mut s.output_fb {
             Some(fb) => fb.ensure_size(device, w, h),
             None => {
-                s.output_fb = Some(MsaaFramebuffer::new(
+                s.output_fb = Some(SsaaFramebuffer::new(
                     device,
                     w,
                     h,
-                    SAMPLE_COUNT,
                     format,
                     /* with_depth */ false,
                 ));

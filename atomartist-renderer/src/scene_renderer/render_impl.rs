@@ -185,7 +185,7 @@ impl WgpuCustomRender for WgpuSceneRenderer {
                 color_attachments: &[
                     Some(wgpu::RenderPassColorAttachment {
                         view: fb.render_view(),
-                        resolve_target: fb.resolve_target(),
+                        resolve_target: None, // SSAA: no MSAA resolve; downsample is a later blit
                         depth_slice: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),

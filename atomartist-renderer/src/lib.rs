@@ -47,13 +47,13 @@
 //! composite chain) keep their existing single-shot pipelines and can
 //! choose **SSAA** if they need anti-aliasing: render into an oversized
 //! offscreen backbuffer and pick the matching composite kernel from
-//! `demo_wgpu::MsaaFramebuffer`. Choosing the right downsample kernel
+//! `demo_wgpu::SsaaFramebuffer`. Choosing the right downsample kernel
 //! for the scale is critical — the wrong one silently throws SSAA
 //! work away:
 //!
-//! - `2×` linear scaling (4× pixel cost) → `MsaaFramebuffer::blit_to`. A
+//! - `2×` linear scaling (4× pixel cost) → `SsaaFramebuffer::blit_to`. A
 //!   single bilinear tap reads an exact 2×2 box per output pixel.
-//! - `4×` linear scaling (16× pixel cost) → `MsaaFramebuffer::blit_downsample_4x_to`.
+//! - `4×` linear scaling (16× pixel cost) → `SsaaFramebuffer::blit_downsample_4x_to`.
 //!   Runs 4 bilinear taps in a 2×2 quadrant grid for an exact 4×4 box
 //!   average. `blit_to` at this scale only sees 4 of the 16 source texels
 //!   per output pixel and degrades to roughly 2× quality — always pair the
