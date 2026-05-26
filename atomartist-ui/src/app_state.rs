@@ -15,6 +15,7 @@ use agg_gui::undo::UndoBuffer;
 use atomartist_lib::geometry::Geometry3d;
 use atomartist_lib::graph::executor::evaluate_dirty;
 use atomartist_lib::graph::node::{NodeId, PortValue};
+use atomartist_lib::graph::undo_commands::AddNodeCmd;
 use atomartist_lib::registry::NodeRegistry;
 use atomartist_lib::nodes::mesh::mesh_node;
 use atomartist_lib::serialization::{
@@ -428,10 +429,10 @@ impl AppState {
 
         let new_id = {
             let mut graph = self.graph.lock().unwrap();
-            // add_new_node calls `NodeDef::instantiate`, which mints the
-            // input/output sockets and seeds default properties. We then
-            // overwrite the `asset` and `mesh` properties so the runtime
-            // cache is populated before the first eval.
+            // Create + populate the node in one pass; then pull the
+            // fully-configured instance out so AddNodeCmd owns it (so
+            // Ctrl+Z removes the import + Ctrl+Y restores it with the
+            // same asset_ref + mesh cache).
             let id = graph
                 .add_new_node(mesh_node::TYPE_ID, canvas_pos, &self.registry)
                 .map_err(|e| format!("add MeshNode: {}", e))?;
@@ -451,6 +452,12 @@ impl AppState {
                     )),
                 )
                 .ok();
+            let (node, _detached) = graph
+                .remove_node(id)
+                .map_err(|e| format!("snapshot for undo: {:?}", e))?;
+            drop(graph);
+            let cmd = AddNodeCmd::new(self.graph.clone(), node).with_label("Import Mesh");
+            self.undo.lock().unwrap().add_and_do(Box::new(cmd));
             id
         };
         self.evaluate_now();

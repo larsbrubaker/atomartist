@@ -93,11 +93,27 @@ pub fn build_menu_bar(
         TopMenu::new(
             "Edit",
             vec![
-                MenuEntry::Item(MenuItem::action("Undo", "edit.undo").icon(bi::ARROW_COUNTERCLOCKWISE)),
-                MenuEntry::Item(MenuItem::action("Redo", "edit.redo").icon(bi::ARROW_CLOCKWISE)),
+                MenuEntry::Item(
+                    MenuItem::action("Undo", "edit.undo")
+                        .icon(bi::ARROW_COUNTERCLOCKWISE)
+                        .shortcut("Ctrl+Z"),
+                ),
+                MenuEntry::Item(
+                    MenuItem::action("Redo", "edit.redo")
+                        .icon(bi::ARROW_CLOCKWISE)
+                        .shortcut("Ctrl+Y"),
+                ),
                 MenuEntry::Separator,
-                MenuEntry::Item(MenuItem::action("Delete Selected", "edit.delete").icon(bi::TRASH)),
-                MenuEntry::Item(MenuItem::action("Select All", "edit.select_all").icon(bi::ARROWS_ANGLE_EXPAND)),
+                MenuEntry::Item(
+                    MenuItem::action("Delete Selected", "edit.delete")
+                        .icon(bi::TRASH)
+                        .shortcut("Del"),
+                ),
+                MenuEntry::Item(
+                    MenuItem::action("Select All", "edit.select_all")
+                        .icon(bi::ARROWS_ANGLE_EXPAND)
+                        .shortcut("Ctrl+A"),
+                ),
             ],
         ),
         TopMenu::new("View", build_view_entries(&state)),

@@ -27,6 +27,10 @@ use agg_gui_node_editor as ne;
 use atomartist_lib::graph::graph::{Noodle, GraphError};
 use atomartist_lib::graph::node::{NodeId as DomainNodeId, PortValue};
 use atomartist_lib::graph::socket::SocketUid;
+use atomartist_lib::graph::undo_commands::{
+    AddNodeCmd, BatchCmd, ChangePropertyCmd, ConnectCmd, DisconnectCmd,
+    MoveNodeCmd, RemoveNodeCmd,
+};
 use atomartist_lib::registry::EditorKind;
 use atomartist_lib::SocketType;
 
@@ -292,25 +296,47 @@ impl ne::NodeGraphModel for AppStateModel {
     }
 
     fn set_node_position(&mut self, id: ne::NodeId, pos: [f64; 2]) {
-        let mut g = self.state.graph.lock().unwrap();
-        let _ = g.set_position(Self::from_ne(id), pos);
+        let domain_id = Self::from_ne(id);
+        // Drag coalescing: a single user drag fires this method many
+        // times per second. Merge into the top-of-stack `MoveNodeCmd`
+        // when the target matches so the whole drag is one undo step.
+        let coalesced = self.state.undo.lock().unwrap().try_coalesce_last(|top| {
+            if let Some(cmd) = top.as_any_mut().downcast_mut::<MoveNodeCmd>() {
+                if cmd.id == domain_id {
+                    cmd.extend_into(pos);
+                    return true;
+                }
+            }
+            false
+        });
+        if !coalesced {
+            let cmd = MoveNodeCmd::new(self.state.graph.clone(), domain_id, pos);
+            self.state.undo.lock().unwrap().add_and_do(Box::new(cmd));
+        }
     }
 
     fn add_node(&mut self, type_id: &str, pos: [f64; 2]) -> Option<ne::NodeId> {
-        let id = {
+        // Build the node off-graph via `add_new_node`, then pull it back
+        // out so the AddNodeCmd owns the full NodeInstance for redo.
+        // Wasteful but engine-side simpler than introducing a separate
+        // build-without-insert API — revisit if profiling shows this
+        // matters.
+        let (id, node) = {
             let mut g = self.state.graph.lock().unwrap();
-            g.add_new_node(type_id, pos, &self.state.registry).ok()?
+            let id = g.add_new_node(type_id, pos, &self.state.registry).ok()?;
+            let (node, _detached) = g.remove_node(id).ok()?;
+            (id, node)
         };
+        let cmd = AddNodeCmd::new(self.state.graph.clone(), node);
+        self.state.undo.lock().unwrap().add_and_do(Box::new(cmd));
         self.state.schedule_evaluate();
         Some(Self::to_ne(id))
     }
 
     fn remove_node(&mut self, id: ne::NodeId) {
         let domain_id = Self::from_ne(id);
-        {
-            let mut g = self.state.graph.lock().unwrap();
-            let _ = g.remove_node(domain_id);
-        }
+        let cmd = RemoveNodeCmd::new(self.state.graph.clone(), domain_id);
+        self.state.undo.lock().unwrap().add_and_do(Box::new(cmd));
         self.state.schedule_evaluate();
     }
 
@@ -331,30 +357,85 @@ impl ne::NodeGraphModel for AppStateModel {
             _ => return ne::NoodleResult::Rejected,
         };
         let noodle = Noodle::new(Self::from_ne(from_node), from_uid, Self::from_ne(to_node), to_uid);
-        let mut g = self.state.graph.lock().unwrap();
-        let result = match g.connect(noodle, &self.state.registry) {
-            Ok(()) => ne::NoodleResult::Connected,
-            Err(GraphError::InputAlreadyConnected) => {
-                // Replacement semantics: drop the existing noodle to the
-                // input, then retry.
-                let to_remove: Vec<Noodle> = g
-                    .noodles()
-                    .iter()
-                    .filter(|n| n.to == noodle.to)
-                    .copied()
-                    .collect();
-                for n in to_remove {
-                    let _ = g.disconnect(&n, &self.state.registry);
-                }
-                if g.connect(noodle, &self.state.registry).is_ok() {
-                    ne::NoodleResult::Replaced
+        // Dry-run the connect on a peek lock to figure out which path
+        // (clean Connect / Replace-existing / Reject) we'll take —
+        // without mutating. Pre-collect existing noodles to the same
+        // input so the Replace branch knows what to capture for the
+        // undo batch.
+        let (existing_at_target, decision) = {
+            let g = self.state.graph.lock().unwrap();
+            let existing: Vec<Noodle> = g
+                .noodles()
+                .iter()
+                .filter(|n| n.to == noodle.to)
+                .copied()
+                .collect();
+            // Try a validate-only path — we'll actually perform via cmd
+            // below. Read `validate_input_connection` via registry; if
+            // the noodle would otherwise succeed we treat input-already
+            // -connected as Replace.
+            let result_kind = if existing.is_empty() {
+                // We can't know for sure without calling connect, but
+                // the bridge's `try_add_noodle` already filters
+                // socket-direction / cycle / type at the widget
+                // level for the most common rejections. Best-effort:
+                // assume Connected, fall back to Rejected if the
+                // command's do_it actually fails.
+                ne::NoodleResult::Connected
+            } else {
+                ne::NoodleResult::Replaced
+            };
+            (existing, result_kind)
+        };
+
+        let result = match decision {
+            ne::NoodleResult::Connected => {
+                let cmd = ConnectCmd::new(
+                    self.state.graph.clone(),
+                    self.state.registry.clone(),
+                    noodle,
+                );
+                self.state.undo.lock().unwrap().add_and_do(Box::new(cmd));
+                // Check it actually landed (validation failures inside
+                // ConnectCmd::do_it set succeeded=false; the noodle
+                // count tells us cleanly).
+                if self.state.graph.lock().unwrap().noodles().contains(&noodle) {
+                    ne::NoodleResult::Connected
                 } else {
+                    // Pop the no-op cmd off the stack so users don't
+                    // see a phantom undo step for a rejected connect.
+                    self.state.undo.lock().unwrap().undo();
                     ne::NoodleResult::Rejected
                 }
             }
-            Err(_) => ne::NoodleResult::Rejected,
+            ne::NoodleResult::Replaced => {
+                // Batch: disconnect each existing noodle to the target
+                // input, then connect the new noodle. Single undo step
+                // restores everything.
+                let mut children: Vec<Box<dyn agg_gui::undo::UndoRedoCommand>> = Vec::new();
+                for existing in &existing_at_target {
+                    children.push(Box::new(DisconnectCmd::new(
+                        self.state.graph.clone(),
+                        self.state.registry.clone(),
+                        *existing,
+                    )));
+                }
+                children.push(Box::new(ConnectCmd::new(
+                    self.state.graph.clone(),
+                    self.state.registry.clone(),
+                    noodle,
+                )));
+                let batch = BatchCmd::new("Replace Connection", children);
+                self.state.undo.lock().unwrap().add_and_do(Box::new(batch));
+                if self.state.graph.lock().unwrap().noodles().contains(&noodle) {
+                    ne::NoodleResult::Replaced
+                } else {
+                    self.state.undo.lock().unwrap().undo();
+                    ne::NoodleResult::Rejected
+                }
+            }
+            _ => ne::NoodleResult::Rejected,
         };
-        drop(g);
         if matches!(result, ne::NoodleResult::Connected | ne::NoodleResult::Replaced) {
             self.state.schedule_evaluate();
         }
@@ -382,15 +463,21 @@ impl ne::NodeGraphModel for AppStateModel {
             Self::from_ne(to_node),
             to_uid,
         );
-        let mut g = self.state.graph.lock().unwrap();
-        let removed = g
-            .disconnect(&noodle, &self.state.registry)
-            .unwrap_or(false);
-        drop(g);
-        if removed {
-            self.state.schedule_evaluate();
+        // Only push the command if the noodle actually exists — agg-gui
+        // sometimes asks for removal of a noodle that's already gone
+        // (multi-event drag races). A phantom undo step would be
+        // surprising to the user.
+        if !self.state.graph.lock().unwrap().noodles().contains(&noodle) {
+            return false;
         }
-        removed
+        let cmd = DisconnectCmd::new(
+            self.state.graph.clone(),
+            self.state.registry.clone(),
+            noodle,
+        );
+        self.state.undo.lock().unwrap().add_and_do(Box::new(cmd));
+        self.state.schedule_evaluate();
+        true
     }
 
     fn set_property(&mut self, id: ne::NodeId, name: &str, value: ne::PropertyValue) {
@@ -401,9 +488,32 @@ impl ne::NodeGraphModel for AppStateModel {
             ne::PropertyValue::Color(c) => PortValue::Color(c),
             ne::PropertyValue::Other { .. } => return,
         };
-        {
-            let mut g = self.state.graph.lock().unwrap();
-            let _ = g.set_property(domain_id, Arc::<str>::from(name), port_value);
+        let name_arc: Arc<str> = Arc::<str>::from(name);
+        // Slider-coalescing — see MoveNodeCmd::extend_into for the
+        // matching node-drag case. Pixel-rate property writes merge
+        // into the top-of-stack ChangePropertyCmd as long as the
+        // (id, name) tuple matches.
+        let coalesced = {
+            let name_for_pred = name_arc.clone();
+            let value_for_pred = port_value.clone();
+            self.state.undo.lock().unwrap().try_coalesce_last(|top| {
+                if let Some(cmd) = top.as_any_mut().downcast_mut::<ChangePropertyCmd>() {
+                    if cmd.id == domain_id && cmd.name == name_for_pred {
+                        cmd.extend_into(value_for_pred.clone());
+                        return true;
+                    }
+                }
+                false
+            })
+        };
+        if !coalesced {
+            let cmd = ChangePropertyCmd::new(
+                self.state.graph.clone(),
+                domain_id,
+                name_arc,
+                port_value,
+            );
+            self.state.undo.lock().unwrap().add_and_do(Box::new(cmd));
         }
         self.state.schedule_evaluate();
     }
@@ -553,6 +663,9 @@ mod tests {
         let height_input = n.inputs.iter().find(|s| s.name == "Height").unwrap();
         assert_eq!(height_input.display_label.as_deref(), Some("Height"));
     }
+
+    // Undo round-trip tests live in `atomartist-ui/tests/undo_round_trip.rs`
+    // — see that file for the full mutation coverage matrix.
 
     #[test]
     fn extrude_color_property_round_trips_as_color_value() {

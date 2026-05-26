@@ -24,17 +24,26 @@ pub struct AddNodeCmd {
     /// On undo: the node is moved back here.
     pending: Option<NodeInstance>,
     id: NodeId,
+    label: &'static str,
 }
 
 impl AddNodeCmd {
     pub fn new(graph: Arc<Mutex<Graph>>, node: NodeInstance) -> Self {
         let id = node.id;
-        Self { graph, pending: Some(node), id }
+        Self { graph, pending: Some(node), id, label: "Add Node" }
+    }
+
+    /// Override the undo-menu label. Defaults to `"Add Node"`. Callers
+    /// like the mesh-drop importer pick a more specific phrase
+    /// ("Import Mesh") so users see what they actually did.
+    pub fn with_label(mut self, label: &'static str) -> Self {
+        self.label = label;
+        self
     }
 }
 
 impl UndoRedoCommand for AddNodeCmd {
-    fn name(&self) -> &str { "Add Node" }
+    fn name(&self) -> &str { self.label }
     fn do_it(&mut self) {
         if let Some(node) = self.pending.take() {
             let mut g = self.graph.lock().unwrap();
@@ -47,6 +56,7 @@ impl UndoRedoCommand for AddNodeCmd {
             self.pending = Some(node);
         }
     }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }
 
 /// Remove a node, capturing the node + any incident noodles so undo can
@@ -80,6 +90,7 @@ impl UndoRedoCommand for RemoveNodeCmd {
             }
         }
     }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }
 
 /// Connect two sockets. Stores the noodle so undo can disconnect it precisely.
@@ -108,6 +119,7 @@ impl UndoRedoCommand for ConnectCmd {
             let _ = g.disconnect(&self.noodle, &self.registry);
         }
     }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }
 
 pub struct DisconnectCmd {
@@ -138,12 +150,19 @@ impl UndoRedoCommand for DisconnectCmd {
             g.mark_dirty_subtree(self.noodle.to.node);
         }
     }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }
 
 /// Move a node on the canvas. Captures the previous position for undo.
+///
+/// Drag-coalescing: a single user drag fires `set_node_position` ~60×/s,
+/// one event per mouse-move frame. The bridge calls
+/// [`MoveNodeCmd::extend_into`] on the top-of-stack `MoveNodeCmd` to
+/// update `new_pos` in place, so the whole drag becomes one undo step.
+/// `old_pos` is set on the first `do_it` and never overwritten.
 pub struct MoveNodeCmd {
     graph: Arc<Mutex<Graph>>,
-    id: NodeId,
+    pub id: NodeId,
     new_pos: [f64; 2],
     old_pos: Option<[f64; 2]>,
 }
@@ -152,6 +171,15 @@ impl MoveNodeCmd {
     pub fn new(graph: Arc<Mutex<Graph>>, id: NodeId, new_pos: [f64; 2]) -> Self {
         Self { graph, id, new_pos, old_pos: None }
     }
+
+    /// Coalesce a mid-drag update into this command. Caller has already
+    /// verified the target id matches. Updates `new_pos` and applies
+    /// the move directly — no new undo step pushed.
+    pub fn extend_into(&mut self, new_pos: [f64; 2]) {
+        self.new_pos = new_pos;
+        let mut g = self.graph.lock().unwrap();
+        let _ = g.set_position(self.id, new_pos);
+    }
 }
 
 impl UndoRedoCommand for MoveNodeCmd {
@@ -159,7 +187,11 @@ impl UndoRedoCommand for MoveNodeCmd {
     fn do_it(&mut self) {
         let mut g = self.graph.lock().unwrap();
         if let Some(n) = g.get(self.id) {
-            self.old_pos = Some(n.position);
+            // Only capture old_pos on the FIRST do — coalesce-and-redo
+            // cycles must preserve the pre-stroke baseline.
+            if self.old_pos.is_none() {
+                self.old_pos = Some(n.position);
+            }
         }
         let _ = g.set_position(self.id, self.new_pos);
     }
@@ -169,13 +201,21 @@ impl UndoRedoCommand for MoveNodeCmd {
             let _ = g.set_position(self.id, old);
         }
     }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }
 
 /// Change a property value. Captures the previous value for undo.
+///
+/// Slider-coalescing: dragging a number-drag widget fires
+/// `set_property` per pixel. The bridge calls
+/// [`ChangePropertyCmd::extend_into`] on the top-of-stack matching
+/// command to update `new_value` in place — the whole drag is one
+/// undo step. `old_value` captured once at first `do_it` and never
+/// overwritten.
 pub struct ChangePropertyCmd {
     graph: Arc<Mutex<Graph>>,
-    id: NodeId,
-    name: Arc<str>,
+    pub id: NodeId,
+    pub name: Arc<str>,
     new_value: Option<PortValue>,
     old_value: Option<PortValue>,
 }
@@ -189,22 +229,31 @@ impl ChangePropertyCmd {
     ) -> Self {
         Self { graph, id, name: name.into(), new_value: Some(new_value), old_value: None }
     }
+
+    /// Coalesce a mid-stroke property update into this command. Caller
+    /// has verified the target id + name match.
+    pub fn extend_into(&mut self, new_value: PortValue) {
+        let mut g = self.graph.lock().unwrap();
+        let _ = g.set_property(self.id, self.name.clone(), new_value.clone());
+        self.new_value = Some(new_value);
+    }
 }
 
 impl UndoRedoCommand for ChangePropertyCmd {
     fn name(&self) -> &str { "Change Property" }
     fn do_it(&mut self) {
-        if let Some(new_v) = self.new_value.take() {
-            let mut g = self.graph.lock().unwrap();
+        let new_v = match self.new_value.clone() {
+            Some(v) => v,
+            None => return,
+        };
+        let mut g = self.graph.lock().unwrap();
+        // Only capture old_value on the FIRST do — coalesce + redo
+        // cycles must preserve the pre-stroke baseline.
+        if self.old_value.is_none() {
             self.old_value = g.get(self.id)
                 .and_then(|n| n.properties.get(&self.name).cloned());
-            let _ = g.set_property(self.id, self.name.clone(), new_v.clone());
-            // Stash the new value back so redo can replay it.
-            self.new_value = Some(new_v);
-        } else if let Some(new_v) = self.new_value.clone() {
-            let mut g = self.graph.lock().unwrap();
-            let _ = g.set_property(self.id, self.name.clone(), new_v);
         }
+        let _ = g.set_property(self.id, self.name.clone(), new_v);
     }
     fn undo_it(&mut self) {
         if let Some(old) = self.old_value.clone() {
@@ -212,6 +261,7 @@ impl UndoRedoCommand for ChangePropertyCmd {
             let _ = g.set_property(self.id, self.name.clone(), old);
         }
     }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }
 
 /// Bundle of commands run as one atomic undo step (e.g. a multi-node delete).
@@ -238,6 +288,7 @@ impl UndoRedoCommand for BatchCmd {
             c.undo_it();
         }
     }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }
 
 #[cfg(test)]
