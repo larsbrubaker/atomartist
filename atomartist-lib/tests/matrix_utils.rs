@@ -5,6 +5,13 @@
 //! the Transform node — round-tripping rotation + translation + scale
 //! ought to round-trip vertices to their pre-transform positions
 //! within float epsilon.
+//!
+//! Note: as of the matrix-composition rewrite, the Transform node
+//! stores its transform on `Body.matrix` instead of baking into
+//! vertices. These tests apply `Body.matrix` to `Body.mesh` at the
+//! assertion boundary (`world_mesh()` helper) so they continue to
+//! check the user-visible composite effect rather than testing the
+//! old mesh-baking implementation detail.
 
 use std::sync::Arc;
 
@@ -35,7 +42,21 @@ fn fixture(
     for (k, v) in props_kv {
         props.insert(*k, PortValue::Number(*v));
     }
+    // Resolution defaults so compose_with_upstream doesn't panic.
+    props.insert("color", PortValue::Color(atomartist_lib::geometry::INHERIT_COLOR));
+    props.insert("matrix", PortValue::Matrix4x4(
+        atomartist_lib::graph::node::identity_matrix(),
+    ));
     (inst, inputs, props)
+}
+
+/// Apply `body.matrix` to `body.mesh` so we can check world-space
+/// positions after the Transform node has run. With the matrix-
+/// composition rewrite, the Body's mesh is shared with the upstream
+/// and only the matrix changes — but the user-visible effect is the
+/// matrix applied to the mesh, which `apply_transform` realises.
+fn world_mesh(body: &atomartist_lib::geometry::Body) -> manifold_rust::types::MeshGL {
+    apply_transform(&body.mesh, &body.matrix)
 }
 
 #[test]
@@ -46,8 +67,9 @@ fn identity_transform_preserves_positions() {
     let outs = TransformNode.evaluate(&ctx).unwrap();
     match outs.by_name.get("out").unwrap() {
         PortValue::Geometry3d(t) => {
-            for i in 0..num_verts(&t.first().unwrap().mesh) {
-                let p = get_pos(&t.first().unwrap().mesh, i);
+            let world = world_mesh(t.first().unwrap());
+            for i in 0..num_verts(&world) {
+                let p = get_pos(&world, i);
                 let p0 = get_pos(&m, i);
                 for k in 0..3 {
                     assert!(
@@ -70,8 +92,9 @@ fn nonuniform_scale_changes_each_axis_independently() {
     let outs = TransformNode.evaluate(&ctx).unwrap();
     match outs.by_name.get("out").unwrap() {
         PortValue::Geometry3d(t) => {
-            for i in 0..num_verts(&t.first().unwrap().mesh) {
-                let p = get_pos(&t.first().unwrap().mesh, i);
+            let world = world_mesh(t.first().unwrap());
+            for i in 0..num_verts(&world) {
+                let p = get_pos(&world, i);
                 let p0 = get_pos(&m, i);
                 assert!((p[0] - p0[0] * 2.0).abs() < 1e-5);
                 assert!((p[1] - p0[1] * 0.5).abs() < 1e-5);
@@ -126,12 +149,13 @@ fn translation_shifts_origin() {
     let outs = TransformNode.evaluate(&ctx).unwrap();
     match outs.by_name.get("out").unwrap() {
         PortValue::Geometry3d(t) => {
+            let world = world_mesh(t.first().unwrap());
             let mut sum = [0.0f32; 3];
-            for i in 0..num_verts(&t.first().unwrap().mesh) {
-                let p = get_pos(&t.first().unwrap().mesh, i);
+            for i in 0..num_verts(&world) {
+                let p = get_pos(&world, i);
                 for k in 0..3 { sum[k] += p[k]; }
             }
-            let n = num_verts(&t.first().unwrap().mesh) as f32;
+            let n = num_verts(&world) as f32;
             assert!((sum[0] / n - 5.0).abs() < 1e-4);
             assert!((sum[1] / n - (-3.0)).abs() < 1e-4);
             assert!((sum[2] / n - 7.0).abs() < 1e-4);

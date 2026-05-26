@@ -33,7 +33,9 @@ use crate::socket_types::SocketType;
 
 #[path = "registry/geometry_props.rs"]
 mod geometry_props_mod;
-pub use geometry_props_mod::{geometry_props, wrap_mesh};
+pub use geometry_props_mod::{
+    compose_with_upstream, compose_with_upstream_and_mesh, geometry_props, op_props, wrap_mesh,
+};
 
 #[path = "registry/editor.rs"]
 mod editor;

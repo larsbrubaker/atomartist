@@ -31,6 +31,27 @@ use crate::graph::node::identity_matrix;
 /// so unconfigured nodes look identical to the pre-refactor view.
 pub const DEFAULT_GEOMETRY_COLOR: [f32; 4] = [0.62, 0.66, 0.78, 1.0];
 
+/// Sentinel that means "inherit from upstream" — alpha = 0 with all
+/// channels zero. Matches MatterCAD's `Color.Transparent` convention
+/// in `WorldColor()`: an op-node defaults its colour to this sentinel
+/// so a downstream `compose_with_upstream` knows to pass the upstream
+/// body's colour through unchanged. Primitives default to a solid
+/// colour ([`DEFAULT_GEOMETRY_COLOR`]); ops default to this sentinel.
+///
+/// At render time, a body that still carries alpha = 0 by the time it
+/// reaches the renderer means "no node along the chain set an explicit
+/// colour" — the renderer substitutes [`DEFAULT_GEOMETRY_COLOR`] so the
+/// body still paints visibly. Use [`is_inherit_color`] to test.
+pub const INHERIT_COLOR: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
+
+/// True if `color` is the inherit-from-upstream sentinel — i.e. alpha
+/// is effectively zero. Channels other than alpha are ignored; only
+/// the alpha channel determines whether the colour is considered set.
+#[inline]
+pub fn is_inherit_color(color: &[f32; 4]) -> bool {
+    color[3] <= 0.0
+}
+
 /// One renderable body: a mesh plus its per-body transform + tint and
 /// an optional per-vertex colour attribute.
 ///
@@ -251,6 +272,21 @@ mod tests {
         assert_eq!(v.len(), 8);
         // Body keeps an Arc to the original buffer (no copy).
         assert!(Arc::ptr_eq(v, &colors));
+    }
+
+    #[test]
+    fn inherit_color_sentinel_is_alpha_zero() {
+        // Sentinel must have alpha 0 so `is_inherit_color` matches it
+        // and so a wgpu render of the raw colour is fully transparent
+        // (only reachable if the renderer fallback also fails — should
+        // never happen, but reveals the bug clearly if it does).
+        assert_eq!(INHERIT_COLOR[3], 0.0);
+        assert!(is_inherit_color(&INHERIT_COLOR));
+        // DEFAULT_GEOMETRY_COLOR must NOT be treated as inherit (alpha 1).
+        assert!(!is_inherit_color(&DEFAULT_GEOMETRY_COLOR));
+        // Any non-zero alpha is treated as an explicit colour.
+        assert!(!is_inherit_color(&[0.0, 0.0, 0.0, 1.0]));
+        assert!(!is_inherit_color(&[0.5, 0.5, 0.5, 0.001]));
     }
 
     #[test]

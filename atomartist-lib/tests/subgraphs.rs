@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use atomartist_lib::geometry::apply_transform;
 use atomartist_lib::graph::executor::evaluate_all;
 use atomartist_lib::graph::node::PortValue;
 use atomartist_lib::graph::{Noodle, Graph, NodeId};
@@ -111,7 +112,10 @@ fn translate_subgraph_shifts_box_in_y() {
         .unwrap();
     match out_value {
         PortValue::Geometry3d(geo) => {
-            let mesh = &geo.first().unwrap().mesh;
+            // Matrix-composition contract: Transform stores ty=7 on
+            // body.matrix; mesh stays local-space. Compose to world.
+            let body = geo.first().unwrap();
+            let mesh = apply_transform(&body.mesh, &body.matrix);
             let stride = mesh.num_prop as usize;
             let n = mesh.vert_properties.len() / stride;
             let mut y_min = f32::INFINITY;

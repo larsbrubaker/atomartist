@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use atomartist_lib::geometry::{bounds, generate_box};
+use atomartist_lib::geometry::{apply_transform, bounds, generate_box, Body};
 use atomartist_lib::graph::node::{NodeId, NodeInstance, PortValue};
 use atomartist_lib::graph::socket::SocketUidAlloc;
 use atomartist_lib::nodes::ops_3d::align_node::AlignNode;
@@ -35,7 +35,20 @@ fn fixture(
     for (k, v) in props_kv {
         props.insert(*k, v.clone());
     }
+    // Defaults so matrix-composition ops can resolve colour + matrix.
+    props.insert("color", PortValue::Color(atomartist_lib::geometry::INHERIT_COLOR));
+    props.insert("matrix", PortValue::Matrix4x4(
+        atomartist_lib::graph::node::identity_matrix(),
+    ));
     (inst, inputs, props)
+}
+
+/// Bounds of a body's mesh after its matrix is applied. Matrix-
+/// composition ops (Transform, FitToBounds) keep meshes in local
+/// space, so local `bounds()` no longer reflects what the user sees.
+fn world_bounds(body: &Body) -> Option<([f32; 3], [f32; 3])> {
+    let world = apply_transform(&body.mesh, &body.matrix);
+    bounds(&world)
 }
 
 #[test]
@@ -46,7 +59,9 @@ fn align_default_sits_on_floor_plane_centered() {
     let outs = AlignNode.evaluate(&ctx).unwrap();
     match outs.by_name.get("out").unwrap() {
         PortValue::Geometry3d(t) => {
-            let (mn, mx) = bounds(&t.first().unwrap().mesh).unwrap();
+            // Default `align_y = -1` puts the Y-min on the floor; check
+            // via world bounds since Align composes into Body.matrix.
+            let (mn, mx) = world_bounds(t.first().unwrap()).unwrap();
             assert!((mn[1] - 0.0).abs() < 1e-4, "y_min should be 0, got {}", mn[1]);
             assert!((mx[1] - 6.0).abs() < 1e-4, "y_max should be 6, got {}", mx[1]);
             assert!(((mn[0] + mx[0]) * 0.5).abs() < 1e-4);
@@ -64,7 +79,7 @@ fn align_max_y_puts_top_at_origin() {
     let outs = AlignNode.evaluate(&ctx).unwrap();
     match outs.by_name.get("out").unwrap() {
         PortValue::Geometry3d(t) => {
-            let (_, mx) = bounds(&t.first().unwrap().mesh).unwrap();
+            let (_, mx) = world_bounds(t.first().unwrap()).unwrap();
             assert!((mx[1] - 0.0).abs() < 1e-4, "y_max should be 0, got {}", mx[1]);
         }
         _ => panic!(),
@@ -88,13 +103,15 @@ fn fit_to_bounds_uniform_keeps_aspect() {
     let outs = FitToBoundsNode.evaluate(&ctx).unwrap();
     match outs.by_name.get("out").unwrap() {
         PortValue::Geometry3d(t) => {
-            let (mn, mx) = bounds(&t.first().unwrap().mesh).unwrap();
+            // FitToBounds composes scale into Body.matrix; world bounds
+            // are what the user sees.
+            let (mn, mx) = world_bounds(t.first().unwrap()).unwrap();
             let dx = mx[0] - mn[0];
             let dy = mx[1] - mn[1];
             let dz = mx[2] - mn[2];
-            assert!((dx - 5.0).abs() < 1e-3);
-            assert!((dy - 2.5).abs() < 1e-3);
-            assert!((dz - 10.0).abs() < 1e-3);
+            assert!((dx - 5.0).abs() < 1e-3, "dx was {dx}, expected 5");
+            assert!((dy - 2.5).abs() < 1e-3, "dy was {dy}, expected 2.5");
+            assert!((dz - 10.0).abs() < 1e-3, "dz was {dz}, expected 10");
         }
         _ => panic!(),
     }
@@ -117,7 +134,7 @@ fn fit_to_bounds_stretch_fills_each_axis() {
     let outs = FitToBoundsNode.evaluate(&ctx).unwrap();
     match outs.by_name.get("out").unwrap() {
         PortValue::Geometry3d(t) => {
-            let (mn, mx) = bounds(&t.first().unwrap().mesh).unwrap();
+            let (mn, mx) = world_bounds(t.first().unwrap()).unwrap();
             assert!((mx[0] - mn[0] - 10.0).abs() < 1e-3);
             assert!((mx[1] - mn[1] - 10.0).abs() < 1e-3);
             assert!((mx[2] - mn[2] - 10.0).abs() < 1e-3);

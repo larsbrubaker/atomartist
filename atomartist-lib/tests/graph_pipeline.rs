@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use atomartist_lib::{
+    geometry::apply_transform,
     graph::{executor::evaluate_all, Noodle, Graph, NodeId, PortValue},
     nodes,
     registry::NodeRegistry,
@@ -43,7 +44,13 @@ fn box_through_transform_produces_translated_mesh() {
         .cached_outputs.get(&out_uid).cloned().unwrap();
     match out {
         PortValue::Geometry3d(g) => {
-            assert_mesh_translated_y(&g.first().unwrap().mesh, 5.0);
+            // Matrix-composition contract: Transform stores ty=5 on the
+            // body's matrix (column-major slot 13) — mesh stays in
+            // local space. Verifying world-space y extent applies the
+            // matrix to the mesh first.
+            let body = g.first().unwrap();
+            let world = apply_transform(&body.mesh, &body.matrix);
+            assert_mesh_translated_y(&world, 5.0);
         }
         _ => panic!("expected Geometry3d output"),
     }

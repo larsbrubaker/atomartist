@@ -101,6 +101,24 @@ pub fn identity_matrix() -> [f32; 16] {
     ]
 }
 
+/// Column-major 4×4 multiply: returns `A · B`. Used wherever node ops
+/// compose their own transform with an upstream body's matrix (so
+/// dragging a gizmo updates a single op's properties and the renderer
+/// applies the composed result without re-baking mesh vertices).
+pub fn matmul4x4(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
+    let mut r = [0.0f32; 16];
+    for col in 0..4 {
+        for row in 0..4 {
+            let mut sum = 0.0;
+            for k in 0..4 {
+                sum += a[k * 4 + row] * b[col * 4 + k];
+            }
+            r[col * 4 + row] = sum;
+        }
+    }
+    r
+}
+
 /// One node in a `Graph`. Owns its socket layout and the current values of
 /// its named properties; the executor caches the most recent evaluated
 /// outputs in `cached_outputs`.

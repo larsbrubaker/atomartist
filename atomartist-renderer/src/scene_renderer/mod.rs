@@ -45,7 +45,7 @@ use wgpu::util::DeviceExt;
 
 use glam::Mat4;
 
-use atomartist_lib::geometry::Body;
+use atomartist_lib::geometry::{is_inherit_color, Body, DEFAULT_GEOMETRY_COLOR};
 
 use crate::bed::BedRenderer;
 use crate::camera::OrbitCamera;
@@ -669,9 +669,18 @@ impl WgpuSceneRenderer {
         let realloc = s.body_uniforms.ensure_capacity(device, needed);
         let mut slots: Vec<body_uniform::BodyUniform> = Vec::with_capacity(bodies.len());
         for body in bodies.iter() {
+            // Renderer-side fallback for the `INHERIT_COLOR` sentinel:
+            // if a body reaches the renderer with alpha = 0, no node
+            // along its chain set an explicit colour, so substitute
+            // `DEFAULT_GEOMETRY_COLOR` to keep the body visible.
+            let color = if is_inherit_color(&body.color) {
+                DEFAULT_GEOMETRY_COLOR
+            } else {
+                body.color
+            };
             slots.push(body_uniform::BodyUniform {
                 model: body.matrix,
-                color: body.color,
+                color,
                 flags: [body.has_vertex_colors() as u32, 0, 0, 0],
             });
         }

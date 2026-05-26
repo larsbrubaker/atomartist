@@ -1,13 +1,22 @@
-//! FitToBounds — uniformly scale the input mesh so its bounding box
-//! fits inside a target box (width × height × depth) centered at origin.
+//! FitToBounds — scale the input geometry so its world-space bounding
+//! box fits inside a target box (width × height × depth) centered at
+//! origin.
+//!
+//! Matrix-composition contract (matches `TransformNode`): the scale is
+//! stored on `Body.matrix` rather than baked into vertices. World
+//! bounds are computed by transforming the local AABB's 8 corners by
+//! each upstream body's matrix and taking the union — loose but
+//! adequate for typical inputs (a tight world AABB would require
+//! transforming every vertex). Multi-body inputs use a single shared
+//! scale so the whole group fits together.
 
 use std::sync::Arc;
 
-use crate::geometry::{apply_transform, bounds};
-use crate::graph::node::PortValue;
+use crate::geometry::{bounds, Body, Geometry3d};
+use crate::graph::node::{matmul4x4, PortValue};
 use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    geometry_props, wrap_mesh, EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs,
+    compose_with_upstream, op_props, EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs,
     NodeRegistry, PropDef,
 };
 use crate::socket_types::SocketType;
@@ -27,14 +36,16 @@ impl NodeDef for FitToBoundsNode {
     }
 
     fn properties(&self) -> Vec<PropDef> {
-        let mut p = vec![
+        let tail = vec![
             PropDef::new("width",  PortValue::Number(20.0)).with_range(0.001, 10_000.0),
             PropDef::new("height", PortValue::Number(20.0)).with_range(0.001, 10_000.0),
             PropDef::new("depth",  PortValue::Number(20.0)).with_range(0.001, 10_000.0),
             PropDef::new("uniform", PortValue::Bool(true)),
         ];
-        // Prepend color + matrix so they render as the first two rows.
-        let mut p = { let mut g = geometry_props(); g.extend(p); g };
+        // Op-variant geometry_props: color defaults to INHERIT_COLOR so
+        // upstream tints flow through.
+        let mut p = op_props();
+        p.extend(tail);
         p
     }
 
@@ -46,20 +57,23 @@ impl NodeDef for FitToBoundsNode {
                 "FitToBounds: expected Geometry3d, got {:?}", other.socket_type()
             ))),
         };
-        // Multi-body inputs: operate on the first body. The remaining
-        // bodies pass through untouched in the output group. Re-fitting
-        // the bounds across all bodies is a future enhancement.
-        let first = match input.first() {
+        // Union of every body's world AABB so multi-body groups share
+        // one scale and fit together as a unit.
+        let world_aabb = input.iter().fold(None, |acc: Option<([f32; 3], [f32; 3])>, body| {
+            let local = bounds(&body.mesh)?;
+            let world = transformed_aabb(local, &body.matrix);
+            Some(match acc {
+                None => world,
+                Some((amn, amx)) => (
+                    [amn[0].min(world.0[0]), amn[1].min(world.0[1]), amn[2].min(world.0[2])],
+                    [amx[0].max(world.1[0]), amx[1].max(world.1[1]), amx[2].max(world.1[2])],
+                ),
+            })
+        });
+        let (mn, mx) = match world_aabb {
             Some(b) => b,
             None => {
-                let mut o = NodeOutputs::default();
-                o.set("out", PortValue::Geometry3d(input));
-                return Ok(o);
-            }
-        };
-        let (mn, mx) = match bounds(&first.mesh) {
-            Some(b) => b,
-            None => {
+                // Empty / no-vertex input — passthrough.
                 let mut o = NodeOutputs::default();
                 o.set("out", PortValue::Geometry3d(input));
                 return Ok(o);
@@ -87,15 +101,63 @@ impl NodeDef for FitToBoundsNode {
         } else {
             (factor[0], factor[1], factor[2])
         };
-        let cx = (mn[0] + mx[0]) * 0.5;
-        let cy = (mn[1] + mx[1]) * 0.5;
-        let cz = (mn[2] + mx[2]) * 0.5;
-        let m = scale_about([cx, cy, cz], [sx, sy, sz]);
-        let result = apply_transform(&first.mesh, &m);
+        let cw = [
+            (mn[0] + mx[0]) * 0.5,
+            (mn[1] + mx[1]) * 0.5,
+            (mn[2] + mx[2]) * 0.5,
+        ];
+        let scale_matrix = scale_about(cw, [sx, sy, sz]);
+        // Compose the shared scale on top of each body's existing
+        // matrix; mesh stays untouched. Then run colour resolution.
+        let bodies: Vec<Body> = input
+            .iter()
+            .map(|upstream| {
+                let composed_matrix = matmul4x4(&scale_matrix, &upstream.matrix);
+                let mut b = compose_with_upstream(ctx, upstream);
+                b.matrix = composed_matrix;
+                b
+            })
+            .collect();
         let mut out = NodeOutputs::default();
-        out.set("out", PortValue::Geometry3d(Arc::new(wrap_mesh(ctx, result))));
+        out.set(
+            "out",
+            PortValue::Geometry3d(Arc::new(Geometry3d::from_bodies(bodies))),
+        );
         Ok(out)
     }
+}
+
+/// Transform the 8 corners of a local AABB by `matrix` and return the
+/// world-space AABB enclosing the transformed corners. Loose under
+/// rotation (the transformed AABB envelope may be larger than the true
+/// AABB of every transformed vertex) but cheap and adequate for
+/// FitToBounds where the user just needs the geometry to fit.
+fn transformed_aabb(local: ([f32; 3], [f32; 3]), matrix: &[f32; 16]) -> ([f32; 3], [f32; 3]) {
+    let (mn, mx) = local;
+    let corners = [
+        [mn[0], mn[1], mn[2]], [mx[0], mn[1], mn[2]],
+        [mn[0], mx[1], mn[2]], [mx[0], mx[1], mn[2]],
+        [mn[0], mn[1], mx[2]], [mx[0], mn[1], mx[2]],
+        [mn[0], mx[1], mx[2]], [mx[0], mx[1], mx[2]],
+    ];
+    let mut wmn = [f32::INFINITY; 3];
+    let mut wmx = [f32::NEG_INFINITY; 3];
+    for c in &corners {
+        let t = mat4_transform_point(matrix, *c);
+        for k in 0..3 {
+            if t[k] < wmn[k] { wmn[k] = t[k]; }
+            if t[k] > wmx[k] { wmx[k] = t[k]; }
+        }
+    }
+    (wmn, wmx)
+}
+
+fn mat4_transform_point(m: &[f32; 16], p: [f32; 3]) -> [f32; 3] {
+    let x = m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12];
+    let y = m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13];
+    let z = m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14];
+    let w = m[3] * p[0] + m[7] * p[1] + m[11] * p[2] + m[15];
+    if (w - 1.0).abs() < 1e-6 || w == 0.0 { [x, y, z] } else { [x / w, y / w, z / w] }
 }
 
 fn scale_about(c: [f32; 3], s: [f32; 3]) -> [f32; 16] {
