@@ -46,7 +46,7 @@ use crate::picking::{resolve_pivot_or_fallback, HitPlane, PivotResolution};
 mod viewport_widget_helpers;
 use viewport_widget_helpers::{
     cross3, dot3, estimate_outline_width, mesh_aabb, mouse_button_bit, normalize3, project,
-    stroke_circle, sub3, vert_pos,
+    selected_body_world_aabb, stroke_circle, sub3, vert_pos,
 };
 use crate::scene_renderer::{GizmoLineSet, RenderStyle, WgpuSceneRenderer};
 
@@ -570,6 +570,9 @@ impl Viewport3dWidget {
             agg_gui::animation::request_draw();
         }
     }
+
+    // `populate_scene_state` lives in `viewport_widget/scene_state.rs`
+    // so this file stays under the 800-line guardrail.
 }
 
 // `mesh_aabb` + `estimate_outline_width` moved to viewport_widget_helpers.rs
@@ -685,45 +688,14 @@ impl Widget for Viewport3dWidget {
         let outline_width = mesh_opt.as_deref().map(estimate_outline_width).unwrap_or(0.05);
         let bounds_aabb =
             mesh_opt.as_deref().and_then(mesh_aabb).filter(|_| selection_active);
-        {
-            let mut s = self.scene.borrow_mut();
-            s.bodies = bodies;
-            // `base_color` is the fallback tint used when `bodies` is
-            // empty — per-body tint now flows through each body's
-            // own `color` field via the dynamic uniform buffer.
-            if let Some(b) = &first_body {
-                s.base_color = b.color;
-            }
-            s.camera = self.cam();
-            s.outline_enabled = selection_active;
-            s.outline_width = outline_width;
-            s.gizmo_lines.clear();
-            if let Some((mn, mx)) = bounds_aabb {
-                let center = [
-                    (mn[0] + mx[0]) * 0.5,
-                    (mn[1] + mx[1]) * 0.5,
-                    (mn[2] + mx[2]) * 0.5,
-                ];
-                let size = [mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]];
-                s.gizmo_lines
-                    .push(GizmoLineSet::bounds_box(center, size, None));
-            }
-            // Outline colour tracks the user-selected accent from the
-            // View → Color menu so the selection highlight matches the
-            // rest of the themed UI (buttons, dropdowns, gizmos).
-            s.outline_color = [
-                visuals.accent.r,
-                visuals.accent.g,
-                visuals.accent.b,
-                1.0,
-            ];
-            // Sync render style from app state so the picker beneath the
-            // tumble cube takes effect on the next frame without any
-            // extra plumbing.
-            s.render_style = *self.inputs.render_style.lock().unwrap();
-            // Sync bed toggle → floor-grid pass.
-            s.draw_grid = *self.inputs.show_bed.lock().unwrap();
-        }
+        self.populate_scene_state(
+            bodies,
+            first_body.as_ref(),
+            selection_active,
+            outline_width,
+            bounds_aabb,
+            [visuals.accent.r, visuals.accent.g, visuals.accent.b, 1.0],
+        );
 
         // Try the wgpu path. The widget's `bounds` are widget-local — the
         // `DrawCtx` already has a transform that maps (0,0) to the widget's
@@ -789,6 +761,12 @@ impl Widget for Viewport3dWidget {
 
 #[path = "viewport_widget/viewport_widget_interactions.rs"]
 mod viewport_widget_interactions;
+
+#[path = "viewport_widget/scene_state.rs"]
+mod scene_state;
+
+#[path = "viewport_widget/z_control_gizmo.rs"]
+mod z_control_gizmo;
 
 #[cfg(test)]
 #[path = "viewport_widget_tests.rs"]

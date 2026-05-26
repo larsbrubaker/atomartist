@@ -22,6 +22,65 @@ pub(crate) fn vert_pos(mesh: &MeshGL, i: usize, stride: usize) -> [f32; 3] {
     ]
 }
 
+/// World-space AABB of the body whose `origin` matches `selection`,
+/// computed by transforming the body's local AABB corners through
+/// `body.matrix`. Returns `None` when no body in `geometry` claims
+/// the selection (or when the selected body has empty geometry).
+///
+/// Loose under rotation (transformed-AABB envelope, not the true
+/// world AABB of every vertex) — same trade-off `FitToBounds` and
+/// `Align` make. Tight enough for sizing the Z control / bounds
+/// gizmo above the selected body.
+pub(crate) fn selected_body_world_aabb(
+    geometry: Option<&atomartist_lib::geometry::Geometry3d>,
+    selection: atomartist_lib::graph::node::NodeId,
+) -> Option<([f32; 3], [f32; 3])> {
+    let geom = geometry?;
+    for body in geom.iter() {
+        if body.origin == Some(selection) {
+            let local = mesh_aabb(&body.mesh)?;
+            return Some(world_aabb_from_local(local, &body.matrix));
+        }
+    }
+    None
+}
+
+/// Transform the 8 corners of a local AABB by `matrix` and return the
+/// world-space AABB enclosing the transformed corners. Mirrors the
+/// helper in `nodes/ops_3d/fit_to_bounds_node.rs`; we keep two copies
+/// because the renderer doesn't want to depend on internal node code
+/// and the cost of inlining is trivial.
+fn world_aabb_from_local(
+    local: ([f32; 3], [f32; 3]),
+    matrix: &[f32; 16],
+) -> ([f32; 3], [f32; 3]) {
+    let (mn, mx) = local;
+    let corners = [
+        [mn[0], mn[1], mn[2]], [mx[0], mn[1], mn[2]],
+        [mn[0], mx[1], mn[2]], [mx[0], mx[1], mn[2]],
+        [mn[0], mn[1], mx[2]], [mx[0], mn[1], mx[2]],
+        [mn[0], mx[1], mx[2]], [mx[0], mx[1], mx[2]],
+    ];
+    let mut wmn = [f32::INFINITY; 3];
+    let mut wmx = [f32::NEG_INFINITY; 3];
+    for c in &corners {
+        let t = mat4_transform_point(matrix, *c);
+        for k in 0..3 {
+            if t[k] < wmn[k] { wmn[k] = t[k]; }
+            if t[k] > wmx[k] { wmx[k] = t[k]; }
+        }
+    }
+    (wmn, wmx)
+}
+
+fn mat4_transform_point(m: &[f32; 16], p: [f32; 3]) -> [f32; 3] {
+    let x = m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12];
+    let y = m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13];
+    let z = m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14];
+    let w = m[3] * p[0] + m[7] * p[1] + m[11] * p[2] + m[15];
+    if (w - 1.0).abs() < 1e-6 || w == 0.0 { [x, y, z] } else { [x / w, y / w, z / w] }
+}
+
 /// Axis-aligned bounding box of a mesh, returned as `(min, max)`.
 /// `None` when the mesh has no usable vertex data — caller should
 /// fall back to a sensible default. Used by viewport's auto-fit /
