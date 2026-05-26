@@ -47,12 +47,11 @@ pub fn generate_box(width: f64, height: f64, depth: f64) -> MeshGL {
     make_mesh(verts, tris)
 }
 
-/// Cylinder along the Y axis, centered at origin. Radius applied in XZ.
-/// `segments` controls the side count. Top + bottom caps are flat-shaded.
+/// Cylinder along the Z axis (Z-up), centered at origin. Radius applied
+/// in the XY plane. `segments` controls the side count. Top + bottom
+/// caps are flat-shaded. Matches MatterCAD's `CylinderObject3D`
+/// convention; `height` extends along Z from `-h/2` to `+h/2`.
 pub fn generate_cylinder(radius: f64, height: f64, segments: u32) -> MeshGL {
-    // Z-up cylinder: rotation axis along +Z, matching MatterCAD's
-    // `CylinderObject3D` convention. The ring lies in the XY plane;
-    // `height` extends along Z from `-h/2` to `+h/2`.
     let segments = segments.max(3);
     let r = radius as f32;
     let h = (height * 0.5) as f32;
@@ -74,11 +73,9 @@ pub fn generate_cylinder(radius: f64, height: f64, segments: u32) -> MeshGL {
         let n = [nx / n_len, ny / n_len, 0.0];
 
         let base = (verts.len() / NUM_PROP as usize) as u32;
-        // bottom-back, top-back, top-front, bottom-front. For Z-up the
-        // XY-plane rotation has opposite handedness from the Y-up
-        // primitives' XZ-plane rotation, so the side winding flips
-        // relative to the historic order to keep outward normals
-        // facing out.
+        // bottom-back, top-back, top-front, bottom-front. Reverse winding
+        // relative to the natural (0,1,2),(0,2,3) order so the cross
+        // product points outward in a Z-up XY-plane ring.
         for &(x, y, z) in &[(x0, y0, -h), (x0, y0, h), (x1, y1, h), (x1, y1, -h)] {
             verts.extend_from_slice(&[x, y, z]);
             verts.extend_from_slice(&n);
@@ -131,12 +128,10 @@ pub fn generate_cylinder(radius: f64, height: f64, segments: u32) -> MeshGL {
 ///     "wedge" side walls close the volume (one at `start_angle`, one
 ///     at `end_angle`).
 ///
-/// Coordinate system: **Z up** for cylinders (matches MatterCAD's
-/// `CylinderObject3D` convention) — the rotation axis runs along +Z,
-/// bottom face at `z = -height/2`, top face at `z = +height/2`. The
-/// ring lies in the XY plane. Other primitives in this module remain
-/// Y-up; only the cylinders flip to Z-up so the user-set "height" of
-/// the cylinder reads vertically in MatterCAD-style scenes.
+/// Coordinate system: **Z-up** (matches MatterCAD's `CylinderObject3D`
+/// convention and the rest of the AtomArtist world) — the rotation
+/// axis runs along +Z, bottom face at `z = -height/2`, top face at
+/// `z = +height/2`. The ring lies in the XY plane.
 pub fn generate_cylinder_advanced(
     diameter_bottom: f64,
     diameter_top: f64,
@@ -250,8 +245,9 @@ pub fn generate_cylinder_advanced(
     make_mesh(verts, tris)
 }
 
-/// Cone with apex at top, circular base at bottom, both centered on Y.
-/// `radius` is the base radius; the apex sits at +height/2.
+/// Cone along the Z axis, centered at origin. Apex sits at `+height/2`,
+/// circular base ring lies in the XY plane at `z = -height/2`. Matches
+/// MatterCAD's Z-up CAD convention.
 pub fn generate_cone(radius: f64, height: f64, segments: u32) -> MeshGL {
     let segments = segments.max(3);
     let r = radius as f32;
@@ -260,52 +256,55 @@ pub fn generate_cone(radius: f64, height: f64, segments: u32) -> MeshGL {
     let mut verts: Vec<f32> = Vec::new();
     let mut tris: Vec<u32> = Vec::new();
 
-    // Side triangles — each one has its own outward-facing normal
-    // (apex is shared geometry-wise but we duplicate verts so flat
-    // shading works per face).
+    // Side triangles — each has its own outward-facing normal so flat
+    // shading reads correctly per face.
     for i in 0..segments {
         let a0 = (i as f32) / (segments as f32) * std::f32::consts::TAU;
         let a1 = ((i + 1) as f32) / (segments as f32) * std::f32::consts::TAU;
-        let (x0, z0) = (a0.cos() * r, a0.sin() * r);
-        let (x1, z1) = (a1.cos() * r, a1.sin() * r);
+        let (x0, y0) = (a0.cos() * r, a0.sin() * r);
+        let (x1, y1) = (a1.cos() * r, a1.sin() * r);
         let nx = (a0.cos() + a1.cos()) * 0.5;
-        let nz = (a0.sin() + a1.sin()) * 0.5;
-        // Normal slants up toward apex — the slope is roughly
-        // (radius, height) so angle = atan2(radius, height).
-        let slope_y = (r / height as f32).max(0.0);
-        let n_len = (nx * nx + nz * nz + slope_y * slope_y).sqrt().max(1e-6);
-        let n = [nx / n_len, slope_y / n_len, nz / n_len];
+        let ny = (a0.sin() + a1.sin()) * 0.5;
+        // Normal slants up toward apex; the +Z slope is roughly
+        // `radius / height` (right-triangle of the cone profile).
+        let slope_z = (r / height as f32).max(0.0);
+        let n_len = (nx * nx + ny * ny + slope_z * slope_z).sqrt().max(1e-6);
+        let n = [nx / n_len, ny / n_len, slope_z / n_len];
 
         let base = (verts.len() / NUM_PROP as usize) as u32;
-        // base-back, base-front, apex; CCW from outside requires the
-        // apex to be visited BEFORE the second base vert.
-        for &(x, y, z) in &[(x0, -h, z0), (x1, -h, z1), (0.0, h, 0.0)] {
+        // base-back, base-front, apex; for the Z-up XY ring this winding
+        // gives an outward normal (cross of edge1 × edge2 points along
+        // the stored `n`).
+        for &(x, y, z) in &[(x0, y0, -h), (x1, y1, -h), (0.0, 0.0, h)] {
             verts.extend_from_slice(&[x, y, z]);
             verts.extend_from_slice(&n);
         }
-        tris.extend_from_slice(&[base, base + 2, base + 1]);
+        tris.extend_from_slice(&[base, base + 1, base + 2]);
     }
 
-    // Bottom cap — fan from center, normal -Y.
+    // Bottom cap — fan from center, normal -Z. CCW viewed from -Z (below)
+    // is CW viewed from above, so visit ring[i+1] before ring[i].
     let bot_center = (verts.len() / NUM_PROP as usize) as u32;
-    verts.extend_from_slice(&[0.0, -h, 0.0, 0.0, -1.0, 0.0]);
+    verts.extend_from_slice(&[0.0, 0.0, -h, 0.0, 0.0, -1.0]);
     let bot_ring_start = (verts.len() / NUM_PROP as usize) as u32;
     for i in 0..segments {
         let a = (i as f32) / (segments as f32) * std::f32::consts::TAU;
-        verts.extend_from_slice(&[a.cos() * r, -h, a.sin() * r, 0.0, -1.0, 0.0]);
+        verts.extend_from_slice(&[a.cos() * r, a.sin() * r, -h, 0.0, 0.0, -1.0]);
     }
     for i in 0..segments {
         let v0 = bot_center;
         let v1 = bot_ring_start + i;
         let v2 = bot_ring_start + ((i + 1) % segments);
-        tris.extend_from_slice(&[v0, v1, v2]);
+        tris.extend_from_slice(&[v0, v2, v1]);
     }
 
     make_mesh(verts, tris)
 }
 
-/// Torus centered at origin in the XZ plane. `major_r` is the distance
-/// from center to ring center, `minor_r` is the tube radius.
+/// Torus centered at origin with its major ring in the XY plane (Z-up).
+/// `major_r` is the distance from origin to the ring center, `minor_r`
+/// the tube radius. The donut sits flat on the bed; the tube's height
+/// extent is `±minor_r` along Z.
 pub fn generate_torus(major_r: f64, minor_r: f64, segments_major: u32, segments_minor: u32) -> MeshGL {
     let su = segments_major.max(3);
     let sv = segments_minor.max(3);
@@ -327,14 +326,16 @@ pub fn generate_torus(major_r: f64, minor_r: f64, segments_major: u32, segments_
             let theta = u * std::f32::consts::TAU;
             let cos_th = theta.cos();
             let sin_th = theta.sin();
-            // Position on the torus surface.
+            // Position: major angle θ revolves around +Z (ring lies in
+            // XY plane); minor angle φ rotates the tube cross-section
+            // whose "vertical" axis is +Z.
             let x = (r_major + r_minor * cos_phi) * cos_th;
-            let y = r_minor * sin_phi;
-            let z = (r_major + r_minor * cos_phi) * sin_th;
+            let y = (r_major + r_minor * cos_phi) * sin_th;
+            let z = r_minor * sin_phi;
             // Normal — vector from the ring center to the point.
             let nx = cos_phi * cos_th;
-            let ny = sin_phi;
-            let nz = cos_phi * sin_th;
+            let ny = cos_phi * sin_th;
+            let nz = sin_phi;
             verts.extend_from_slice(&[x, y, z, nx, ny, nz]);
         }
     }
@@ -345,38 +346,37 @@ pub fn generate_torus(major_r: f64, minor_r: f64, segments_major: u32, segments_
             let v10 = j * stride_u + (i + 1);
             let v01 = (j + 1) * stride_u + i;
             let v11 = (j + 1) * stride_u + (i + 1);
-            // Reversed from the natural (v00, v10, v11) order — the
-            // torus parametrization here goes theta CCW around +Y and
-            // phi CCW around the minor ring; that handedness makes the
-            // cross product of (v10-v00, v11-v00) point INWARD. Flip
-            // each triangle's winding so the outward face is the front.
-            tris.extend_from_slice(&[v00, v11, v10, v00, v01, v11]);
+            // Z-up torus: θ goes CCW around +Z and φ CCW around the
+            // tube center. The natural patch winding (v00, v10, v11)
+            // gives an outward normal (matches stored).
+            tris.extend_from_slice(&[v00, v10, v11, v00, v11, v01]);
         }
     }
     make_mesh(verts, tris)
 }
 
-/// Square-base pyramid — `width × depth` rectangular base centered at
-/// origin, apex at +height/2.
+/// Square-base pyramid in Z-up world: `width × depth` rectangular base
+/// in the XY plane at `z = -height/2`, apex centered at `(0, 0, +height/2)`.
 pub fn generate_pyramid(width: f64, height: f64, depth: f64) -> MeshGL {
     let w = (width * 0.5) as f32;
     let h = (height * 0.5) as f32;
     let d = (depth * 0.5) as f32;
-    let apex = [0.0f32, h, 0.0f32];
+    let apex = [0.0f32, 0.0f32, h];
 
     let mut verts: Vec<f32> = Vec::new();
     let mut tris: Vec<u32> = Vec::new();
 
-    // Four side triangles, each with its own normal.
+    // Four side triangles, each with its own normal. Walking each face's
+    // base edge from `left` to `right` then up to the apex is CCW from
+    // outside (the cross product gives the outward normal).
     let sides: [([f32; 3], [f32; 3]); 4] = [
         // (base-left, base-right) for face viewed from outside.
-        ([-w, -h,  d], [ w, -h,  d]),  // +Z face
-        ([ w, -h,  d], [ w, -h, -d]),  // +X face
-        ([ w, -h, -d], [-w, -h, -d]),  // -Z face
-        ([-w, -h, -d], [-w, -h,  d]),  // -X face
+        ([-w, -d, -h], [ w, -d, -h]),  // -Y face (front)
+        ([ w, -d, -h], [ w,  d, -h]),  // +X face (right)
+        ([ w,  d, -h], [-w,  d, -h]),  // +Y face (back)
+        ([-w,  d, -h], [-w, -d, -h]),  // -X face (left)
     ];
     for (left, right) in sides {
-        // Compute face normal by cross product.
         let e1 = [right[0] - left[0], right[1] - left[1], right[2] - left[2]];
         let e2 = [apex[0] - left[0], apex[1] - left[1], apex[2] - left[2]];
         let n = [
@@ -394,23 +394,25 @@ pub fn generate_pyramid(width: f64, height: f64, depth: f64) -> MeshGL {
         tris.extend_from_slice(&[base, base + 1, base + 2]);
     }
 
-    // Bottom face — two triangles, normal -Y.
+    // Bottom face — two triangles, normal -Z. Verts laid out CCW when
+    // viewed from -Z (below), so the standard (0,1,2),(0,2,3) winding
+    // produces the -Z normal.
     let base = (verts.len() / NUM_PROP as usize) as u32;
-    let bot_n = [0.0f32, -1.0f32, 0.0f32];
-    for &(x, y, z) in &[(-w, -h, -d), (w, -h, -d), (w, -h, d), (-w, -h, d)] {
+    let bot_n = [0.0f32, 0.0f32, -1.0f32];
+    for &(x, y, z) in &[(-w, -d, -h), (-w, d, -h), (w, d, -h), (w, -d, -h)] {
         verts.extend_from_slice(&[x, y, z]);
         verts.extend_from_slice(&bot_n);
     }
-    // Standard winding (0,1,2), (0,2,3) — gives outward = -Y because
-    // the verts are laid out CCW when viewed from -Y looking up to +Y.
     tris.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 
     make_mesh(verts, tris)
 }
 
-/// Wedge — a triangular prism with the right-triangle cross-section in
-/// the XY plane and depth along Z. The apex of the triangle is at
-/// (+w/2, +h/2), the right-angle corner at (-w/2, -h/2).
+/// Wedge — a triangular prism in Z-up world: right-triangle cross-section
+/// in the XZ plane, depth along Y. The right-angle corner sits at
+/// `(-w/2, *, -h/2)`; the X leg runs to `(+w/2, *, -h/2)` (bottom-front
+/// edge); the Z leg to `(-w/2, *, +h/2)` (top-back edge). The hypotenuse
+/// face is the slanted top.
 pub fn generate_wedge(width: f64, height: f64, depth: f64) -> MeshGL {
     let w = (width * 0.5) as f32;
     let h = (height * 0.5) as f32;
@@ -421,7 +423,6 @@ pub fn generate_wedge(width: f64, height: f64, depth: f64) -> MeshGL {
     let mut verts: Vec<f32> = Vec::new();
     let mut tris: Vec<u32> = Vec::new();
 
-    // Helper: emit a quad with given verts + normal.
     let mut emit_quad = |corners: [[f32; 3]; 4], n: [f32; 3], v: &mut Vec<f32>, t: &mut Vec<u32>| {
         let base = (v.len() / NUM_PROP as usize) as u32;
         for c in corners {
@@ -439,51 +440,50 @@ pub fn generate_wedge(width: f64, height: f64, depth: f64) -> MeshGL {
         t.extend_from_slice(&[base, base + 1, base + 2]);
     };
 
-    // Bottom face (-Y)
+    // Bottom face (-Z) at z=-h — full w × d rectangle.
     emit_quad(
-        [[-w, -h, -d], [w, -h, -d], [w, -h, d], [-w, -h, d]],
-        [0.0, -1.0, 0.0],
+        [[-w, -d, -h], [-w, d, -h], [w, d, -h], [w, -d, -h]],
+        [0.0, 0.0, -1.0],
         &mut verts, &mut tris,
     );
-    // Back face (-X) — vertical rectangle
+    // Back face (-X) at x=-w — vertical rectangle in the YZ plane.
     emit_quad(
-        [[-w, -h, -d], [-w, -h, d], [-w, h, d], [-w, h, -d]],
+        [[-w, -d, -h], [-w, -d, h], [-w, d, h], [-w, d, -h]],
         [-1.0, 0.0, 0.0],
         &mut verts, &mut tris,
     );
-    // Slanted top (the hypotenuse face) — normal points up-and-out.
-    // Plane through (w,-h,*) and (-w,h,*). Outward normal in XY is
-    // (h, w) normalized. Reverse winding from the natural enumeration
-    // so the cross product gives +X+Y instead of -X-Y.
+    // Slanted top (hypotenuse) — connects (+w, ±d, -h) and (-w, ±d, +h).
+    // Outward normal lies in the XZ plane; perpendicular to the slope
+    // direction `(-2w, 0, +2h)`, so the unit normal is `(h, 0, w)/len`.
     let nx = h;
-    let ny = w;
-    let nl = (nx * nx + ny * ny).sqrt().max(1e-6);
-    let slope_n = [nx / nl, ny / nl, 0.0];
+    let nz = w;
+    let nl = (nx * nx + nz * nz).sqrt().max(1e-6);
+    let slope_n = [nx / nl, 0.0, nz / nl];
     emit_quad(
-        [[-w, h, -d], [-w, h, d], [w, -h, d], [w, -h, -d]],
+        [[w, -d, -h], [w, d, -h], [-w, d, h], [-w, -d, h]],
         slope_n,
         &mut verts, &mut tris,
     );
-    // Front cap (+Z)
+    // Front cap (+Y) at y=+d — right-triangle face.
     emit_tri(
-        [[-w, -h, d], [w, -h, d], [-w, h, d]],
-        [0.0, 0.0, 1.0],
+        [[-w, d, -h], [-w, d, h], [w, d, -h]],
+        [0.0, 1.0, 0.0],
         &mut verts, &mut tris,
     );
-    // Back cap (-Z)
+    // Back cap (-Y) at y=-d — same triangle, mirrored CCW from -Y.
     emit_tri(
-        [[w, -h, -d], [-w, -h, -d], [-w, h, -d]],
-        [0.0, 0.0, -1.0],
+        [[-w, -d, -h], [w, -d, -h], [-w, -d, h]],
+        [0.0, -1.0, 0.0],
         &mut verts, &mut tris,
     );
 
     make_mesh(verts, tris)
 }
 
-/// UV sphere centered at origin. `segments_u` is the longitudinal count
-/// (around Y), `segments_v` the latitudinal count (from south to north
-/// pole). Smooth-shaded — the normal at each vertex is its outward
-/// direction from the center.
+/// UV sphere centered at origin (Z-up). `segments_u` is the longitudinal
+/// count (around Z), `segments_v` the latitudinal count (north pole at
+/// +Z to south pole at -Z). Smooth-shaded — the normal at each vertex is
+/// its outward direction from the center.
 pub fn generate_sphere(radius: f64, segments_u: u32, segments_v: u32) -> MeshGL {
     let su = segments_u.max(3);
     let sv = segments_v.max(2);
@@ -492,18 +492,20 @@ pub fn generate_sphere(radius: f64, segments_u: u32, segments_v: u32) -> MeshGL 
     let mut verts: Vec<f32> = Vec::with_capacity(((su + 1) * (sv + 1)) as usize * NUM_PROP as usize);
     let mut tris: Vec<u32> = Vec::new();
 
-    // Vertices on a (su+1) x (sv+1) grid (closing seams duplicate).
+    // Vertices on a (su+1) × (sv+1) grid (closing seams duplicate).
+    // j=0 collapses to the north pole at (0, 0, +r); j=sv collapses to
+    // the south pole at (0, 0, -r).
     for j in 0..=sv {
         let v = j as f32 / sv as f32;
-        let phi = v * std::f32::consts::PI; // 0..π (south → north)
+        let phi = v * std::f32::consts::PI; // 0..π (north → south along Z)
         let sin_phi = phi.sin();
         let cos_phi = phi.cos();
         for i in 0..=su {
             let u = i as f32 / su as f32;
-            let theta = u * std::f32::consts::TAU; // 0..2π around Y
+            let theta = u * std::f32::consts::TAU; // 0..2π around Z (in XY plane)
             let x = sin_phi * theta.cos();
-            let y = cos_phi;
-            let z = sin_phi * theta.sin();
+            let y = sin_phi * theta.sin();
+            let z = cos_phi;
             verts.extend_from_slice(&[x * r, y * r, z * r, x, y, z]);
         }
     }
@@ -515,230 +517,18 @@ pub fn generate_sphere(radius: f64, segments_u: u32, segments_v: u32) -> MeshGL 
             let v10 = j * stride_u + (i + 1);
             let v01 = (j + 1) * stride_u + i;
             let v11 = (j + 1) * stride_u + (i + 1);
-            // CCW from outside: looking from +radius direction back to origin.
-            // For the sphere, going (j → j+1) is south-to-north (Y increases),
-            // and (i → i+1) is increasing theta (counter-clockwise when
-            // viewed from +Y). So CCW outward triangles for an outward
-            // surface patch are (v00, v10, v11) and (v00, v11, v01).
-            tris.extend_from_slice(&[v00, v10, v11, v00, v11, v01]);
+            // CCW from outside the sphere. Going (i → i+1) is +theta
+            // (CCW around +Z viewed from above); going (j → j+1) is
+            // north-to-south (Z decreases). Walking the natural patch
+            // order (v00, v10, v11) would be CW from outside, so reverse:
+            // (v00, v11, v10) and (v00, v01, v11) point outward.
+            tris.extend_from_slice(&[v00, v11, v10, v00, v01, v11]);
         }
     }
 
     make_mesh(verts, tris)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::geometry::mesh3d::{compute_flat_normals, get_normal, get_pos, num_tris, num_verts};
-
-    #[test]
-    fn box_has_24_verts_and_12_tris() {
-        let m = generate_box(1.0, 1.0, 1.0);
-        assert_eq!(num_verts(&m), 24);
-        assert_eq!(num_tris(&m), 12);
-    }
-
-    #[test]
-    fn box_normals_are_unit_length_and_axis_aligned() {
-        let m = generate_box(1.0, 1.0, 1.0);
-        for i in 0..num_verts(&m) {
-            let n = get_normal(&m, i);
-            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-            assert!((len - 1.0).abs() < 1e-5, "vert {} normal not unit: {:?}", i, n);
-            // Each component should be 0 or ±1 (axis-aligned faces)
-            for k in 0..3 {
-                let abs = n[k].abs();
-                assert!(abs < 1e-5 || (abs - 1.0).abs() < 1e-5,
-                        "non-axis component on box normal: {:?}", n);
-            }
-        }
-    }
-
-    #[test]
-    fn box_positions_lie_on_extents() {
-        let m = generate_box(2.0, 4.0, 6.0);
-        for i in 0..num_verts(&m) {
-            let p = get_pos(&m, i);
-            assert!((p[0].abs() - 1.0).abs() < 1e-5);
-            assert!((p[1].abs() - 2.0).abs() < 1e-5);
-            assert!((p[2].abs() - 3.0).abs() < 1e-5);
-        }
-    }
-
-    #[test]
-    fn cylinder_has_correct_vertex_count() {
-        let m = generate_cylinder(1.0, 2.0, 8);
-        // 8 sides × 4 verts (= 32) + top center + bottom center + 8 top ring
-        // + 8 bottom ring = 32 + 1 + 1 + 8 + 8 = 50.
-        assert_eq!(num_verts(&m), 50);
-        // 8 sides × 2 tris + 8 top fan + 8 bottom fan = 32.
-        assert_eq!(num_tris(&m), 32);
-    }
-
-    #[test]
-    fn sphere_has_outward_unit_normals() {
-        let m = generate_sphere(2.0, 16, 8);
-        for i in 0..num_verts(&m) {
-            let p = get_pos(&m, i);
-            let n = get_normal(&m, i);
-            // Smooth normals point outward from origin.
-            let pl = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
-            let nl = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-            assert!((nl - 1.0).abs() < 1e-5, "non-unit normal: {:?}", n);
-            // n parallel to p? Check via dot product against normalized p.
-            let dot = (p[0] * n[0] + p[1] * n[1] + p[2] * n[2]) / pl.max(1e-6);
-            assert!(dot > 0.999, "normal not outward; dot={}", dot);
-        }
-    }
-
-    /// Compute the cross-product face normal of triangle `tri` in mesh `m`.
-    /// Returns `(unit_normal, twice_area)` — `twice_area` is the raw cross
-    /// magnitude, useful for detecting degenerate triangles where the
-    /// normalized direction is meaningless.
-    fn face_normal(m: &MeshGL, tri: usize) -> ([f32; 3], f32) {
-        let i0 = m.tri_verts[tri * 3] as usize;
-        let i1 = m.tri_verts[tri * 3 + 1] as usize;
-        let i2 = m.tri_verts[tri * 3 + 2] as usize;
-        let p0 = get_pos(m, i0);
-        let p1 = get_pos(m, i1);
-        let p2 = get_pos(m, i2);
-        let e1 = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
-        let e2 = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
-        let n = [
-            e1[1] * e2[2] - e1[2] * e2[1],
-            e1[2] * e2[0] - e1[0] * e2[2],
-            e1[0] * e2[1] - e1[1] * e2[0],
-        ];
-        let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-        if l < 1e-12 {
-            return ([0.0, 0.0, 0.0], 0.0);
-        }
-        ([n[0] / l, n[1] / l, n[2] / l], l)
-    }
-
-    fn face_centroid(m: &MeshGL, tri: usize) -> [f32; 3] {
-        let i0 = m.tri_verts[tri * 3] as usize;
-        let i1 = m.tri_verts[tri * 3 + 1] as usize;
-        let i2 = m.tri_verts[tri * 3 + 2] as usize;
-        let p0 = get_pos(m, i0);
-        let p1 = get_pos(m, i1);
-        let p2 = get_pos(m, i2);
-        [
-            (p0[0] + p1[0] + p2[0]) / 3.0,
-            (p0[1] + p1[1] + p2[1]) / 3.0,
-            (p0[2] + p1[2] + p2[2]) / 3.0,
-        ]
-    }
-
-    /// For origin-centered convex primitives: every face's outward normal
-    /// (computed from triangle winding via cross product) must point away
-    /// from the origin — i.e. `dot(centroid, face_normal) > 0`.
-    fn assert_origin_centered_outward(m: &MeshGL, label: &str) {
-        let nt = num_tris(m);
-        for t in 0..nt {
-            let c = face_centroid(m, t);
-            let (n, area2) = face_normal(m, t);
-            // Skip near-degenerate triangles (e.g. at sphere poles where
-            // adjacent ring verts collapse to nearly the same point).
-            if area2 < 1e-6 { continue; }
-            let d = c[0] * n[0] + c[1] * n[1] + c[2] * n[2];
-            assert!(
-                d > 1e-4,
-                "{label}: tri {t} winding inward — centroid={:?} face_n={:?} dot={}",
-                c, n, d
-            );
-        }
-    }
-
-    #[test]
-    fn box_faces_wind_outward() {
-        assert_origin_centered_outward(&generate_box(2.0, 3.0, 4.0), "box");
-    }
-
-    #[test]
-    fn cylinder_faces_wind_outward() {
-        assert_origin_centered_outward(&generate_cylinder(1.5, 4.0, 16), "cylinder");
-    }
-
-    #[test]
-    fn cylinder_advanced_full_revolve_winds_outward() {
-        let m = generate_cylinder_advanced(
-            2.0, 2.0, 3.0, 12, 0.0, std::f64::consts::TAU,
-        );
-        assert_origin_centered_outward(&m, "cylinder_advanced full");
-    }
-
-    #[test]
-    fn cone_faces_wind_outward() {
-        assert_origin_centered_outward(&generate_cone(1.0, 2.0, 12), "cone");
-    }
-
-    #[test]
-    fn pyramid_faces_wind_outward() {
-        assert_origin_centered_outward(&generate_pyramid(2.0, 2.0, 2.0), "pyramid");
-    }
-
-    #[test]
-    fn sphere_faces_wind_outward() {
-        assert_origin_centered_outward(&generate_sphere(1.0, 16, 8), "sphere");
-    }
-
-    #[test]
-    fn torus_faces_wind_outward() {
-        // Torus centroid-from-origin test is too lax (inner faces point
-        // toward the donut hole, which is still "away from ring center"
-        // but their centroid may dot poorly with origin). Use the stored
-        // smooth normal as the truth and verify face_normal agrees in
-        // direction (positive dot).
-        let m = generate_torus(2.0, 0.5, 16, 8);
-        for t in 0..num_tris(&m) {
-            let (fn_, _) = face_normal(&m, t);
-            // Average the three vert normals — they're all outward.
-            let i0 = m.tri_verts[t * 3] as usize;
-            let i1 = m.tri_verts[t * 3 + 1] as usize;
-            let i2 = m.tri_verts[t * 3 + 2] as usize;
-            let n0 = get_normal(&m, i0);
-            let n1 = get_normal(&m, i1);
-            let n2 = get_normal(&m, i2);
-            let avg = [
-                (n0[0] + n1[0] + n2[0]) / 3.0,
-                (n0[1] + n1[1] + n2[1]) / 3.0,
-                (n0[2] + n1[2] + n2[2]) / 3.0,
-            ];
-            let d = fn_[0] * avg[0] + fn_[1] * avg[1] + fn_[2] * avg[2];
-            assert!(d > 0.0, "torus tri {t} cross-normal disagrees with stored normal: dot={}", d);
-        }
-    }
-
-    #[test]
-    fn wedge_faces_wind_outward() {
-        // Wedge — same issue as torus. Use stored normal vs cross-product
-        // direction match.
-        let m = generate_wedge(2.0, 2.0, 2.0);
-        for t in 0..num_tris(&m) {
-            let (fn_, _) = face_normal(&m, t);
-            let i0 = m.tri_verts[t * 3] as usize;
-            let stored = get_normal(&m, i0);
-            let d = fn_[0] * stored[0] + fn_[1] * stored[1] + fn_[2] * stored[2];
-            assert!(d > 0.9, "wedge tri {t} cross disagrees stored: dot={} cross={:?} stored={:?}",
-                    d, fn_, stored);
-        }
-    }
-
-    #[test]
-    fn box_face_normals_match_after_recompute() {
-        // Sanity: re-run flat normal computation and verify it matches
-        // what we hand-wrote in the generator.
-        let mut m = generate_box(3.0, 3.0, 3.0);
-        let original = m.vert_properties.clone();
-        compute_flat_normals(&mut m);
-        // Component-wise comparison; allow tiny tolerance.
-        assert_eq!(m.vert_properties.len(), original.len());
-        for i in 0..m.vert_properties.len() {
-            assert!((m.vert_properties[i] - original[i]).abs() < 1e-5,
-                    "mismatch at {}: orig={} new={}",
-                    i, original[i], m.vert_properties[i]);
-        }
-    }
-}
+// Structural, winding, and Z-up axis tests live in
+// atomartist-lib/tests/primitives_axis.rs to keep this file under
+// the workspace 800-line guardrail.

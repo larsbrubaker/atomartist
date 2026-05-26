@@ -48,7 +48,7 @@ pub struct TargetPose {
 ///   1. Map each hit `(face, tile)` to a "view direction" — the unit
 ///      world vector pointing from the orbit centre toward the camera
 ///      when that face is centred (i.e. the face's outward normal in
-///      world space, in AtomArtist's Y-up coords).
+///      world space, in AtomArtist's Z-up coords).
 ///   2. Average the per-face directions to handle corner/edge hits —
 ///      e.g. a Top+Front+Left corner click averages three orthogonal
 ///      directions into a body-diagonal view.

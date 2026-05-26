@@ -1,9 +1,10 @@
 //! 3D mesh utilities built on `manifold_rust::types::MeshGL`.
 //!
 //! All meshes use `num_prop = 6` — six f32s per vertex: position xyz at
-//! offsets 0,1,2 and normal at offsets 3,4,5. Right-handed coords, Y-up,
-//! triangles wound CCW when viewed from outside the surface (so face normals
-//! computed via cross product point outward).
+//! offsets 0,1,2 and normal at offsets 3,4,5. Right-handed coords, **Z-up**
+//! (CAD/printer convention — bed lies in the XY plane), triangles wound
+//! CCW when viewed from outside the surface (so face normals computed via
+//! cross product point outward).
 
 use std::sync::Arc;
 

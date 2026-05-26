@@ -42,7 +42,7 @@ pub enum Projection {
 
 /// Orbit-drag behaviour toggled by the turntable button.
 ///
-/// `Turntable`: drag-X yaws around world-up (+Y), drag-Y pitches
+/// `Turntable`: drag-X yaws around world-up (+Z), drag-Y pitches
 /// around the camera's local right axis with the horizon constrained
 /// (camera never flips upside down). Equivalent to MatterCAD's
 /// `TurntableEnabled = true` branch in

@@ -433,7 +433,7 @@ hr { border: 0; border-top: 1px dashed var(--rule); margin: 32px 0 20px; }
   <li><strong>Negative-determinant transforms.</strong> Mirror node (§1.2) needs <code>apply_transform</code> to flip triangle winding when <code>det(M) &lt; 0</code>. Add a winding-flip step in <code>geometry/mesh3d::apply_transform</code> guarded on the sign of the 3×3 determinant.</li>
   <li><strong>Project file container.</strong> Raw JSON (current) vs zip-with-assets (MatterCAD's <code>.mcx</code> approach). Once dropped meshes / images need to round-trip with the save file, raw JSON breaks.</li>
   <li><strong>Field architecture.</strong> Closure-on-PortValue vs separate sample-time kernel (§1.7). Defer until the first field-consumer node lands.</li>
-  <li><strong>Y-up world vs Z-up world.</strong> Geometry primitives now use Z-up cylinder axis (matching MatterCAD); world camera still Y-up. Either move world to Z-up everywhere, or accept the convention split and document it.</li>
+  <li><strong>Y-up world vs Z-up world.</strong> Resolved — the world is fully Z-up. Camera (<code>OrbitCamera</code>), bed/shadow plane, and every primitive generator (box, cylinder, cone, pyramid, sphere, torus, wedge) emit geometry with +Z as "up", matching MatterCAD's 3-D printer convention. Verified by axis assertions in <code>tests/primitives_axis.rs</code> (cone apex on +Z, sphere poles on Z, torus ring in XY plane, wedge slope rises along Z, etc.).</li>
 </ul>
 
 <h2>10. House-keeping debt</h2>

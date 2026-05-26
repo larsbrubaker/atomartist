@@ -105,8 +105,9 @@ cargo test -- --nocapture
   Inherited from agg-gui. Code from external sources almost always assumes top-down
   Y; watch for this in default positioning, collapse direction, SVG orientation,
   scroll offsets, and hit-testing.
-- 3D viewport uses standard right-handed Y-up world coordinates (matches wgpu /
-  glTF conventions). The 2D node canvas inherits agg-gui's bottom-left origin.
+- 3D viewport uses **right-handed Z-up world coordinates** (matches MatterCAD /
+  3-D printer conventions: bed lies in the XY plane, +Z is "up"). The 2D node
+  canvas inherits agg-gui's bottom-left origin.
 
 ### Icons
 - Use **Font Awesome** icons (Unicode code points in the Font Awesome font face),
