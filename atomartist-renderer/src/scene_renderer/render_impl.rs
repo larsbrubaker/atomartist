@@ -38,6 +38,17 @@ impl WgpuCustomRender for WgpuSceneRenderer {
             return;
         }
 
+        // Keep `viewport_size` in lockstep with the framebuffer dimensions
+        // pulled from `ctx.screen_rect`. The cache fingerprint feeds
+        // `viewport_size` into `fb_size` + the projection's aspect ratio,
+        // so a resize (window resize, splitter drag, etc.) only invalidates
+        // the cache when this field reflects the new dimensions. Without
+        // this assignment the field stays at its `(0, 0)` initial value
+        // forever, the fingerprint never sees a resize, and after the
+        // accumulator converges the renderer short-circuits to a blit of
+        // a freshly-reallocated (empty) output framebuffer.
+        self.viewport_size = (fb_w, fb_h);
+
         let t_fb = web_time::Instant::now();
         self.ensure_framebuffer(ctx.device, fb_w, fb_h);
         let fb_ms = elapsed_ms(t_fb);
