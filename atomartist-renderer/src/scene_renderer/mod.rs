@@ -73,7 +73,7 @@ use cache::{handle_cache_hit, CacheOutcome, SceneFingerprint};
 use depth_peel::pipelines::{DualPeelPipelines, MeshHandles, PeelUniforms};
 use depth_peel::{iteration_count, DualPeelTargets, DEFAULT_LAYERS};
 use gizmo_pass::{GizmoLinePipelines, GizmoLineUniforms};
-pub use gizmo_pass::GizmoLineSet;
+pub use gizmo_pass::{GizmoLineSet, GizmoTriangleSet};
 use opaque_pass::{OpaquePipelines, Uniforms, Vertex};
 use post_outline::{OutlinePipelines, OutlineTargets, OutlineUniforms};
 
@@ -334,6 +334,13 @@ pub struct WgpuSceneRenderer {
     /// pushed by viewport code in response to selection changes.
     pub gizmo_lines: Vec<GizmoLineSet>,
 
+    /// Per-frame list of filled-triangle gizmo sets — the handle
+    /// meshes (small spheres / cubes) that the control gizmos drag.
+    /// Same lifecycle as [`gizmo_lines`]: the host populates this
+    /// each frame in response to selection / drag state, the renderer
+    /// re-uploads the vertex buffer on every draw.
+    pub gizmo_triangles: Vec<GizmoTriangleSet>,
+
     /// Progressive-AA sample index. Bumped each frame that the chain
     /// runs and clamped at [`MAX_SAMPLES`]; reset to 0 on a scene
     /// fingerprint mismatch (see [`crate::scene_renderer::cache`]).
@@ -379,6 +386,7 @@ impl WgpuSceneRenderer {
             outline_width: 0.05,
             render_style: RenderStyle::Shaded,
             gizmo_lines: Vec::new(),
+            gizmo_triangles: Vec::new(),
             sample_count: 0,
             accum_read: 0,
             last_fingerprint: None,

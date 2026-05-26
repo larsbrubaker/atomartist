@@ -33,6 +33,12 @@ pub struct GizmoLineVertex {
 pub struct GizmoLinePipelines {
     pub solid_pipeline: wgpu::RenderPipeline,
     pub overlay_pipeline: wgpu::RenderPipeline,
+    /// Filled-triangle counterparts for gizmo handle meshes. Same
+    /// shader + uniform layout as the line variants; only the
+    /// primitive topology differs (TriangleList) and we cull
+    /// back-faces so handles read as solid 3-D shapes.
+    pub solid_tri_pipeline: wgpu::RenderPipeline,
+    pub overlay_tri_pipeline: wgpu::RenderPipeline,
     pub bgl: wgpu::BindGroupLayout,
 }
 
@@ -75,6 +81,8 @@ impl GizmoLinePipelines {
             &shader,
             output_format,
             Some(depth_format),
+            wgpu::PrimitiveTopology::LineList,
+            None,
             "atomartist gizmo line solid pipeline",
         );
         let overlay_pipeline = build_variant(
@@ -83,12 +91,39 @@ impl GizmoLinePipelines {
             &shader,
             output_format,
             None,
+            wgpu::PrimitiveTopology::LineList,
+            None,
             "atomartist gizmo line overlay pipeline",
+        );
+        // Filled-triangle variants: cull back-faces so the handle
+        // meshes (small spheres + cubes) read as solid 3-D shapes
+        // instead of showing through to the back wall.
+        let solid_tri_pipeline = build_variant(
+            device,
+            &pl,
+            &shader,
+            output_format,
+            Some(depth_format),
+            wgpu::PrimitiveTopology::TriangleList,
+            Some(wgpu::Face::Back),
+            "atomartist gizmo tri solid pipeline",
+        );
+        let overlay_tri_pipeline = build_variant(
+            device,
+            &pl,
+            &shader,
+            output_format,
+            None,
+            wgpu::PrimitiveTopology::TriangleList,
+            Some(wgpu::Face::Back),
+            "atomartist gizmo tri overlay pipeline",
         );
 
         Self {
             solid_pipeline,
             overlay_pipeline,
+            solid_tri_pipeline,
+            overlay_tri_pipeline,
             bgl,
         }
     }
@@ -212,6 +247,110 @@ impl GizmoLinePipelines {
             pass.draw(0..vertex_count, 0..1);
         }
     }
+
+    /// Filled-triangle counterpart of [`execute`]. Same uniform layout
+    /// and per-set scratch buffers; routes the draw through the
+    /// TriangleList pipelines with back-face culling.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_tri(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        gizmo: &super::GizmoTriangleSet,
+        mvp: [f32; 16],
+        sample_view: &wgpu::TextureView,
+        scene_depth_view: &wgpu::TextureView,
+        viewport: (u32, u32),
+    ) {
+        if gizmo.vertices.is_empty() || (!gizmo.draw_solid && !gizmo.draw_overlay) {
+            return;
+        }
+        let (w, h) = viewport;
+        use wgpu::util::DeviceExt;
+        let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("atomartist gizmo tri vb"),
+            contents: bytemuck::cast_slice(&gizmo.vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let vertex_count = gizmo.vertices.len() as u32;
+
+        if gizmo.draw_solid {
+            let u = GizmoLineUniforms { mvp, color: gizmo.color };
+            let ub = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("atomartist gizmo tri solid ub"),
+                contents: bytemuck::bytes_of(&u),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+            let bg = self.build_bind_group(device, &ub);
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("atomartist gizmo tri solid"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: sample_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: scene_depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_viewport(0.0, 0.0, w as f32, h as f32, 0.0, 1.0);
+            pass.set_scissor_rect(0, 0, w, h);
+            pass.set_pipeline(&self.solid_tri_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.set_vertex_buffer(0, vbuf.slice(..));
+            pass.draw(0..vertex_count, 0..1);
+        }
+
+        if gizmo.draw_overlay {
+            let overlay_color = [
+                gizmo.color[0],
+                gizmo.color[1],
+                gizmo.color[2],
+                gizmo.color[3] * gizmo.occluded_alpha,
+            ];
+            let u = GizmoLineUniforms { mvp, color: overlay_color };
+            let ub = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("atomartist gizmo tri overlay ub"),
+                contents: bytemuck::bytes_of(&u),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+            let bg = self.build_bind_group(device, &ub);
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("atomartist gizmo tri overlay"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: sample_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_viewport(0.0, 0.0, w as f32, h as f32, 0.0, 1.0);
+            pass.set_scissor_rect(0, 0, w, h);
+            pass.set_pipeline(&self.overlay_tri_pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.set_vertex_buffer(0, vbuf.slice(..));
+            pass.draw(0..vertex_count, 0..1);
+        }
+    }
 }
 
 fn vertex_layout() -> wgpu::VertexBufferLayout<'static> {
@@ -227,12 +366,15 @@ fn vertex_layout() -> wgpu::VertexBufferLayout<'static> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_variant(
     device: &wgpu::Device,
     pl: &wgpu::PipelineLayout,
     shader: &wgpu::ShaderModule,
     output_format: wgpu::TextureFormat,
     depth_format: Option<wgpu::TextureFormat>,
+    topology: wgpu::PrimitiveTopology,
+    cull_mode: Option<wgpu::Face>,
     label: &'static str,
 ) -> wgpu::RenderPipeline {
     // Both variants alpha-blend over their target — the solid variant
@@ -273,8 +415,8 @@ fn build_variant(
             compilation_options: Default::default(),
         },
         primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::LineList,
-            cull_mode: None,
+            topology,
+            cull_mode,
             ..Default::default()
         },
         depth_stencil,

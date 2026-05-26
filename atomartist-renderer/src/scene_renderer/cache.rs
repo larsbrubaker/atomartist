@@ -40,7 +40,7 @@ use std::hash::{Hash, Hasher};
 
 use atomartist_lib::geometry::Body;
 
-use super::gizmo_pass::hash_gizmos;
+use super::gizmo_pass::{hash_gizmo_tris, hash_gizmos};
 use super::{RenderStyle, WgpuSceneRenderer};
 
 /// Hash every input the renderer depends on for a body list:
@@ -187,7 +187,12 @@ impl SceneFingerprint {
             grid_dark: r.grid_dark_mode,
             show_bed: r.draw_grid,
             bed_z: r.grid_z,
-            gizmo_hash: hash_gizmos(&r.gizmo_lines),
+            // Combine line and triangle gizmo hashes so either kind
+            // of change rolls the fingerprint. XOR is fine here — both
+            // sub-hashes draw from the same DefaultHasher domain and
+            // a collision would only cause a missed-restart, not a
+            // wrong-output.
+            gizmo_hash: hash_gizmos(&r.gizmo_lines) ^ hash_gizmo_tris(&r.gizmo_triangles),
         })
     }
 

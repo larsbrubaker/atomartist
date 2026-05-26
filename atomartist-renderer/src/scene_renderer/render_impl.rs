@@ -387,6 +387,26 @@ impl WgpuCustomRender for WgpuSceneRenderer {
                 (fb_w, fb_h),
             );
         }
+        // Filled-triangle gizmos — handle meshes for the control
+        // gizmos. Share the same pipeline pair as the line gizmos but
+        // route through the TriangleList variant with back-face culling.
+        for gizmo in &self.gizmo_triangles {
+            let model = gizmo
+                .matrix
+                .as_ref()
+                .map(Mat4::from_cols_array)
+                .unwrap_or(Mat4::IDENTITY);
+            let gmvp = (jittered_proj * view * model).to_cols_array();
+            s.gizmo_pipelines.execute_tri(
+                ctx.device,
+                ctx.encoder,
+                gizmo,
+                gmvp,
+                &accum_targets.sample_view,
+                scene_depth_view,
+                (fb_w, fb_h),
+            );
+        }
 
         // ── Pass 3: progressive accumulation ──────────────────────────────
         let t_accum = web_time::Instant::now();
