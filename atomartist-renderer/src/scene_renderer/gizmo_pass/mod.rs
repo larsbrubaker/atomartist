@@ -44,9 +44,11 @@
 //! gizmo) and avoids per-frame cache invalidation logic; if a real
 //! perf problem shows up later we can add a hash-based cache.
 
+pub mod handles;
 pub mod pipelines;
 pub mod shaders;
 
+pub use handles::{cube_handle, sphere_handle};
 pub use pipelines::{GizmoLinePipelines, GizmoLineUniforms, GizmoLineVertex};
 
 /// Host-side description of one filled-triangle gizmo — used by

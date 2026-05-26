@@ -130,6 +130,97 @@ pub fn pick_origin(
     closest.and_then(|(_, id)| id)
 }
 
+/// Pick-target description for a control-gizmo handle. The renderer
+/// + gizmo code keep a parallel list of handles per active gizmo;
+/// each handle has an integer `id` the gizmo knows how to interpret
+/// (e.g. the Z control's 0 = "translate" knob, 1 = "scale" knob).
+/// `center` + `half_extent` define an axis-aligned bounding box the
+/// click ray tests against — works for both sphere handles (half-
+/// extent = radius on each axis) and cube handles (half-extent = half
+/// edge length).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GizmoHandle {
+    pub id: u32,
+    pub center: [f32; 3],
+    pub half_extent: [f32; 3],
+}
+
+/// Ray-vs-AABB intersection (slab method). Returns the entry distance
+/// `t` along the ray (in `direction` units) if the ray intersects the
+/// box and `t > 0`; otherwise `None`. Used by handle picking — the
+/// AABB is a tight bound for cubes and a loose bound for spheres
+/// (the sphere fully inscribes its AABB), good enough for the
+/// pixel-scale handles we draw.
+fn ray_aabb_intersect(
+    origin: [f32; 3],
+    direction: [f32; 3],
+    aabb_min: [f32; 3],
+    aabb_max: [f32; 3],
+) -> Option<f32> {
+    let mut t_min = f32::NEG_INFINITY;
+    let mut t_max = f32::INFINITY;
+    for k in 0..3 {
+        if direction[k].abs() < 1e-8 {
+            // Ray parallel to this slab — must be inside it or miss.
+            if origin[k] < aabb_min[k] || origin[k] > aabb_max[k] {
+                return None;
+            }
+        } else {
+            let inv_d = 1.0 / direction[k];
+            let mut t0 = (aabb_min[k] - origin[k]) * inv_d;
+            let mut t1 = (aabb_max[k] - origin[k]) * inv_d;
+            if t0 > t1 {
+                std::mem::swap(&mut t0, &mut t1);
+            }
+            if t0 > t_min { t_min = t0; }
+            if t1 < t_max { t_max = t1; }
+            if t_min > t_max {
+                return None;
+            }
+        }
+    }
+    if t_max < 0.0 {
+        return None;
+    }
+    // Use the entry distance if the ray starts outside the box;
+    // otherwise the exit distance (still positive).
+    Some(if t_min > 0.0 { t_min } else { t_max })
+}
+
+/// Pick the closest gizmo handle along the ray. Returns the hit
+/// handle's `id` (or `None` on miss). Handles are tested in the order
+/// supplied; ties resolve by which handle was registered first (so a
+/// gizmo can prioritise overlapping handles by ordering them in its
+/// active-handles list).
+pub fn pick_handle(
+    handles: &[GizmoHandle],
+    ray_origin: [f32; 3],
+    ray_direction: [f32; 3],
+) -> Option<u32> {
+    let mut closest: Option<(f32, u32)> = None;
+    for h in handles {
+        let mn = [
+            h.center[0] - h.half_extent[0],
+            h.center[1] - h.half_extent[1],
+            h.center[2] - h.half_extent[2],
+        ];
+        let mx = [
+            h.center[0] + h.half_extent[0],
+            h.center[1] + h.half_extent[1],
+            h.center[2] + h.half_extent[2],
+        ];
+        if let Some(t) = ray_aabb_intersect(ray_origin, ray_direction, mn, mx) {
+            if t > 0.0 {
+                match closest {
+                    Some((d, _)) if t >= d => {}
+                    _ => closest = Some((t, h.id)),
+                }
+            }
+        }
+    }
+    closest.map(|(_, id)| id)
+}
+
 /// Fallback pivot when [`raycast_mesh`] misses: project the cursor ray
 /// onto the plane through the camera's current `center`, perpendicular to
 /// the camera's forward vector. Returns the world-space intersection.
@@ -530,6 +621,54 @@ mod tests {
         // than guessing (matches NodeDesigner: no claim = no selection).
         let geo = Geometry3d::from_body(body_at(0.0, None));
         let picked = pick_origin(&geo, [0.0, 0.0, 5.0], [0.0, 0.0, -1.0]);
+        assert_eq!(picked, None);
+    }
+
+    // ──────────────────────────────────────────────────────────
+    // pick_handle tests
+    // ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn pick_handle_returns_hit_id_for_centred_ray() {
+        let handles = [
+            GizmoHandle { id: 7, center: [3.0, 0.0, 0.0], half_extent: [0.5, 0.5, 0.5] },
+        ];
+        // Ray from (3, 0, 5) pointing -Z lands inside the handle.
+        let picked = pick_handle(&handles, [3.0, 0.0, 5.0], [0.0, 0.0, -1.0]);
+        assert_eq!(picked, Some(7));
+    }
+
+    #[test]
+    fn pick_handle_returns_none_on_miss() {
+        let handles = [
+            GizmoHandle { id: 7, center: [0.0, 0.0, 0.0], half_extent: [0.5, 0.5, 0.5] },
+        ];
+        let picked = pick_handle(&handles, [10.0, 0.0, 5.0], [0.0, 0.0, -1.0]);
+        assert_eq!(picked, None);
+    }
+
+    #[test]
+    fn pick_handle_picks_closest_when_two_overlap_along_ray() {
+        // Two handles along +Z axis — ray from +Z down should hit the
+        // upper one first (closer along the ray).
+        let handles = [
+            GizmoHandle { id: 10, center: [0.0, 0.0, 1.0], half_extent: [0.5, 0.5, 0.5] },
+            GizmoHandle { id: 20, center: [0.0, 0.0, -2.0], half_extent: [0.5, 0.5, 0.5] },
+        ];
+        let picked = pick_handle(&handles, [0.0, 0.0, 5.0], [0.0, 0.0, -1.0]);
+        assert_eq!(picked, Some(10), "closer handle (z=1) should win");
+    }
+
+    #[test]
+    fn pick_handle_ignores_back_facing_hits() {
+        // Ray pointing away from the handle should miss even though
+        // the box is technically intersected by the infinite line.
+        let handles = [
+            GizmoHandle { id: 1, center: [0.0, 0.0, -5.0], half_extent: [0.5, 0.5, 0.5] },
+        ];
+        // Ray at (0,0,5) pointing +Z — handle is at z=-5 (BEHIND the
+        // ray's start in +Z direction).
+        let picked = pick_handle(&handles, [0.0, 0.0, 5.0], [0.0, 0.0, 1.0]);
         assert_eq!(picked, None);
     }
 
