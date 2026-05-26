@@ -133,13 +133,13 @@ hr { border: 0; border-top: 1px dashed var(--rule); margin: 32px 0 20px; }
   selection outline (single-body fallback), matrix composition through ops
   (no more bake), Z-up world everywhere, per-body click selection via
   <code>Body.origin</code> NodeId, gizmo foundation (filled-tri pipeline +
-  sphere/cube handles + ray-vs-AABB handle picking), Stage-1 Z control gizmo
-  geometry, dynamic-input Output node, ~25 node types, <strong>undo / redo
-  stack wired through every <code>AppStateModel</code> mutation</strong> with
-  per-stroke coalescing on slider + node drag. <strong>Remaining work is the
-  bulk of what makes the application feel like NodeDesigner / MatterCAD</strong>
-   — long tail of node types, property editors, gizmo drag wiring, editing UX,
-  file I/O. This document enumerates that tail.
+  sphere/cube handles + ray-vs-AABB handle picking), <strong>XY bed-plane
+  body drag + Z control drag</strong> with per-stroke matrix coalescing,
+  dynamic-input Output node, ~25 node types, <strong>undo / redo stack
+  wired through every mutation</strong> (canvas + viewport). <strong>Remaining
+  work is the bulk of what makes the application feel like NodeDesigner /
+  MatterCAD</strong> — long tail of node types, property editors, remaining
+  gizmo variants (rotate / bounds-edit / handle-meshes), editing UX, file I/O.
 </div>
 
 <div class="banner" style="background:#f0eef9;border-left-color:#5a4ea3;">
@@ -319,26 +319,24 @@ hr { border: 0; border-top: 1px dashed var(--rule); margin: 32px 0 20px; }
 
 <h2>4. Viewport / 3-D interaction</h2>
 
-<h3>4.1 Control gizmos — drag wiring + remaining variants <span class="badge heavy">heavy</span></h3>
+<h3>4.1 Control gizmos — remaining variants <span class="badge gap">extend per gizmo</span></h3>
 <p>
-  Foundation landed: <code>GizmoTriangleSet</code> filled-tri pipeline,
-  <code>gizmo_pass::handles::{sphere_handle, cube_handle}</code>,
-  <code>picking::{GizmoHandle, pick_handle}</code> ray-vs-AABB. Z control
-  geometry (<code>viewport_widget/z_control_gizmo.rs</code>) renders above
-  the selected body. Remaining is the drag state + property write path,
-  then the three other gizmo variants.
+  Drag infrastructure landed: ray construction, body / handle picking,
+  bed-plane projection, Z-axis projection, matrix write-back through
+  <code>AppState::set_node_matrix_with_undo</code> with per-stroke
+  coalescing. Body XY drag (mouse-down on a body's mesh → translate on
+  the bed plane) and Z control drag (mouse-down on the sphere handle
+  → translate along world Z) are wired. The pattern lives in
+  <code>viewport_widget/body_drag.rs</code> (pure math) +
+  <code>viewport_widget/viewport_widget_interactions.rs</code>
+  (state machine). Remaining gizmos:
 </p>
 <ul>
-  <li><strong>Z control Stage 2 — drag wiring</strong> — mouse-down on the
-    handle sphere → grab → mouse-move updates the upstream node's
-    <code>matrix</code> / <code>height</code> property via a coalesced
-    <code>UndoCommand</code> → mouse-up commits. Reference:
-    <code class="ref-nd">z-height-drag.js</code> (1204 lines). Unblocks the
-    rest of §4.1.</li>
-  <li><strong>XY control</strong> — <code class="ref-nd">xy-control-gizmo.js</code> (561 lines) + <code class="ref-nd">xy-width-depth-drag.js</code> (807 lines). 4 edge arrows for width / depth scaling and XY translate. Reuse Z control's drag pattern once that lands.</li>
-  <li><strong>Rotate corner</strong> — <code class="ref-nd">rotate-corner-gizmo.js</code> (813 lines) + <code class="ref-nd">rotate-corner-drag.js</code> (274 lines). Corner-mounted rotation handles.</li>
-  <li><strong>Bounds edit handles</strong> — extend the read-only bounds gizmo with 8 corner + 6 face drag handles for resizing <code>FitToBounds</code>.</li>
-  <li><strong>Drag-on-line / drag-on-plane handles</strong> — <code class="ref-nd">handle-meshes.js</code> (257 lines). Per-vertex draggable spheres for node properties that expose a "grab this point" affordance. Geometry side already lands via <code>sphere_handle</code> / <code>cube_handle</code>; needs node-property → handle position binding + drag-back-into-property write.</li>
+  <li><strong>XY edge-arrow control</strong> — <code class="ref-nd">xy-control-gizmo.js</code> (561) + <code class="ref-nd">xy-width-depth-drag.js</code> (807). 4 edge arrows that scale width / depth (not whole-body translate — that's already covered by the bed-plane drag landed above). Reuse the existing handle-pick + drag-state pattern; the write target is the upstream primitive's <code>width</code> / <code>depth</code> property instead of <code>matrix</code>.</li>
+  <li><strong>Rotate corner</strong> — <code class="ref-nd">rotate-corner-gizmo.js</code> (813) + <code class="ref-nd">rotate-corner-drag.js</code> (274). Corner-mounted rotation handles. Pattern: project ray onto the rotation plane → compute angle delta → compose into the body's <code>matrix</code> rotation.</li>
+  <li><strong>Bounds edit handles</strong> — extend the read-only bounds gizmo with 8 corner + 6 face drag handles for resizing <code>FitToBounds</code> (writes <code>width</code> / <code>height</code> / <code>depth</code>).</li>
+  <li><strong>Drag-on-line / drag-on-plane handles</strong> — <code class="ref-nd">handle-meshes.js</code> (257). Per-vertex draggable spheres for node properties that expose a "grab this point" affordance. Geometry side already lands via <code>sphere_handle</code> / <code>cube_handle</code>; needs node-property → handle position binding + drag-back-into-property write.</li>
+  <li><strong>Selection-while-dragging</strong> — currently a body XY drag promotes the dragged body to the active selection on mouse-up. NodeDesigner also shows the gizmos LIVE as soon as the body becomes selected mid-drag (i.e. on the first 2-px movement past threshold). Consider promoting selection earlier so the Z-control + future gizmos appear without waiting for mouse-up.</li>
 </ul>
 
 <h3>4.2 Overlays + indicators</h3>
@@ -555,9 +553,9 @@ hr { border: 0; border-top: 1px dashed var(--rule); margin: 32px 0 20px; }
   <li><code>cd C:\Development\rust-apps\atomartist</code></li>
   <li><code>cargo test --workspace</code> — 500+ passing at this snapshot. The <code>first_party_project_files_stay_under_line_limit</code> test is the canonical line-cap reporter.</li>
   <li><code>cargo check -p demo-wasm --target wasm32-unknown-unknown</code> — must stay clean.</li>
-  <li><strong>§4.1 Stage 2 — Z control drag wiring</strong> is the highest-leverage next step. Geometry + handle picking + filled-tri pipeline already land; the missing piece is mouse-down → property write → undo. Lands a pattern XY / rotate / bounds-edit gizmos reuse.</li>
+  <li><strong>§4.1 remaining gizmos (rotate / bounds-edit / handle-meshes)</strong> — XY-edge + Z drags landed; rotate-corner and bounds-edit are next. Same pattern: extend `CameraDrag` with a new variant, write the per-frame math in `viewport_widget/body_drag.rs`, push through `set_node_matrix_with_undo`.</li>
   <li>Or pick a single §1.x node cluster and finish it (small primitives, transform variants, deformations, path ops, generators, structural nodes, fields). Each cluster's NodeDef + tests + property panel row + node-search palette listing should land together.</li>
-  <li>Or pick §5.2 (typed undo stack) — required by §4.1 Stage 2 anyway, and unblocks every subsequent UX flow that mutates the graph from gizmos / property edits / drag-drop.</li>
+  <li>Or pick §5.3 (canvas affordances — node search palette, inline rename, drag-reorder, expanded context menu, comment / frame nodes). The undo stack handles every action through the existing AppStateModel commands once new mutations route through it.</li>
   <li>Test-first bug-fixing rule per <code>CLAUDE.md</code> — if a port reveals a bug, write the reproducing test before the fix.</li>
   <li>Cross-cutting features that improve the supporting libraries (manifold-rust mesh repair, agg-gui curve editor, etc.) should land upstream per <code>CLAUDE.md</code>'s "We improve sibling libraries as we go" note — with a one-paragraph commit message explaining what AtomArtist needs and why the addition generalises.</li>
 </ol>

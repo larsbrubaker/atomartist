@@ -74,6 +74,12 @@ const BOTTOM_ROW_SPACING: f64 = 40.0;
 /// Build the overlay container.  The returned widget is what
 /// `top_level.rs` mounts in place of the bare `Viewport3dWidget`.
 pub fn build_viewport_overlay(state: AppState, font: Arc<Font>) -> Box<dyn Widget> {
+    // Matrix read / write callbacks land here so the viewport's body
+    // drag handlers can both snapshot the starting matrix and push
+    // mid-stroke updates through the undo stack without the renderer
+    // crate having to know about AppState.
+    let read_state = state.clone();
+    let write_state = state.clone();
     let viewport_inputs = ViewportInputs {
         last_mesh_output: state.last_mesh_output.clone(),
         display_node: state.display_node.clone(),
@@ -84,6 +90,18 @@ pub fn build_viewport_overlay(state: AppState, font: Arc<Font>) -> Box<dyn Widge
         show_bed: state.show_bed.clone(),
         camera_animation: state.camera_animation.clone(),
         projection_animation: state.projection_animation.clone(),
+        read_node_matrix: Some(std::sync::Arc::new(move |id| {
+            let g = read_state.graph.lock().unwrap();
+            g.get(id).and_then(|n| {
+                n.properties.get("matrix").and_then(|v| match v {
+                    atomartist_lib::graph::node::PortValue::Matrix4x4(m) => Some(*m),
+                    _ => None,
+                })
+            })
+        })),
+        write_node_matrix: Some(std::sync::Arc::new(move |id, m| {
+            write_state.set_node_matrix_with_undo(id, m);
+        })),
     };
     let cube_inputs = TumbleCubeInputs {
         camera: state.camera.clone(),

@@ -530,3 +530,35 @@ fn orientation_for_top_face_avoids_singularity() {
     let right = q * Vec3::X;
     assert!((right - Vec3::X).length() < 1e-4, "top view should put world +X on screen-right; got {right:?}");
 }
+
+#[test]
+fn world_units_per_pixel_perspective_doubles_with_distance() {
+    // Constant-on-screen-size gizmo scaling depends on this:
+    // a world point twice as far from the eye covers twice as
+    // many world units per screen pixel.
+    let cam = OrbitCamera::default();
+    let h = 720.0;
+    let close = cam.world_units_per_pixel_at(cam.center, h);
+    let eye = Vec3::from(cam.eye());
+    let forward = (eye - Vec3::from(cam.center)).normalize();
+    // 2× depth = 2× world-units-per-pixel.
+    let far_pt = (eye - forward * (eye - Vec3::from(cam.center)).length() * 2.0).to_array();
+    let far = cam.world_units_per_pixel_at(far_pt, h);
+    assert!(
+        (far / close - 2.0).abs() < 1e-3,
+        "far should be 2× close; close={close} far={far}",
+    );
+}
+
+#[test]
+fn world_units_per_pixel_orthographic_ignores_depth() {
+    let mut cam = OrbitCamera::default();
+    cam.projection = Projection::Orthographic;
+    let h = 720.0;
+    let at_center = cam.world_units_per_pixel_at(cam.center, h);
+    let far_away = cam.world_units_per_pixel_at([0.0, 0.0, -500.0], h);
+    assert!(
+        (at_center - far_away).abs() < 1e-4,
+        "ortho is depth-invariant; got {at_center} vs {far_away}",
+    );
+}

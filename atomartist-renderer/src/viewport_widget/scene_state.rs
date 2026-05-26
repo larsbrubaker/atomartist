@@ -40,11 +40,23 @@ impl Viewport3dWidget {
                 .push(GizmoLineSet::bounds_box(center, size, None));
         }
         // Z control gizmo — anchored above the selected body's world
-        // AABB. Stage 1: geometry only; mouse-drag wiring follows.
+        // AABB. Camera-distance-proportional sizing keeps the gizmo
+        // a constant pixel-size at any zoom; idle colour mirrors the
+        // active theme's text colour (MatterCAD parity).
         if let Some(sel_id) = *self.inputs.selection.lock().unwrap() {
             let geom = self.current_geometry();
             if let Some(world_aabb) = selected_body_world_aabb(geom.as_deref(), sel_id) {
-                let (arrow, sphere) = z_control_gizmo::z_control_for_aabb(world_aabb);
+                let visuals = agg_gui::theme::current_visuals();
+                let idle = [
+                    visuals.text_color.r,
+                    visuals.text_color.g,
+                    visuals.text_color.b,
+                    1.0,
+                ];
+                let cam = self.cam();
+                let vh = self.bounds.height.max(1.0) as f32;
+                let (arrow, sphere) =
+                    z_control_gizmo::z_control_for_aabb(world_aabb, &cam, vh, idle);
                 s.gizmo_lines.push(arrow);
                 s.gizmo_triangles.push(sphere);
             }

@@ -50,87 +50,13 @@ use viewport_widget_helpers::{
 };
 use crate::scene_renderer::{GizmoLineSet, RenderStyle, WgpuSceneRenderer};
 
-/// Default left-mouse-drag behaviour, picked by the radio cluster of
-/// buttons around the tumble cube.  Mirrors MatterCAD's
-/// `ViewControls3DButtons` enum minus the printer-specific entries.
-///
-/// `Select` is the historical AtomArtist behaviour: plain left-drag
-/// becomes a click-or-drag selection.  The other variants change what
-/// plain left-drag does — useful on trackpads without a right or middle
-/// mouse button, exactly the case MatterCAD targets these buttons at.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ViewportTool {
-    Select,
-    Rotate,
-    Pan,
-    Zoom,
-}
+#[path = "viewport_widget/inputs.rs"]
+mod inputs;
+pub use inputs::{ViewportInputs, ViewportTool};
 
-impl Default for ViewportTool {
-    fn default() -> Self {
-        Self::Select
-    }
-}
-
-/// External hooks the widget needs from the app: where to read the latest
-/// mesh from, the live `display_node` so a left-click selection mirrors
-/// into the canvas, and a writable selection slot.
-pub struct ViewportInputs {
-    /// Latest displayed geometry — bundle of mesh + per-node matrix
-    /// + per-node colour pulled forward from upstream. The renderer
-    /// reads `geom.color` into its `base_color` uniform and
-    /// `geom.mesh` into the vertex buffer; the matrix lands on
-    /// the bounds gizmo / future control gizmos.
-    pub last_mesh_output: Arc<Mutex<Option<Arc<Geometry3d>>>>,
-    /// The display node whose mesh is currently rendered. Read-only from
-    /// the viewport's perspective — used to know which node id to write
-    /// into `selection` when the user left-clicks the displayed mesh.
-    pub display_node: Arc<Mutex<Option<NodeId>>>,
-    /// The currently-selected node id (mirrored to / from the canvas).
-    /// The viewport writes here when the user left-clicks a hit; the
-    /// canvas writes here when the user clicks a node. Both paint sides
-    /// read it to render highlights / outlines.
-    pub selection: Arc<Mutex<Option<NodeId>>>,
-    /// Shared orbit camera — held in an `Arc<Mutex<>>` so the tumble
-    /// cube widget can read the current orientation each paint and
-    /// write back animated orientations on click-to-orient.
-    pub camera: Arc<Mutex<OrbitCamera>>,
-    /// Active mouse-button-1 tool (Select / Rotate / Pan / Zoom).
-    pub tool: Arc<Mutex<ViewportTool>>,
-    /// Render style picker beneath the tumble cube.
-    pub render_style: Arc<Mutex<RenderStyle>>,
-    /// Bed-toggle state.  Mirrored into
-    /// `WgpuSceneRenderer::draw_grid` each paint so flipping the
-    /// button hides / shows the floor grid on the next frame.
-    pub show_bed: Arc<Mutex<bool>>,
-    /// Optional camera pose tween started by external HUD controls
-    /// (Home / Fit).  The viewport owns ticking it during paint.
-    pub camera_animation: Arc<Mutex<Option<CameraPoseAnimation>>>,
-    /// Optional perspective <-> orthographic tween started by the
-    /// perspective HUD button. Ticked alongside `camera_animation`
-    /// each paint so projection toggles ease over ~0.25 s instead
-    /// of snapping.
-    pub projection_animation: Arc<Mutex<Option<ProjectionAnimation>>>,
-}
-
-impl ViewportInputs {
-    /// Build a default-populated input bundle with empty `Arc<Mutex<>>`s
-    /// for every slot — used by tests and the unit-of-work paint code
-    /// to avoid replicating every default in every call site.
-    pub fn empty() -> Self {
-        Self {
-            last_mesh_output: Arc::new(Mutex::new(None)),
-            display_node: Arc::new(Mutex::new(None)),
-            selection: Arc::new(Mutex::new(None)),
-            camera: Arc::new(Mutex::new(OrbitCamera::default())),
-            tool: Arc::new(Mutex::new(ViewportTool::default())),
-            render_style: Arc::new(Mutex::new(RenderStyle::default())),
-            show_bed: Arc::new(Mutex::new(true)),
-            camera_animation: Arc::new(Mutex::new(None)),
-            projection_animation: Arc::new(Mutex::new(None)),
-        }
-    }
-}
+// `ViewportInputs` + `ViewportTool` live in `viewport_widget/inputs.rs`
+// — see the module above. Re-exported here so callers continue to
+// import via `crate::viewport_widget::{ViewportInputs, ViewportTool}`.
 
 #[derive(Clone, Debug)]
 enum CameraDrag {
@@ -149,12 +75,74 @@ enum CameraDrag {
     /// original world point under the cursor follows the cursor
     /// across the drag.
     Pan { last_local: Point },
-    /// Left-button down — pending selection.  Becomes a click-or-drag
-    /// selection on mouse-up (Phase A4 wires the selection write).
-    Selecting { start_local: Point, moved: bool },
+    /// Left-button down — pending click-or-drag. Carries the body
+    /// pick + bed-plane anchor done at mouse-down so the click case
+    /// AND the drag promotion both have the data they need without
+    /// re-picking:
+    ///
+    /// * Mouse-up while `!moved` → select `picked_body` (or clear
+    ///   selection when `None`). The click case ALWAYS selects what
+    ///   was under the cursor regardless of whether the body's
+    ///   matrix is writable.
+    /// * Mouse-move past 2-px threshold + writable matrix → promote
+    ///   to `DragBodyXY` for bed-plane translation. If the matrix
+    ///   isn't writable (rare — only nodes without a `matrix`
+    ///   property), the drag stays in `Selecting` and the mouse-up
+    ///   path still works — selection lands but no translation is
+    ///   performed.
+    Selecting {
+        start_local: Point,
+        moved: bool,
+        picked_body: Option<NodeId>,
+        /// Bed-plane (Z=0) intersection of the mouse-down ray.
+        /// `None` when the camera was pointing parallel to the bed
+        /// or the ray missed. Required to start `DragBodyXY` on a
+        /// promotion — without an anchor the drag delta math has
+        /// nothing to subtract.
+        anchor_bed_pt: Option<[f32; 3]>,
+    },
     /// Ctrl + Alt + Left-drag — zoom by vertical drag distance (matches
     /// MatterCAD's modifier-only zoom path).
     Zooming { start_local: Point, start_radius: f32 },
+    /// Left-button down landed on a renderable body — pending body-XY
+    /// drag. Becomes a click-select on mouse-up if `moved == false`,
+    /// otherwise each `MouseMove` projects the cursor ray onto the
+    /// bed plane (`Z = 0`) and translates the body's matrix by
+    /// `current_bed_pt - anchor_bed_pt`. MatterCAD's `TranslateObject3D`
+    /// + NodeDesigner's bed-plane drag both follow this pattern.
+    DragBodyXY {
+        /// Node id whose `matrix` property gets mutated each frame.
+        node_id: NodeId,
+        start_local: Point,
+        moved: bool,
+        /// Bed-plane intersection of the mouse-down ray. Drag delta
+        /// is `current - anchor_bed_pt` so the world point that was
+        /// under the cursor at drag start stays under the cursor.
+        anchor_bed_pt: [f32; 3],
+        /// Matrix snapshot at drag start — translation deltas land on
+        /// this baseline so a coalesced drag undoes back to here.
+        start_matrix: [f32; 16],
+    },
+    /// Left-button down landed on the Z-control sphere handle. Each
+    /// `MouseMove` projects the cursor ray onto the world vertical
+    /// line through `(anchor_xy[0], anchor_xy[1], *)` — the closest
+    /// point's world Z becomes the body's new `matrix.tz`. MatterCAD's
+    /// `MoveInZControl` follows the same skew-line projection.
+    DragBodyZ {
+        node_id: NodeId,
+        start_local: Point,
+        /// XY of the body's anchor (the gizmo sphere's XY when the
+        /// drag started). Stays fixed across the drag so the handle
+        /// only moves up / down.
+        anchor_xy: [f32; 2],
+        /// World Z where the drag-start ray crossed the vertical line
+        /// — subtracted from each `MouseMove`'s projection to get the
+        /// per-frame delta. Without this anchor the gizmo would jump
+        /// to wherever the mouse first lands when the camera angle
+        /// is shallow.
+        anchor_z: f32,
+        start_matrix: [f32; 16],
+    },
 }
 
 pub struct Viewport3dWidget {
@@ -767,6 +755,9 @@ mod scene_state;
 
 #[path = "viewport_widget/z_control_gizmo.rs"]
 mod z_control_gizmo;
+
+#[path = "viewport_widget/body_drag.rs"]
+mod body_drag;
 
 #[cfg(test)]
 #[path = "viewport_widget_tests.rs"]

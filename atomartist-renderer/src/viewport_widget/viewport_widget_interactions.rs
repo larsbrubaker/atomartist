@@ -4,7 +4,10 @@
 //! handling stay below the repository file-size guardrail.
 
 use super::*;
-use crate::picking::{pick_origin, raycast_mesh};
+use super::body_drag;
+use super::viewport_widget_helpers::selected_body_world_aabb;
+use super::z_control_gizmo;
+use crate::picking::{pick_handle, pick_origin, raycast_mesh, GizmoHandle, HitPlane};
 
 impl Viewport3dWidget {
     // `orbit_pivot_from_cursor` used to set
@@ -68,10 +71,27 @@ impl Viewport3dWidget {
                     let tool = *self.inputs.tool.lock().unwrap();
                     match tool {
                         ViewportTool::Select => {
-                            self.drag = CameraDrag::Selecting {
-                                start_local: pos,
-                                moved: false,
-                            };
+                            // Hit-test in priority order:
+                            //   1. Z control sphere — small target,
+                            //      must win over the body underneath.
+                            //   2. Anything else (body or empty) →
+                            //      Selecting variant with the body
+                            //      pick captured so mouse-up can
+                            //      reliably select, and mouse-move
+                            //      past threshold can promote to
+                            //      `DragBodyXY` for translate.
+                            if let Some(pending) = self.try_start_z_drag(pos) {
+                                self.drag = pending;
+                            } else {
+                                let (picked_body, anchor_bed_pt) =
+                                    self.pick_body_and_bed_anchor(pos);
+                                self.drag = CameraDrag::Selecting {
+                                    start_local: pos,
+                                    moved: false,
+                                    picked_body,
+                                    anchor_bed_pt,
+                                };
+                            }
                         }
                         ViewportTool::Rotate => {
                             self.refresh_pivot(pos);
@@ -115,7 +135,10 @@ impl Viewport3dWidget {
         // events.  The plain `CameraDrag::None` / `Selecting`
         // branches are NOT camera-mutating, so we skip the call
         // there to avoid spuriously re-painting on hover.
-        let did_change = !matches!(self.drag, CameraDrag::None | CameraDrag::Selecting { .. });
+        let did_change = !matches!(
+            self.drag,
+            CameraDrag::None | CameraDrag::Selecting { .. },
+        );
         if did_change {
             agg_gui::animation::request_draw();
         }
@@ -197,11 +220,114 @@ impl Viewport3dWidget {
                 }
                 EventResult::Consumed
             }
-            CameraDrag::Selecting { start_local, moved } => {
+            CameraDrag::Selecting {
+                start_local,
+                moved,
+                picked_body,
+                anchor_bed_pt,
+            } => {
                 let dx = (pos.x - start_local.x).abs();
                 let dy = (pos.y - start_local.y).abs();
-                if dx > 2.0 || dy > 2.0 {
-                    *moved = true;
+                let past_threshold = dx > 2.0 || dy > 2.0;
+                if !*moved && past_threshold {
+                    // Crossed the 2-px threshold for the first time —
+                    // try promoting to `DragBodyXY` so the body
+                    // follows the cursor. Promotion requires:
+                    //   * A picked body (mouse-down landed on one),
+                    //   * A bed-plane anchor (the click ray crossed
+                    //     Z = 0 somewhere),
+                    //   * A writable matrix on that body.
+                    // If any check fails we stay in `Selecting` with
+                    // `moved = true` — selection still works on
+                    // mouse-up, just no translate.
+                    if let (Some(node_id), Some(anchor)) =
+                        (*picked_body, *anchor_bed_pt)
+                    {
+                        if let Some(start_matrix) =
+                            self.inputs.read_node_matrix(node_id)
+                        {
+                            self.drag = CameraDrag::DragBodyXY {
+                                node_id,
+                                start_local: *start_local,
+                                moved: true,
+                                anchor_bed_pt: anchor,
+                                start_matrix,
+                            };
+                            return EventResult::Consumed;
+                        }
+                    }
+                }
+                *moved = *moved || past_threshold;
+                EventResult::Consumed
+            }
+            CameraDrag::DragBodyZ { .. } => {
+                if let CameraDrag::DragBodyZ {
+                    node_id,
+                    start_local: _,
+                    anchor_xy,
+                    anchor_z,
+                    start_matrix,
+                } = self.drag.clone()
+                {
+                    let w = self.bounds.width.max(1.0);
+                    let h = self.bounds.height.max(1.0);
+                    let cursor_td = (pos.x, h - pos.y);
+                    let (ray_o, ray_d) = {
+                        let cam = self.cam();
+                        cam.screen_to_ray(cursor_td, (w, h))
+                    };
+                    if let Some(cur_z) =
+                        body_drag::z_axis_translation(ray_o, ray_d, anchor_xy)
+                    {
+                        let new_matrix =
+                            body_drag::z_translation(start_matrix, anchor_z, cur_z);
+                        self.inputs.push_node_matrix(node_id, new_matrix);
+                    }
+                }
+                EventResult::Consumed
+            }
+            CameraDrag::DragBodyXY { .. } => {
+                // Branch-local borrow management: pull the fields out
+                // so the mutable `drag` borrow is dropped before we
+                // call back into `self.cam()` / `self.inputs.*`.
+                if let CameraDrag::DragBodyXY {
+                    node_id,
+                    start_local,
+                    moved,
+                    anchor_bed_pt,
+                    start_matrix,
+                } = self.drag.clone()
+                {
+                    let dx = (pos.x - start_local.x).abs();
+                    let dy = (pos.y - start_local.y).abs();
+                    let new_moved = moved || dx > 2.0 || dy > 2.0;
+                    let w = self.bounds.width.max(1.0);
+                    let h = self.bounds.height.max(1.0);
+                    let cursor_td = (pos.x, h - pos.y);
+                    let (ray_o, ray_d) = {
+                        let cam = self.cam();
+                        cam.screen_to_ray(cursor_td, (w, h))
+                    };
+                    let bed = HitPlane {
+                        point: [0.0, 0.0, 0.0],
+                        normal: [0.0, 0.0, 1.0],
+                    };
+                    if let Some(cur) = bed.ray_intersect(ray_o, ray_d) {
+                        let new_matrix = body_drag::bed_plane_translation(
+                            start_matrix,
+                            anchor_bed_pt,
+                            cur,
+                        );
+                        self.inputs.push_node_matrix(node_id, new_matrix);
+                    }
+                    // Stash moved-flag update back.
+                    self.drag = CameraDrag::DragBodyXY {
+                        node_id,
+                        start_local,
+                        moved: new_moved,
+                        anchor_bed_pt,
+                        start_matrix,
+                    };
                 }
                 EventResult::Consumed
             }
@@ -212,28 +338,111 @@ impl Viewport3dWidget {
         let prev = std::mem::replace(&mut self.drag, CameraDrag::None);
         match prev {
             CameraDrag::None => EventResult::Ignored,
-            CameraDrag::Selecting { moved, .. } if !moved => {
-                // Treat as a click: ray-test every body in the
-                // displayed Geometry3d. The hit body's `origin`
-                // (`NodeId` claim) becomes the selection — mirrors
-                // NodeDesigner's "click an object → select its node"
-                // UX. A hit on a body with no claim (None origin),
-                // or a click on empty space, clears the selection.
-                let geom_opt = self.current_geometry();
-                if let Some(geom) = geom_opt {
-                    let w = self.bounds.width.max(1.0);
-                    let h = self.bounds.height.max(1.0);
-                    let cursor_top_down = (pos.x, h - pos.y);
-                    let (origin, dir) = self.cam().screen_to_ray(cursor_top_down, (w, h));
-                    let picked = pick_origin(&geom, origin, dir);
-                    *self.inputs.selection.lock().unwrap() = picked;
-                } else {
-                    *self.inputs.selection.lock().unwrap() = None;
-                }
+            CameraDrag::Selecting {
+                moved,
+                picked_body,
+                ..
+            } if !moved => {
+                // Click without a drag — select the body captured
+                // at mouse-down (or clear the selection when the
+                // click landed on empty space).
+                *self.inputs.selection.lock().unwrap() = picked_body;
+                EventResult::Consumed
+            }
+            CameraDrag::DragBodyXY { node_id, .. } => {
+                // Drag committed — the body's new position is
+                // already in the graph + on the undo stack. Make
+                // sure selection follows the dragged body (matches
+                // NodeDesigner: pick-up + drop → that node becomes
+                // the active selection).
+                *self.inputs.selection.lock().unwrap() = Some(node_id);
+                EventResult::Consumed
+            }
+            CameraDrag::DragBodyZ { node_id, .. } => {
+                // Z drag committed — selection already matches
+                // (Z control only appears on the active selection),
+                // but re-affirm in case a stray selection write
+                // raced in during the drag.
+                *self.inputs.selection.lock().unwrap() = Some(node_id);
                 EventResult::Consumed
             }
             _ => EventResult::Consumed,
         }
+    }
+
+    fn read_node_matrix(&self, id: NodeId) -> Option<[f32; 16]> {
+        self.inputs.read_node_matrix(id)
+    }
+
+    /// If the click at `pos` lands on the Z-control sphere handle of
+    /// the currently-selected body, return a pending `DragBodyZ`
+    /// state. `None` otherwise.
+    pub(super) fn try_start_z_drag(&self, pos: Point) -> Option<CameraDrag> {
+        let sel_id = (*self.inputs.selection.lock().unwrap())?;
+        let geom = self.current_geometry();
+        let world_aabb = selected_body_world_aabb(geom.as_deref(), sel_id)?;
+        let cam = self.cam();
+        let vh = self.bounds.height.max(1.0) as f32;
+        let (_, (sphere_center, sphere_radius)) =
+            z_control_gizmo::z_control_layout_for_aabb(world_aabb, &cam, vh);
+        let handle = GizmoHandle {
+            id: z_control_gizmo::Z_TRANSLATE_HANDLE_ID,
+            center: sphere_center,
+            half_extent: [sphere_radius, sphere_radius, sphere_radius],
+        };
+        let w = self.bounds.width.max(1.0);
+        let h = self.bounds.height.max(1.0);
+        let cursor_td = (pos.x, h - pos.y);
+        let (ray_o, ray_d) = self.cam().screen_to_ray(cursor_td, (w, h));
+        pick_handle(std::slice::from_ref(&handle), ray_o, ray_d)?;
+        let start_matrix = self.read_node_matrix(sel_id)?;
+        // Anchor Z = projection of the drag-start ray onto the
+        // vertical line through (sphere_center.xy). The drag math
+        // subtracts this to get the per-frame delta.
+        let anchor_z = body_drag::z_axis_translation(
+            ray_o,
+            ray_d,
+            [sphere_center[0], sphere_center[1]],
+        )?;
+        Some(CameraDrag::DragBodyZ {
+            node_id: sel_id,
+            start_local: pos,
+            anchor_xy: [sphere_center[0], sphere_center[1]],
+            anchor_z,
+            start_matrix,
+        })
+    }
+
+    /// Mouse-down body pick + bed-plane anchor. Captures both pieces
+    /// up front so the `Selecting` state can either:
+    ///
+    /// * Become a click-select on mouse-up `!moved` (uses
+    ///   `picked_body`), or
+    /// * Promote to `DragBodyXY` on mouse-move past the 2-px
+    ///   threshold (uses `picked_body` + `anchor_bed_pt`).
+    ///
+    /// Both fields are independently optional: empty-space click has
+    /// neither (returns `(None, Some)` or `(None, None)`), and a
+    /// camera angle that's exactly parallel to the bed leaves
+    /// `anchor_bed_pt` `None` even when a body was hit (the drag
+    /// just doesn't promote — selection still works).
+    pub(super) fn pick_body_and_bed_anchor(
+        &self,
+        pos: Point,
+    ) -> (Option<NodeId>, Option<[f32; 3]>) {
+        let w = self.bounds.width.max(1.0);
+        let h = self.bounds.height.max(1.0);
+        let cursor_td = (pos.x, h - pos.y);
+        let (origin, dir) = self.cam().screen_to_ray(cursor_td, (w, h));
+        let picked = self
+            .current_geometry()
+            .and_then(|g| pick_origin(&g, origin, dir));
+        let bed = HitPlane {
+            point: [0.0, 0.0, 0.0],
+            normal: [0.0, 0.0, 1.0],
+        };
+        let anchor = bed.ray_intersect(origin, dir);
+        (picked, anchor)
     }
 
     /// Zoom-to-cursor: re-picks the scene at `pos` (mirrors

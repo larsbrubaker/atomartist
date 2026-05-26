@@ -122,6 +122,36 @@ impl OrbitCamera {
         camera_world.inverse().to_cols_array()
     }
 
+    /// World units one screen pixel covers at the given world point.
+    /// Camera-distance-proportional gizmos use this so the on-screen
+    /// size stays constant regardless of zoom — MatterCAD's
+    /// `GetWorldUnitsPerScreenPixelAtPosition` pattern.
+    ///
+    /// `viewport_height` is the framebuffer pixel height (the camera
+    /// only needs vertical extent since the projection uses
+    /// `fov_y`).
+    ///
+    /// * Perspective: distance from eye to `world_pos` along the
+    ///   view's forward axis × `tan(fov_y/2)` × `2 / viewport_height`.
+    /// * Orthographic: depth doesn't matter — the visible vertical
+    ///   extent is `2 * radius * tan(fov_y/2)` (matched at radius in
+    ///   `projection_matrix`).
+    pub fn world_units_per_pixel_at(&self, world_pos: [f32; 3], viewport_height: f32) -> f32 {
+        if viewport_height <= 0.5 {
+            return 1.0;
+        }
+        let half_h = match self.projection {
+            Projection::Perspective => {
+                let forward = (self.orientation * Vec3::Z).normalize_or_zero(); // points TOWARD eye
+                let eye = Vec3::from(self.eye());
+                let depth = (eye - Vec3::from(world_pos)).dot(forward).abs().max(1e-3);
+                depth * (self.fov_y * 0.5).tan()
+            }
+            Projection::Orthographic => self.radius * (self.fov_y * 0.5).tan(),
+        };
+        (half_h * 2.0) / viewport_height
+    }
+
     pub fn projection_matrix(&self, aspect: f32) -> [f32; 16] {
         // Critical: use the **wgpu / Vulkan / Metal**-style matrices
         // (no `_gl` suffix) so NDC z lands in [0, 1] rather than

@@ -220,6 +220,87 @@ fn noodle_add_through_bridge_lands_on_undo_stack() {
 }
 
 #[test]
+fn set_node_matrix_with_undo_round_trips() {
+    // Bed-plane drag + Z drag funnel through this helper. Single-call
+    // round trip should restore the original matrix.
+    let state = fixture();
+    let id = {
+        let mut g = state.graph.lock().unwrap();
+        g.add_new_node("Box", [0.0, 0.0], &state.registry).unwrap()
+    };
+    let original: [f32; 16] = {
+        let g = state.graph.lock().unwrap();
+        match g.get(id).unwrap().properties.get("matrix") {
+            Some(PortValue::Matrix4x4(m)) => *m,
+            other => panic!("expected default identity Matrix4x4, got {:?}", other),
+        }
+    };
+    let mut translated = original;
+    translated[12] = 5.0; // translate X +5
+    translated[13] = 3.0; // translate Y +3
+    state.set_node_matrix_with_undo(id, translated);
+    let after_set: [f32; 16] = {
+        let g = state.graph.lock().unwrap();
+        match g.get(id).unwrap().properties.get("matrix") {
+            Some(PortValue::Matrix4x4(m)) => *m,
+            other => panic!("expected Matrix4x4 after set, got {:?}", other),
+        }
+    };
+    assert!((after_set[12] - 5.0).abs() < 1e-6);
+    assert!((after_set[13] - 3.0).abs() < 1e-6);
+    state.undo.lock().unwrap().undo();
+    let after_undo: [f32; 16] = {
+        let g = state.graph.lock().unwrap();
+        match g.get(id).unwrap().properties.get("matrix") {
+            Some(PortValue::Matrix4x4(m)) => *m,
+            other => panic!("expected Matrix4x4 after undo, got {:?}", other),
+        }
+    };
+    assert_eq!(after_undo, original, "undo restores original matrix");
+}
+
+#[test]
+fn body_drag_coalesces_matrix_writes_into_single_step() {
+    // Simulates a 30-frame drag of a body across the bed. Each frame
+    // calls set_node_matrix_with_undo with the latest matrix. The
+    // undo stack must collapse into one step that restores the
+    // original (identity) matrix.
+    let state = fixture();
+    let id = {
+        let mut g = state.graph.lock().unwrap();
+        g.add_new_node("Box", [0.0, 0.0], &state.registry).unwrap()
+    };
+    let original: [f32; 16] = {
+        let g = state.graph.lock().unwrap();
+        match g.get(id).unwrap().properties.get("matrix") {
+            Some(PortValue::Matrix4x4(m)) => *m,
+            other => panic!("expected default identity, got {:?}", other),
+        }
+    };
+    for step in 1..=30 {
+        let mut m = original;
+        m[12] = step as f32 * 0.5;
+        m[13] = step as f32 * 0.25;
+        state.set_node_matrix_with_undo(id, m);
+    }
+    // Single Change Property undo step.
+    assert_eq!(
+        state.undo.lock().unwrap().undo_name(),
+        Some("Change Property"),
+        "30 matrix writes coalesce into one undo step",
+    );
+    state.undo.lock().unwrap().undo();
+    let after_undo: [f32; 16] = {
+        let g = state.graph.lock().unwrap();
+        match g.get(id).unwrap().properties.get("matrix") {
+            Some(PortValue::Matrix4x4(m)) => *m,
+            other => panic!("expected Matrix4x4 after undo, got {:?}", other),
+        }
+    };
+    assert_eq!(after_undo, original, "single undo restores the pre-drag matrix");
+}
+
+#[test]
 fn redo_branch_clears_on_new_mutation() {
     // After undo+new-action, the redo stack must clear — agg-gui's
     // standard semantics. Regression guard for the AppStateModel
