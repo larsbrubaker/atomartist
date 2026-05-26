@@ -313,6 +313,31 @@ mod tests {
                    "Transform with explicit blue must override upstream red");
     }
 
+    /// Transform overwrites the upstream Body's `origin` claim with its
+    /// own `NodeId` so a viewport click on the rendered (transformed)
+    /// box selects the Transform node, not the upstream Box. Matches
+    /// NodeDesigner's "click the displayed result → select the most-
+    /// downstream op" UX.
+    #[test]
+    fn transform_claims_origin_for_itself() {
+        let n = TransformNode;
+        let mesh = Arc::new(generate_box(1.0, 1.0, 1.0));
+        // Tag upstream with a deliberate (different) NodeId so we can
+        // see whether Transform overwrites it.
+        let upstream_node_id = NodeId(42);
+        let upstream = Body::from_mesh(mesh).with_origin(upstream_node_id);
+        let (inst, inputs) = setup_with_body(upstream);
+        let props = props_with(&[]);
+        let ctx = EvalCtx { instance: &inst, properties: &props, inputs: &inputs };
+        let outs = n.evaluate(&ctx).unwrap();
+        let body = first_body(&outs);
+        // The Transform's own NodeId is NodeId(1) (set in setup_with_body).
+        assert_eq!(body.origin, Some(NodeId(1)),
+                   "Transform should claim origin = its own NodeId; got {:?}", body.origin);
+        assert_ne!(body.origin, Some(upstream_node_id),
+                   "upstream Box's origin must be overwritten");
+    }
+
     /// Multi-body inputs: every body gets composed, not just the first.
     /// Per-body colours preserved.
     #[test]

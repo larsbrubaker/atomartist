@@ -4,7 +4,7 @@
 //! handling stay below the repository file-size guardrail.
 
 use super::*;
-use crate::picking::raycast_mesh;
+use crate::picking::{pick_origin, raycast_mesh};
 
 impl Viewport3dWidget {
     // `orbit_pivot_from_cursor` used to set
@@ -213,23 +213,20 @@ impl Viewport3dWidget {
         match prev {
             CameraDrag::None => EventResult::Ignored,
             CameraDrag::Selecting { moved, .. } if !moved => {
-                // Treat as a click: raycast against the displayed mesh
-                // and, if hit, mark its source node as selected. With
-                // only one displayed mesh today, that's whatever node
-                // the host is rendering.
-                let mesh_opt = self.current_mesh();
-                let display_id = *self.inputs.display_node.lock().unwrap();
-                if let (Some(mesh), Some(id)) = (mesh_opt, display_id) {
+                // Treat as a click: ray-test every body in the
+                // displayed Geometry3d. The hit body's `origin`
+                // (`NodeId` claim) becomes the selection — mirrors
+                // NodeDesigner's "click an object → select its node"
+                // UX. A hit on a body with no claim (None origin),
+                // or a click on empty space, clears the selection.
+                let geom_opt = self.current_geometry();
+                if let Some(geom) = geom_opt {
                     let w = self.bounds.width.max(1.0);
                     let h = self.bounds.height.max(1.0);
                     let cursor_top_down = (pos.x, h - pos.y);
                     let (origin, dir) = self.cam().screen_to_ray(cursor_top_down, (w, h));
-                    if raycast_mesh(&mesh, origin, dir).is_some() {
-                        *self.inputs.selection.lock().unwrap() = Some(id);
-                    } else {
-                        // Click on empty space clears selection.
-                        *self.inputs.selection.lock().unwrap() = None;
-                    }
+                    let picked = pick_origin(&geom, origin, dir);
+                    *self.inputs.selection.lock().unwrap() = picked;
                 } else {
                     *self.inputs.selection.lock().unwrap() = None;
                 }

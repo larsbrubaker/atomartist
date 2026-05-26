@@ -19,7 +19,11 @@
 //! — every UI test point is sub-millisecond. An AABB / BVH accelerator is
 //! a future optimisation when scenes grow.
 
+use glam::{Mat4, Vec3};
 use manifold_rust::types::MeshGL;
+
+use atomartist_lib::geometry::Geometry3d;
+use atomartist_lib::graph::node::NodeId;
 
 use crate::camera::OrbitCamera;
 
@@ -63,6 +67,67 @@ pub fn raycast_mesh(
         }
     }
     closest.map(|(_, p)| p)
+}
+
+/// Multi-body picking. For every body in `geometry`, transforms the
+/// world-space `(origin, direction)` ray into the body's local space
+/// via `body.matrix.inverse()`, ray-tests against the body's mesh, and
+/// keeps the closest world-space hit. Returns the hit body's
+/// `origin` claim (its source [`NodeId`]) when a body is hit, or
+/// `None` when the ray misses every body / the hit body has no claim.
+///
+/// Each body's mesh lives in local space now that pure-transform ops
+/// compose into `Body.matrix` rather than baking — so the ray has to
+/// be transformed per body. Matrix inversion is per-body-per-click,
+/// which is cheap for the body counts AtomArtist sees (single digits
+/// to low hundreds).
+///
+/// Implements NodeDesigner's "click in 3-D viewport → select origin
+/// node" UX. Most-downstream pure-transform op claims the body
+/// (Transform overwrites Box's claim), so a click on the rendered
+/// `Box → Transform` result selects Transform. Combine / Output
+/// preserve per-body claims (they're aggregators), so clicking either
+/// of two combined boxes selects the originating Box.
+pub fn pick_origin(
+    geometry: &Geometry3d,
+    ray_origin: [f32; 3],
+    ray_direction: [f32; 3],
+) -> Option<NodeId> {
+    let ray_origin_v = Vec3::from(ray_origin);
+    let mut closest: Option<(f32, Option<NodeId>)> = None;
+    for body in geometry.iter() {
+        // Local-space ray = inverse(body.matrix) · world ray. Skip the
+        // body if the matrix is singular.
+        let m = Mat4::from_cols_array(&body.matrix);
+        let det = m.determinant();
+        if !det.is_finite() || det.abs() < 1e-12 {
+            continue;
+        }
+        let inv = m.inverse();
+        let local_origin = inv.transform_point3(ray_origin_v);
+        let local_dir = inv.transform_vector3(Vec3::from(ray_direction));
+        // Normalize the local direction so `raycast_mesh`'s `t` values
+        // are local-space distances; world-space distance for closest-
+        // hit comparison comes from re-transforming the hit point
+        // through `m` and measuring against the camera origin.
+        let local_dir_n = match local_dir.try_normalize() {
+            Some(d) => d,
+            None => continue,
+        };
+        if let Some(hit_local) = raycast_mesh(
+            &body.mesh,
+            local_origin.to_array(),
+            local_dir_n.to_array(),
+        ) {
+            let hit_world = m.transform_point3(Vec3::from(hit_local));
+            let dist = (hit_world - ray_origin_v).length();
+            match closest {
+                Some((d, _)) if dist >= d => {}
+                _ => closest = Some((dist, body.origin)),
+            }
+        }
+    }
+    closest.and_then(|(_, id)| id)
 }
 
 /// Fallback pivot when [`raycast_mesh`] misses: project the cursor ray
@@ -404,5 +469,78 @@ mod tests {
                 cam.center[k]
             );
         }
+    }
+
+    // ──────────────────────────────────────────────────────────
+    // pick_origin (multi-body picking) tests
+    // ──────────────────────────────────────────────────────────
+
+    use atomartist_lib::geometry::{Body, Geometry3d};
+    use atomartist_lib::graph::node::{identity_matrix, NodeId};
+    use std::sync::Arc;
+
+    /// Build a unit triangle Body at world position `tx`. Triangle lies
+    /// in the z=0 plane spanning `[-0.5..+0.5, -0.5..+0.5]` in local
+    /// coordinates; the body's matrix translates it to `(tx, 0, 0)`.
+    fn body_at(tx: f32, origin: Option<NodeId>) -> Body {
+        let mesh = single_tri([-0.5, -0.5, 0.0], [0.5, -0.5, 0.0], [0.0, 0.5, 0.0]);
+        let mut m = identity_matrix();
+        m[12] = tx;
+        Body {
+            mesh: Arc::new(mesh),
+            matrix: m,
+            color: [1.0, 1.0, 1.0, 1.0],
+            vertex_colors: None,
+            origin,
+        }
+    }
+
+    #[test]
+    fn pick_origin_returns_hit_body_origin() {
+        // One body translated to x=3; ray aimed at x=3, z=0.
+        let geo = Geometry3d::from_body(body_at(3.0, Some(NodeId(7))));
+        let picked = pick_origin(&geo, [3.0, 0.0, 5.0], [0.0, 0.0, -1.0]);
+        assert_eq!(picked, Some(NodeId(7)));
+    }
+
+    #[test]
+    fn pick_origin_returns_none_when_ray_misses() {
+        let geo = Geometry3d::from_body(body_at(3.0, Some(NodeId(7))));
+        // Ray aimed at x=100 — no body there.
+        let picked = pick_origin(&geo, [100.0, 0.0, 5.0], [0.0, 0.0, -1.0]);
+        assert_eq!(picked, None);
+    }
+
+    #[test]
+    fn pick_origin_picks_closest_body_when_two_overlap_in_screen_space() {
+        // Two bodies, both at x=0 but one at z=1 and the other at z=-2.
+        // A ray from (0, 0, 5) pointing down hits the z=1 body first.
+        let mut closer = body_at(0.0, Some(NodeId(10)));
+        closer.matrix[14] = 1.0;
+        let mut farther = body_at(0.0, Some(NodeId(20)));
+        farther.matrix[14] = -2.0;
+        let geo = Geometry3d::from_bodies(vec![farther, closer]);
+        let picked = pick_origin(&geo, [0.0, 0.0, 5.0], [0.0, 0.0, -1.0]);
+        assert_eq!(picked, Some(NodeId(10)), "closer body (z=1) should win");
+    }
+
+    #[test]
+    fn pick_origin_returns_none_when_hit_body_has_no_claim() {
+        // A body without an origin claim suppresses selection rather
+        // than guessing (matches NodeDesigner: no claim = no selection).
+        let geo = Geometry3d::from_body(body_at(0.0, None));
+        let picked = pick_origin(&geo, [0.0, 0.0, 5.0], [0.0, 0.0, -1.0]);
+        assert_eq!(picked, None);
+    }
+
+    #[test]
+    fn pick_origin_skips_bodies_with_singular_matrices() {
+        // Singular matrix (all zero) — body must be skipped, not crash.
+        let mut bad = body_at(0.0, Some(NodeId(99)));
+        bad.matrix = [0.0; 16];
+        let good = body_at(0.0, Some(NodeId(42)));
+        let geo = Geometry3d::from_bodies(vec![bad, good]);
+        let picked = pick_origin(&geo, [0.0, 0.0, 5.0], [0.0, 0.0, -1.0]);
+        assert_eq!(picked, Some(NodeId(42)), "good body should still match");
     }
 }

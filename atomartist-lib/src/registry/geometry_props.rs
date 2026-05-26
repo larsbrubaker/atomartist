@@ -100,11 +100,17 @@ pub fn compose_with_upstream(ctx: &EvalCtx, upstream: &Body) -> Body {
     } else {
         ctx_color
     };
+    // Origin claim: the consuming op overwrites upstream's claim with
+    // its own NodeId. Mirrors NodeDesigner's "click the displayed
+    // result of Transform → select Transform" UX. Aggregators (Combine,
+    // Output) don't call compose_with_upstream so they preserve
+    // per-body claims by construction.
     Body {
         mesh: upstream.mesh.clone(),
         matrix: composed_matrix,
         color: composed_color,
         vertex_colors: upstream.vertex_colors.clone(),
+        origin: Some(ctx.instance.id),
     }
 }
 
@@ -136,6 +142,7 @@ pub fn compose_with_upstream_and_mesh(
         matrix: ctx_matrix,
         color: composed_color,
         vertex_colors: None,
+        origin: Some(ctx.instance.id),
     }
 }
 
@@ -158,5 +165,6 @@ pub fn wrap_mesh(ctx: &EvalCtx, mesh: MeshGL) -> Geometry3d {
         matrix,
         color,
         vertex_colors: None,
+        origin: Some(ctx.instance.id),
     })
 }

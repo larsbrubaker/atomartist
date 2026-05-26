@@ -310,6 +310,43 @@ mod tests {
     }
 
     #[test]
+    fn combine_preserves_per_body_origin_claims() {
+        // Combine is an aggregator — it just clones bodies through.
+        // Each upstream Box claims its own origin; after Combine,
+        // every body still points back to its source Box, so a
+        // viewport click on either rendered box selects the
+        // originating Box node (not Combine).
+        let reg = registry();
+        let mut g = Graph::new();
+        let bx1 = g.add_new_node("Box", [0.0, 0.0], &reg).unwrap();
+        let bx2 = g.add_new_node("Box", [100.0, 0.0], &reg).unwrap();
+        let c = g.add_new_node("Combine", [200.0, 0.0], &reg).unwrap();
+        let bx1_out = g.get(bx1).unwrap().output_by_name("out").unwrap().uid;
+        let bx2_out = g.get(bx2).unwrap().output_by_name("out").unwrap().uid;
+        let e1 = g.get(c).unwrap().inputs[0].uid;
+        g.connect(Noodle::new(bx1, bx1_out, c, e1), &reg).unwrap();
+        let e2 = g.get(c).unwrap().inputs.last().unwrap().uid;
+        g.connect(Noodle::new(bx2, bx2_out, c, e2), &reg).unwrap();
+
+        evaluate_all(&mut g, &reg).unwrap();
+        let out_uid = g.get(c).unwrap().output_by_name("out").unwrap().uid;
+        match g.get(c).unwrap().cached_outputs.get(&out_uid) {
+            Some(PortValue::Geometry3d(geo)) => {
+                assert_eq!(geo.len(), 2);
+                let origins: Vec<_> = geo.iter().map(|b| b.origin).collect();
+                assert!(origins.contains(&Some(bx1)),
+                        "first Box's NodeId must survive Combine; got {:?}", origins);
+                assert!(origins.contains(&Some(bx2)),
+                        "second Box's NodeId must survive Combine; got {:?}", origins);
+                // Combine itself must NOT claim — it's an aggregator.
+                assert!(!origins.contains(&Some(c)),
+                        "Combine must not overwrite per-body origins; got {:?}", origins);
+            }
+            other => panic!("expected Geometry3d, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn evaluate_skips_disconnected_slots() {
         // Just the placeholder slot → empty body group.
         let reg = registry();

@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use manifold_rust::types::MeshGL;
 
-use crate::graph::node::identity_matrix;
+use crate::graph::node::{identity_matrix, NodeId};
 
 /// Default mesh tint when a body hasn't been given a colour — matches
 /// the renderer's historical `base_color` (a desaturated blue-grey)
@@ -97,17 +97,28 @@ pub struct Body {
     /// the cached output bodies. `None` means "use `color` uniform
     /// for every vertex" — the common case for primitive nodes.
     pub vertex_colors: Option<Arc<Vec<f32>>>,
+    /// The node that produced this body — the "claim" used by viewport
+    /// click-to-select. Primitives set this to their own `NodeId`;
+    /// pure-transform ops (Transform, FitToBounds, Align) *overwrite*
+    /// upstream's claim with their own, so clicking the rendered
+    /// result of `Box → Transform` selects the Transform node (the
+    /// most-downstream op in the chain). Combine / Output preserve
+    /// upstream claims since they're aggregators, not operators.
+    /// `None` is the "no claim" sentinel — clicking such a body
+    /// selects nothing rather than guessing.
+    pub origin: Option<NodeId>,
 }
 
 impl Body {
-    /// Body with identity transform, the default tint, and no
-    /// per-vertex colour overlay.
+    /// Body with identity transform, the default tint, no per-vertex
+    /// colour overlay, and no origin claim.
     pub fn from_mesh(mesh: Arc<MeshGL>) -> Self {
         Self {
             mesh,
             matrix: identity_matrix(),
             color: DEFAULT_GEOMETRY_COLOR,
             vertex_colors: None,
+            origin: None,
         }
     }
 
@@ -129,6 +140,14 @@ impl Body {
     /// per-body vs per-vertex distinction.
     pub fn with_vertex_colors(mut self, colors: Arc<Vec<f32>>) -> Self {
         self.vertex_colors = Some(colors);
+        self
+    }
+
+    /// Builder-style override of the origin claim. Primitives and
+    /// pure-transform ops set this to `ctx.instance.id` so a click on
+    /// the rendered body selects the node that owns it.
+    pub fn with_origin(mut self, origin: NodeId) -> Self {
+        self.origin = Some(origin);
         self
     }
 

@@ -97,6 +97,7 @@ impl NodeDef for MeshNode {
                 matrix,
                 color,
                 vertex_colors: None,
+                origin: Some(ctx.instance.id),
             });
             out.set("out", PortValue::Geometry3d(Arc::new(geom)));
         }
