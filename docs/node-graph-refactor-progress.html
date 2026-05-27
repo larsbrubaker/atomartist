@@ -124,7 +124,7 @@ hr { border: 0; border-top: 1px dashed var(--rule); margin: 32px 0 20px; }
 <p class="subtitle">
   Outstanding-work catalogue. Completed clusters are intentionally removed so
   this stays useful as a pickup list. Reference sources at
-  <code class="ref-nd">C:\Development\FDS\NodeDesigner</code> (JS / TS)
+  <code class="ref-nd">C:\Development\MatterHackers\FDS\NodeDesigner</code> (JS / TS)
   and <code class="ref-mc">C:\Development\MatterCAD</code> (C#).
 </p>
 
@@ -229,11 +229,12 @@ hr { border: 0; border-top: 1px dashed var(--rule); margin: 32px 0 20px; }
   <li><strong>Threads (v2)</strong> — <code class="ref-mc">.../Mechanical/ThreadsObject3D_2.cs</code>. Helical sweep.</li>
 </ul>
 
-<h3>1.6 Structural / hierarchy nodes <span class="badge gap">requires graph extension</span></h3>
+<h3>1.6 Components / hierarchy <span class="badge gap">requires graph extension</span></h3>
 <ul>
-  <li><strong>Group / Ungroup</strong> — <code class="ref-mc">.../Operations/GroupObject3D.cs</code>. Multi-body passthrough that's editable as a unit on the canvas. Renderer already iterates bodies; the editing UX is the work.</li>
-  <li><strong>Component</strong> — <code class="ref-mc">.../Objects3D/ComponentObject3D.cs</code>. A reusable subgraph saved to disk and dropped in by reference. Our existing <code>SubgraphNode</code> covers the in-document case; component-as-file needs an asset-ref + reload pipeline.</li>
-  <li><strong>Selection Group</strong> — <code class="ref-mc">.../Objects3D/SelectionGroupObject3D.cs</code>. Selects a subset of bodies from a multi-body input. Pairs with the body-picker work flagged in §3.</li>
+  <li><strong>NodeDesigner-style Components</strong> — implement NodeDesigner's component model, not MatterCAD's <code>GroupObject3D</code> / <code>ComponentObject3D</code> object model. A component is a reusable subgraph stored inside the current <code>.atmr</code> as its own JSON document (NodeDesigner-style separate graph document), with component instances in the parent graph. The existing <code>SubgraphNode</code> covers part of the evaluation shape; remaining work is persistence, instance metadata, edit navigation, and UI affordances.</li>
+  <li><strong>Full NodeDesigner input / output socket model</strong> — components require robust parity with NodeDesigner's graph boundary sockets, not just the current minimal GraphInput + Output bridge. Component definitions need stable input / output socket identity, names, display labels, type propagation, reorder / rename persistence, dynamic output adoption, and correct noodle remapping when a selection is extracted into a component. This should be implemented as a first-class component-port contract before the Save Selection as Component workflow ships.</li>
+  <li><strong>Component drill-down editor</strong> — NodeDesigner opens component graphs in new tabs. AtomArtist should feel more like folder navigation: entering a component replaces the canvas with that component graph, and a breadcrumb bar shows the path back to the top-level graph. Breadcrumb segments should be clickable so users understand where they are and can climb back up without losing context.</li>
+  <li><strong>Save selection as Component</strong> — context-menu action matching the intended NodeDesigner workflow: selected nodes are extracted into a new embedded component graph JSON, parent graph receives a component instance, internal noodles are preserved, and external noodles become boundary ports through the full NodeDesigner-style component input / output socket model.</li>
   <li><strong>Description</strong> — <code class="ref-mc">.../Objects3D/DescriptionObject3D.cs</code>. Comment / annotation node, no geometry output.</li>
   <li><strong>Measure Tool</strong> — <code class="ref-mc">.../Objects3D/MeasureToolObject3D.cs</code>. Outputs distance / angle scalars from picked points. Pairs with the measurement-overlay viewport work.</li>
 </ul>
@@ -273,7 +274,7 @@ hr { border: 0; border-top: 1px dashed var(--rule); margin: 32px 0 20px; }
     <td>missing — needs a sandboxed expression evaluator (numeric literals + variable refs to other properties / scene fields)</td></tr>
 <tr><td><strong>SelectedChildren</strong> (pick body / pick sub-object)</td>
     <td><code class="ref-mc">.../PropertyEditors/SelectedChildrenPropertyEditor.cs</code></td>
-    <td>missing — pairs with body picker in §1.7 and Selection Group in §1.6</td></tr>
+    <td>missing — pairs with body picker / filter nodes in §3 and the field-style predicates in §1.7</td></tr>
 <tr><td><strong>ImageBuffer preview / picker</strong></td>
     <td><code class="ref-mc">.../PropertyEditors/ImageBufferPropertyEditor.cs</code></td>
     <td>missing — needs asset-ref picker UI; engine asset path already exists for mesh imports</td></tr>
@@ -363,7 +364,8 @@ hr { border: 0; border-top: 1px dashed var(--rule); margin: 32px 0 20px; }
 <h3>5.1 Selection + manipulation</h3>
 <ul>
   <li><strong>Copy / cut / paste / duplicate</strong> — NodeDesigner's <code class="ref-nd">canvas.copyToClipboard / pasteFromClipboard</code> + <code>ui/edit-menu-actions.js</code>. We have deletion; clipboard ops are missing. Tricky bits: socket UIDs must regenerate on paste, noodles inside the pasted subgraph must remap.</li>
-  <li><strong>Group / ungroup</strong> — collapse selection to a <code>GroupObject3D</code>-style container, expand back. Pairs with §1.6.</li>
+  <li><strong>Save selection as Component</strong> — extract selected nodes into an embedded component graph, replace the selection with a component instance, and preserve external graph connectivity through the full NodeDesigner-style component input / output socket model. This is the hierarchy workflow to implement instead of MatterCAD-style group / ungroup.</li>
+  <li><strong>Enter / exit component navigation</strong> — double-click or context-menu enter should drill into a component graph; breadcrumbs replace NodeDesigner's tabbed component editing and provide the way back to the parent / top-level graph.</li>
   <li><strong>Marquee / rubber-band selection</strong> — selection state and shift-click multi-select are in place; the missing piece is drag-selecting a rectangle of nodes (plus the visual in §4.2).</li>
   <li><strong>Alignment / distribution tools</strong> — MatterCAD has Align-Left / Center-Horiz / Distribute-Vertical etc. as menu actions on the selected nodes (or selected 3-D objects). Map both layers.</li>
 </ul>
@@ -382,7 +384,7 @@ hr { border: 0; border-top: 1px dashed var(--rule); margin: 32px 0 20px; }
 <ul>
   <li><strong>New mutation paths land with their command.</strong>
     Future rotate / bounds-edit / handle-mesh gizmos (§4.1), context-menu
-    Duplicate / Group / Mute / Bypass (§5.3), inline rename (§5.3),
+    Duplicate / Save as Component / Mute / Bypass (§5.3), inline rename (§5.3),
     drag-reorder sockets (§5.3), selection-marquee actions (§5.1), and
     file-load itself (currently clears history — could capture pre-load
     state for "Undo Load"). Each new action must push a matching
@@ -429,14 +431,14 @@ hr { border: 0; border-top: 1px dashed var(--rule); margin: 32px 0 20px; }
   <li><strong>Node search palette</strong> — <code class="ref-nd">core/node-search.js</code>. Fuzzy-match by title + type, grouped by category, sortable by relevance. Triggered by Tab or a "+" button.</li>
   <li><strong>Inline rename</strong> — node title + socket name. <code>Graph::rename_socket</code> exists; canvas-side inline-edit widget is not built.</li>
   <li><strong>Drag-reorder input sockets</strong> — engine ready (<code>Graph::reorder_input_sockets</code>); canvas-side row-drag handler is not.</li>
-  <li><strong>Right-click context menu expansion</strong> — current menu has Delete + Add. NodeDesigner / MatterCAD versions cover Duplicate, Group, Make Component, Change Colour, Set Output Type (Solid / Hole), Disable, Mute, Bypass, Comment, Frame.</li>
+  <li><strong>Right-click context menu expansion</strong> — current menu has Delete + Add. Add NodeDesigner-style Cut / Copy / Paste / Rename / Clone / About, plus Component → Save Selection as Component and Enter Component when the selection is a component instance. Other future entries: Change Colour, Set Output Type (Solid / Hole), Disable, Mute, Bypass, Comment, Frame.</li>
   <li><strong>Comment / frame nodes</strong> — visual-only nodes that group + caption a region of the canvas. NodeDesigner has it; we don't.</li>
   <li><strong>Mute / bypass</strong> — disable a node temporarily without disconnecting (passes input through).</li>
 </ul>
 
 <h3>5.4 Keyboard shortcuts</h3>
 <ul>
-  <li><strong>Canvas remaining:</strong> Ctrl-C / V / X / D (copy / paste / cut / duplicate), Ctrl-A (select all — menu item exists but needs the selection action), Ctrl-G / Ctrl-Shift-G (group / ungroup), Tab (search palette), F2 (rename), Esc (cancel drag / clear selection). Delete / Backspace are wired for selected-node deletion; undo / redo are wired through the Edit menu.</li>
+  <li><strong>Canvas remaining:</strong> Ctrl-C / V / X / D (copy / paste / cut / duplicate), Ctrl-A (select all — menu item exists but needs the selection action), a shortcut for Save Selection as Component, Tab (search palette), F2 (rename), Esc (cancel drag / clear selection or go up one component level when inside a component). Delete / Backspace are wired for selected-node deletion; undo / redo are wired through the Edit menu.</li>
   <li><strong>3-D viewport remaining:</strong> 1-7 numpad for view presets (front / back / top / bottom / left / right / iso), F (frame selection), W (wireframe), S (shaded), L (hidden-line once it exists). Perspective ↔ orthographic is already exposed through the HUD button.</li>
 </ul>
 
@@ -460,6 +462,7 @@ hr { border: 0; border-top: 1px dashed var(--rule); margin: 32px 0 20px; }
   </li>
   <li><strong>Native AtomArtist project format extensions</strong> — current <code>.atmr</code> is a zip container with <code>graph.json</code> and embedded assets. Remaining polish:
     <ul>
+      <li>Embedded component graph documents, e.g. <code>components/&lt;component-id&gt;.json</code>, stored beside the top-level <code>graph.json</code> inside the <code>.atmr</code>. Each document should use the same graph JSON schema but have its own boundary input / output socket metadata.</li>
       <li>Project manifest / magic entry so an arbitrary zip can be rejected before parsing <code>graph.json</code>.</li>
       <li>Format-version migration ladder for future schema bumps.</li>
       <li>Recent-files list and richer autosave / recovery UX in the native shell.</li>
@@ -471,6 +474,7 @@ hr { border: 0; border-top: 1px dashed var(--rule); margin: 32px 0 20px; }
 <h2>7. Graph engine extensions</h2>
 <ul>
   <li><strong>Evaluation scheduling hardening</strong> — native builds already run <code>schedule_evaluate</code> on a background thread (WASM stays synchronous). Missing NodeDesigner-style pieces from <code class="ref-nd">matter-graph-async-execution.js</code>: debouncing, cancellation / stale-result suppression when a parameter changes mid-run, and a bounded worker model for heavy ops.</li>
+  <li><strong>Component port model</strong> — required by §1.6 before components are user-facing. Treat component inputs / outputs as stable graph-boundary socket declarations with their own UIDs, labels, order, types, and persisted metadata. Parent component instances must mirror those ports reliably, and edits inside the component must propagate to existing instances without breaking saved noodles.</li>
   <li><strong>Expression evaluation in number fields</strong> — see §2 (the <code>*OrExpression</code> editors). Cross-cuts engine + property panel: properties become formulas referencing other properties by name (<code>$radius * 2 + 0.5</code>). Sandboxed evaluator with variable lookup against the node's own properties + scene globals.</li>
   <li><strong>Drivers / animated values</strong> — NodeDesigner has time-driven node parameters. Lower priority unless animation export is on the roadmap.</li>
   <li><strong>Source-side hooks</strong> — engine has <code>on_input_connected</code> / <code>_disconnected</code> / <code>validate_input_connection</code>. Symmetric output-side hooks not implemented. Add when a node needs to react to its consumers.</li>
@@ -527,7 +531,9 @@ hr { border: 0; border-top: 1px dashed var(--rule); margin: 32px 0 20px; }
   <li class="path">tests/primitives_axis.rs — Z-up axis assertions per primitive</li>
   <li class="path">registry.rs — <code>NodeDef</code> trait + <code>row_visible</code> hook (Rust analog of <code>IPropertyGridModifier.UpdateControls</code>)</li>
   <li class="path">registry/geometry_props.rs — <code>geometry_props()</code> + <code>op_props()</code> (INHERIT_COLOR default) + <code>wrap_mesh(ctx, mesh)</code> + <code>compose_with_upstream(ctx, upstream)</code> for transform composition</li>
+  <li class="path">nodes/io/graph_input_node.rs — current graph-boundary input node; expand with NodeDesigner-style component input socket metadata</li>
   <li class="path">nodes/output_node.rs — dynamic Output node (concatenates upstream bodies)</li>
+  <li class="path">nodes/subgraph_node.rs — current in-document component evaluation shape; evolve into the NodeDesigner component instance once embedded component graph documents and full port metadata land</li>
   <li class="path">serialization/graph_json.rs — format v2 (uid-keyed)</li>
 </ul>
 
@@ -561,6 +567,7 @@ hr { border: 0; border-top: 1px dashed var(--rule); margin: 32px 0 20px; }
   <li><code>cargo test --workspace</code> — 500+ passing at this snapshot. The <code>first_party_project_files_stay_under_line_limit</code> test is the canonical line-cap reporter.</li>
   <li><code>cargo check -p demo-wasm --target wasm32-unknown-unknown</code> — must stay clean.</li>
   <li><strong>§4.1 remaining gizmos (XY edge arrows / rotate / bounds-edit / handle-meshes)</strong> — body XY drag and Z-control drag landed; XY edge arrows, rotate-corner, and bounds-edit are next. Same pattern: extend <code>CameraDrag</code> with a new variant, write the per-frame math in <code>viewport_widget/body_drag.rs</code>, and push through <code>set_node_matrix_with_undo</code> or the relevant property command.</li>
+  <li>Or pick §1.6 Components: first harden the NodeDesigner-style input / output socket model, then add embedded component JSON documents in <code>.atmr</code>, component instances, Save Selection as Component, and breadcrumb drill-down navigation.</li>
   <li>Or pick a single §1.x node cluster and finish it (small primitives, transform variants, deformations, path ops, generators, structural nodes, fields). Each cluster's NodeDef + tests + property panel row + node-search palette listing should land together.</li>
   <li>Or pick §5.3 (canvas affordances — node search palette, inline rename, drag-reorder, expanded context menu, comment / frame nodes). The undo stack handles every action through the existing AppStateModel commands once new mutations route through it.</li>
   <li>Test-first bug-fixing rule per <code>CLAUDE.md</code> — if a port reveals a bug, write the reproducing test before the fix.</li>
