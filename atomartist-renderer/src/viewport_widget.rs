@@ -674,14 +674,11 @@ impl Widget for Viewport3dWidget {
         }
         let selection_active = self.inputs.selection.lock().unwrap().is_some();
         let outline_width = mesh_opt.as_deref().map(estimate_outline_width).unwrap_or(0.05);
-        let bounds_aabb =
-            mesh_opt.as_deref().and_then(mesh_aabb).filter(|_| selection_active);
         self.populate_scene_state(
             bodies,
             first_body.as_ref(),
             selection_active,
             outline_width,
-            bounds_aabb,
             [visuals.accent.r, visuals.accent.g, visuals.accent.b, 1.0],
         );
 

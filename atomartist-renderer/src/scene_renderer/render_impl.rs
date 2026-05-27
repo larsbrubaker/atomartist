@@ -22,6 +22,64 @@ use super::timings::{elapsed_ms, log_scene_timings, SceneTimings};
 use super::util::normalize3;
 use super::{RenderStyle, WgpuSceneRenderer};
 
+/// Cache key for the bed-shadow chain. Hashes mesh pointer + matrix
+/// per body so a drag (mesh ptr unchanged, matrix shifts) rolls the
+/// key and forces the shadow to re-render at the body's new
+/// position. Without the matrix term the shadow cache would hit and
+/// the silhouette would stick under the body's pre-drag position.
+///
+/// Quantised to integers (`1e4` factor) to silence trivial fp
+/// noise from matrix recomposition.
+pub(crate) fn shadow_cache_key(bodies: &[atomartist_lib::geometry::Body]) -> u64 {
+    bodies.iter().fold(0u64, |acc, b| {
+        let mesh_ptr = b.mesh.vert_properties.as_ptr() as usize as u64;
+        let mut k = acc.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ mesh_ptr;
+        for &f in &b.matrix {
+            let q = (f * 1e4).round() as i64 as u64;
+            k = k.wrapping_mul(0x100000001B3) ^ q;
+        }
+        k
+    })
+}
+
+#[cfg(test)]
+mod shadow_key_tests {
+    use super::shadow_cache_key;
+    use atomartist_lib::geometry::Body;
+    use manifold_rust::types::MeshGL;
+    use std::sync::Arc;
+
+    fn body() -> Body {
+        let mesh = Arc::new(MeshGL {
+            num_prop: 6,
+            vert_properties: vec![0.0; 6],
+            tri_verts: vec![0, 0, 0],
+            ..Default::default()
+        });
+        Body::from_mesh(mesh)
+    }
+
+    #[test]
+    fn key_changes_when_a_body_moves() {
+        // Mesh data identical, only matrix shifts → shadow cache
+        // MUST treat this as a different scene so the silhouette
+        // re-rasterises at the new position.
+        let a = body();
+        let mut b = a.clone();
+        b.matrix[12] = 5.0; // translate X
+        let k_a = shadow_cache_key(&[a]);
+        let k_b = shadow_cache_key(&[b]);
+        assert_ne!(k_a, k_b, "matrix shift must roll the shadow key");
+    }
+
+    #[test]
+    fn key_stable_for_identical_bodies() {
+        let a = body();
+        let b = a.clone();
+        assert_eq!(shadow_cache_key(&[a]), shadow_cache_key(&[b]));
+    }
+}
+
 impl WgpuCustomRender for WgpuSceneRenderer {
     fn render(&mut self, ctx: WgpuCustomRenderCtx<'_>) {
         let t_total = web_time::Instant::now();
@@ -203,14 +261,7 @@ impl WgpuCustomRender for WgpuSceneRenderer {
                     body_index: i as u32,
                 })
                 .collect();
-            // Composite cache key: hash all body mesh_ptrs so the
-            // shadow chain rebuilds when any body changes.
-            let shadow_caster_key = s
-                .bodies_gpu
-                .iter()
-                .fold(0u64, |acc, b| {
-                    acc.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (b.mesh_ptr as u64)
-                });
+            let shadow_caster_key = shadow_cache_key(&self.bodies);
             bed_ran_chain = s.bed.render_to_composite(
                 ctx.device,
                 ctx.queue,
@@ -342,8 +393,17 @@ impl WgpuCustomRender for WgpuSceneRenderer {
             && self.render_style == RenderStyle::Shaded
             && !s.bodies_gpu.is_empty();
         if want_outline {
-            if let (Some(body), Some(outline_targets)) =
-                (s.bodies_gpu.first(), &s.outline_targets)
+            // Pick the body to outline: host-supplied index (matches
+            // the body whose origin == active selection), or the
+            // first body when no index was set / out of range. The
+            // selection state lives on the host side (viewport
+            // `ViewportInputs::selection`), so the renderer never
+            // looks up origin → body itself.
+            let outline_body = self
+                .outline_body_index
+                .and_then(|i| s.bodies_gpu.get(i))
+                .or_else(|| s.bodies_gpu.first());
+            if let (Some(body), Some(outline_targets)) = (outline_body, &s.outline_targets)
             {
                 let outline_u = OutlineUniforms {
                     mvp,

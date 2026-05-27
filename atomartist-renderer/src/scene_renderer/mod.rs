@@ -321,6 +321,13 @@ pub struct WgpuSceneRenderer {
     /// World-space outline thickness — set by the host based on the mesh's
     /// bounding-box extent so it scales sensibly across model sizes.
     pub outline_width: f32,
+    /// Which body in `bodies` the outline silhouette should rim.
+    /// `None` (or out-of-range) → first body, so a single-body scene
+    /// keeps working without the host pre-computing the index. Host
+    /// (viewport) sets this to the body whose `origin` matches the
+    /// active selection so clicking body 2 of a multi-body group
+    /// outlines body 2, not body 0.
+    pub outline_body_index: Option<usize>,
     /// Surface render style — picked by the render-style picker beneath
     /// the tumble cube.  Drives the shaded vs outline-only vs wireframe
     /// branch in the main pass.
@@ -384,6 +391,7 @@ impl WgpuSceneRenderer {
             outline_enabled: false,
             outline_color: [1.0, 0.55, 0.10, 1.0],
             outline_width: 0.05,
+            outline_body_index: None,
             render_style: RenderStyle::Shaded,
             gizmo_lines: Vec::new(),
             gizmo_triangles: Vec::new(),

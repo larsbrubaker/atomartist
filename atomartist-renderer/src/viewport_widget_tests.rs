@@ -49,6 +49,96 @@ fn widget_constructs_and_lays_out() {
     assert_eq!(s.height, 300.0);
 }
 
+/// Build a viewport with `bounds` set and a single body wired
+/// through `last_mesh_output`. Used by the click-select tests
+/// below — they need a real Geometry3d to ray-test against and a
+/// known viewport rect for the cursor coords.
+fn viewport_with_one_body(node_id: atomartist_lib::graph::node::NodeId) -> Viewport3dWidget {
+    use atomartist_lib::geometry::{Body, Geometry3d};
+    let inputs = empty_inputs();
+    let mesh = std::sync::Arc::new(atomartist_lib::geometry::generate_box(20.0, 20.0, 20.0));
+    let mut body = Body::from_mesh(mesh);
+    body.origin = Some(node_id);
+    *inputs.last_mesh_output.lock().unwrap() =
+        Some(std::sync::Arc::new(Geometry3d::from_body(body)));
+    let mut w = Viewport3dWidget::new(inputs);
+    let _ = w.layout(Size::new(400.0, 300.0));
+    w
+}
+
+/// Synthesise the full Widget event flow (note_mouse_down/up +
+/// on_mouse_X) so the safety net inside `on_mouse_move` sees the
+/// real pressed-buttons state. Calling the inner `on_mouse_*`
+/// methods directly skips `note_mouse_down` — the safety net then
+/// clears the drag on the very next move, which doesn't match
+/// production behaviour.
+fn fire(w: &mut Viewport3dWidget, ev: Event) {
+    use agg_gui::Widget;
+    w.on_event(&ev);
+}
+
+#[test]
+fn click_without_drag_selects_clicked_body() {
+    use agg_gui::Modifiers;
+    let node_id = atomartist_lib::graph::node::NodeId(42);
+    let mut w = viewport_with_one_body(node_id);
+    assert_eq!(*w.inputs.selection.lock().unwrap(), None);
+    let centre = Point { x: 200.0, y: 150.0 };
+    fire(&mut w, Event::MouseDown { pos: centre, button: MouseButton::Left, modifiers: Modifiers::default() });
+    fire(&mut w, Event::MouseUp { pos: centre, button: MouseButton::Left, modifiers: Modifiers::default() });
+    assert_eq!(
+        *w.inputs.selection.lock().unwrap(),
+        Some(node_id),
+        "click on a body must select that body's origin NodeId",
+    );
+}
+
+#[test]
+fn click_with_micro_jitter_still_selects() {
+    // Real human mouse-clicks include 1-2 px jitter between
+    // mouse-down and mouse-up. Selection must still land —
+    // otherwise users have to hold the mouse rock-still to pick
+    // anything.
+    use agg_gui::Modifiers;
+    let node_id = atomartist_lib::graph::node::NodeId(7);
+    let mut w = viewport_with_one_body(node_id);
+    let down = Point { x: 200.0, y: 150.0 };
+    // Past the 5-px drag threshold so we exercise the
+    // moved-past-threshold path. Real human click jitter rarely
+    // exceeds this, but selection must still commit if it does.
+    let jitter = Point { x: 207.0, y: 156.0 };
+    let up = Point { x: 200.0, y: 150.0 };
+    fire(&mut w, Event::MouseDown { pos: down, button: MouseButton::Left, modifiers: Modifiers::default() });
+    fire(&mut w, Event::MouseMove { pos: jitter });
+    fire(&mut w, Event::MouseUp { pos: up, button: MouseButton::Left, modifiers: Modifiers::default() });
+    assert_eq!(
+        *w.inputs.selection.lock().unwrap(),
+        Some(node_id),
+        "jitter past the 2-px threshold must still commit selection",
+    );
+}
+
+#[test]
+fn mouse_up_clears_drag_state() {
+    use agg_gui::Modifiers;
+    let node_id = atomartist_lib::graph::node::NodeId(13);
+    let mut w = viewport_with_one_body(node_id);
+    let down = Point { x: 200.0, y: 150.0 };
+    let dragged = Point { x: 240.0, y: 180.0 };
+    fire(&mut w, Event::MouseDown { pos: down, button: MouseButton::Left, modifiers: Modifiers::default() });
+    fire(&mut w, Event::MouseMove { pos: dragged });
+    fire(&mut w, Event::MouseUp { pos: dragged, button: MouseButton::Left, modifiers: Modifiers::default() });
+    assert!(
+        matches!(w.drag, CameraDrag::None),
+        "mouse-up must always reset drag to None, got {:?}",
+        w.drag,
+    );
+    // Drag fully released: a subsequent hover event with no button
+    // held must not re-enter any drag state.
+    fire(&mut w, Event::MouseMove { pos: Point { x: 250.0, y: 200.0 } });
+    assert!(matches!(w.drag, CameraDrag::None));
+}
+
 /// `show_bed` lives in a shared `Arc<Mutex<>>` between the host UI
 /// (which drives the toolbar toggle) and the viewport widget (which
 /// mirrors it into [`crate::scene_renderer::WgpuSceneRenderer::draw_grid`]

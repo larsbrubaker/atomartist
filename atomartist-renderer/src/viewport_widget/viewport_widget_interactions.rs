@@ -9,6 +9,12 @@ use super::viewport_widget_helpers::selected_body_world_aabb;
 use super::z_control_gizmo;
 use crate::picking::{pick_handle, pick_origin, raycast_mesh, GizmoHandle, HitPlane};
 
+/// Pixel distance the cursor must travel before a `Selecting` state
+/// promotes to a body drag. 5 px lets real human clicks (which can
+/// jitter 2-4 px during the press+release window on Windows) commit
+/// as click-selects instead of accidentally translating the body.
+const DRAG_THRESHOLD_PX: f64 = 5.0;
+
 impl Viewport3dWidget {
     // `orbit_pivot_from_cursor` used to set
     // `camera.center = pivot` and a fresh `radius` on every rotate
@@ -228,7 +234,7 @@ impl Viewport3dWidget {
             } => {
                 let dx = (pos.x - start_local.x).abs();
                 let dy = (pos.y - start_local.y).abs();
-                let past_threshold = dx > 2.0 || dy > 2.0;
+                let past_threshold = dx > DRAG_THRESHOLD_PX || dy > DRAG_THRESHOLD_PX;
                 if !*moved && past_threshold {
                     // Crossed the 2-px threshold for the first time —
                     // try promoting to `DragBodyXY` so the body
@@ -300,7 +306,7 @@ impl Viewport3dWidget {
                 {
                     let dx = (pos.x - start_local.x).abs();
                     let dy = (pos.y - start_local.y).abs();
-                    let new_moved = moved || dx > 2.0 || dy > 2.0;
+                    let new_moved = moved || dx > DRAG_THRESHOLD_PX || dy > DRAG_THRESHOLD_PX;
                     let w = self.bounds.width.max(1.0);
                     let h = self.bounds.height.max(1.0);
                     let cursor_td = (pos.x, h - pos.y);
@@ -308,11 +314,14 @@ impl Viewport3dWidget {
                         let cam = self.cam();
                         cam.screen_to_ray(cursor_td, (w, h))
                     };
-                    let bed = HitPlane {
-                        point: [0.0, 0.0, 0.0],
+                    // Drag-anchor plane uses the body's Z at drag
+                    // start — anchor_bed_pt[2] — so cursor and body
+                    // stay locked at any camera angle.
+                    let plane = HitPlane {
+                        point: [0.0, 0.0, anchor_bed_pt[2]],
                         normal: [0.0, 0.0, 1.0],
                     };
-                    if let Some(cur) = bed.ray_intersect(ray_o, ray_d) {
+                    if let Some(cur) = plane.ray_intersect(ray_o, ray_d) {
                         let new_matrix = body_drag::bed_plane_translation(
                             start_matrix,
                             anchor_bed_pt,
@@ -342,11 +351,27 @@ impl Viewport3dWidget {
                 moved,
                 picked_body,
                 ..
-            } if !moved => {
-                // Click without a drag — select the body captured
-                // at mouse-down (or clear the selection when the
-                // click landed on empty space).
-                *self.inputs.selection.lock().unwrap() = picked_body;
+            } => {
+                // Selection commits whenever a body was under the
+                // cursor at mouse-down — independent of whether the
+                // mouse jittered past the 2-px drag threshold. The
+                // "moved past threshold but didn't promote to
+                // DragBodyXY" case happens when the picked node's
+                // `matrix` property isn't writable; we still want a
+                // selection. Real human clicks regularly include 1-3
+                // px jitter, so a strict `!moved` guard would lose
+                // most real clicks.
+                //
+                // Empty-space click (`picked_body = None`) without
+                // movement clears the selection — matches the
+                // historical behaviour. Empty-space drag leaves
+                // selection alone (the user was probably aiming for
+                // a camera gesture and missed the modifier).
+                if picked_body.is_some() {
+                    self.commit_selection(picked_body);
+                } else if !moved {
+                    self.commit_selection(None);
+                }
                 EventResult::Consumed
             }
             CameraDrag::DragBodyXY { node_id, .. } => {
@@ -355,19 +380,26 @@ impl Viewport3dWidget {
                 // sure selection follows the dragged body (matches
                 // NodeDesigner: pick-up + drop → that node becomes
                 // the active selection).
-                *self.inputs.selection.lock().unwrap() = Some(node_id);
+                self.commit_selection(Some(node_id));
                 EventResult::Consumed
             }
             CameraDrag::DragBodyZ { node_id, .. } => {
-                // Z drag committed — selection already matches
-                // (Z control only appears on the active selection),
-                // but re-affirm in case a stray selection write
-                // raced in during the drag.
-                *self.inputs.selection.lock().unwrap() = Some(node_id);
+                self.commit_selection(Some(node_id));
                 EventResult::Consumed
             }
             _ => EventResult::Consumed,
         }
+    }
+
+    /// Write the viewport-driven selection through the shared
+    /// `selection` mutex AND request a global redraw so the canvas
+    /// widget (which reads `primary_selection()` at paint time)
+    /// picks up the change. agg-gui's reactive paint loop does NOT
+    /// poll mutex-wrapped state — a write without an explicit
+    /// request goes invisible until the next unrelated event.
+    fn commit_selection(&self, id: Option<NodeId>) {
+        *self.inputs.selection.lock().unwrap() = id;
+        agg_gui::animation::request_draw();
     }
 
     fn read_node_matrix(&self, id: NodeId) -> Option<[f32; 16]> {
@@ -383,12 +415,13 @@ impl Viewport3dWidget {
         let world_aabb = selected_body_world_aabb(geom.as_deref(), sel_id)?;
         let cam = self.cam();
         let vh = self.bounds.height.max(1.0) as f32;
-        let (_, (sphere_center, sphere_radius)) =
+        let (_, (cube_center, cube_size)) =
             z_control_gizmo::z_control_layout_for_aabb(world_aabb, &cam, vh);
+        let half = cube_size * 0.5;
         let handle = GizmoHandle {
             id: z_control_gizmo::Z_TRANSLATE_HANDLE_ID,
-            center: sphere_center,
-            half_extent: [sphere_radius, sphere_radius, sphere_radius],
+            center: cube_center,
+            half_extent: [half, half, half],
         };
         let w = self.bounds.width.max(1.0);
         let h = self.bounds.height.max(1.0);
@@ -397,17 +430,17 @@ impl Viewport3dWidget {
         pick_handle(std::slice::from_ref(&handle), ray_o, ray_d)?;
         let start_matrix = self.read_node_matrix(sel_id)?;
         // Anchor Z = projection of the drag-start ray onto the
-        // vertical line through (sphere_center.xy). The drag math
+        // vertical line through (cube_center.xy). The drag math
         // subtracts this to get the per-frame delta.
         let anchor_z = body_drag::z_axis_translation(
             ray_o,
             ray_d,
-            [sphere_center[0], sphere_center[1]],
+            [cube_center[0], cube_center[1]],
         )?;
         Some(CameraDrag::DragBodyZ {
             node_id: sel_id,
             start_local: pos,
-            anchor_xy: [sphere_center[0], sphere_center[1]],
+            anchor_xy: [cube_center[0], cube_center[1]],
             anchor_z,
             start_matrix,
         })
@@ -434,14 +467,29 @@ impl Viewport3dWidget {
         let h = self.bounds.height.max(1.0);
         let cursor_td = (pos.x, h - pos.y);
         let (origin, dir) = self.cam().screen_to_ray(cursor_td, (w, h));
-        let picked = self
-            .current_geometry()
-            .and_then(|g| pick_origin(&g, origin, dir));
-        let bed = HitPlane {
-            point: [0.0, 0.0, 0.0],
+        let geom = self.current_geometry();
+        let picked = geom.as_ref().and_then(|g| pick_origin(g, origin, dir));
+        // Drag-anchor plane: a HORIZONTAL plane at the picked body's
+        // current world Z. Using the bed (z=0) instead caused gigantic
+        // drag deltas whenever the body floated above the floor — a
+        // tiny mouse jitter cast a ray that crossed z=0 far away
+        // from the body's screen position, and the drag math
+        // translated the body across the scene. Anchoring at the
+        // body's own Z makes the cursor + body stay locked
+        // regardless of camera angle.
+        let plane_z = picked
+            .and_then(|id| geom.as_ref().and_then(|g| {
+                g.bodies
+                    .iter()
+                    .find(|b| b.origin == Some(id))
+                    .map(|b| b.matrix[14])
+            }))
+            .unwrap_or(0.0);
+        let plane = HitPlane {
+            point: [0.0, 0.0, plane_z],
             normal: [0.0, 0.0, 1.0],
         };
-        let anchor = bed.ray_intersect(origin, dir);
+        let anchor = plane.ray_intersect(origin, dir);
         (picked, anchor)
     }
 

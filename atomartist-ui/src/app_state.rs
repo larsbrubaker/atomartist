@@ -140,11 +140,20 @@ impl AppState {
     }
 
     /// Update the visual selection — the canvas highlights the source
-    /// node, and the viewport draws an outline around its mesh. Bumps the
-    /// viewport dirty flag so the outline pass re-runs.
+    /// node, and the viewport draws an outline around its mesh. Bumps
+    /// the viewport dirty flag AND requests a global redraw so the
+    /// canvas-side widget (which reads `primary_selection()` at paint
+    /// time) picks up the change when the viewport drives the write.
     pub fn set_selection(&self, id: Option<NodeId>) {
         *self.selection.lock().unwrap() = id;
         self.mark_viewport_dirty();
+        // agg-gui's reactive paint loop only repaints on explicit
+        // requests — a mutex write inside an `Arc<Mutex<…>>` doesn't
+        // count. Without this the canvas would only refresh its
+        // node-highlight on the next unrelated event (mouse-move,
+        // hover, key-press), so a pure click in the 3-D viewport
+        // would visibly fail to "select" the matching node.
+        agg_gui::animation::request_draw();
     }
 
     /// Set the dirty flag so the viewport repaints next frame.

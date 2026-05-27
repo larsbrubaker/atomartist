@@ -154,14 +154,35 @@ impl<'a> TemplateBuilder<'a> {
 #[derive(Default)]
 pub struct NodeInputs {
     pub by_uid: HashMap<SocketUid, PortValue>,
+    /// Source node id of the noodle landing on each input socket.
+    /// Lets dynamic nodes (Output, Combine) tag their downstream
+    /// payload with "which node directly fed this slot" — used by
+    /// the 3-D pick path so clicking a rendered body selects the
+    /// first node wired into Output's matching slot, matching
+    /// NodeDesigner's `meshData.sourceNodeId` rule.
+    pub sources: HashMap<SocketUid, crate::graph::node::NodeId>,
 }
 
 impl NodeInputs {
     pub fn insert(&mut self, uid: SocketUid, value: PortValue) {
         self.by_uid.insert(uid, value);
     }
+    pub fn insert_with_source(
+        &mut self,
+        uid: SocketUid,
+        value: PortValue,
+        source: crate::graph::node::NodeId,
+    ) {
+        self.by_uid.insert(uid, value);
+        self.sources.insert(uid, source);
+    }
     pub fn get(&self, uid: SocketUid) -> &PortValue {
         self.by_uid.get(&uid).unwrap_or(&PortValue::None)
+    }
+    /// Direct upstream source of the noodle landing on `uid`, or
+    /// `None` when the slot is disconnected.
+    pub fn source(&self, uid: SocketUid) -> Option<crate::graph::node::NodeId> {
+        self.sources.get(&uid).copied()
     }
 }
 
@@ -275,6 +296,14 @@ impl<'a> EvalCtx<'a> {
     /// Look up an input value by socket uid.
     pub fn input(&self, uid: SocketUid) -> &PortValue {
         self.inputs.get(uid)
+    }
+
+    /// Direct upstream source NodeId for an input socket. `None`
+    /// when the slot is disconnected. Used by Output to stamp
+    /// "first node wired into this slot" onto every body it
+    /// forwards into the display payload.
+    pub fn input_source(&self, uid: SocketUid) -> Option<crate::graph::node::NodeId> {
+        self.inputs.source(uid)
     }
 
     /// Look up an input value by socket name (resolved against the

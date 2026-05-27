@@ -131,7 +131,7 @@ fn evaluate_one(
                 .get(e.from.node)
                 .and_then(|src| src.cached_outputs.get(&e.from.socket).cloned())
                 .unwrap_or(PortValue::None);
-            inputs.insert(e.to.socket, value);
+            inputs.insert_with_source(e.to.socket, value, e.from.node);
         }
         let mut props = NodeProperties::default();
         for (k, v) in &node.properties {

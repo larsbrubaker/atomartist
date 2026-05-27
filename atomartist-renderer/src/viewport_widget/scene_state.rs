@@ -16,9 +16,18 @@ impl Viewport3dWidget {
         first_body: Option<&atomartist_lib::geometry::Body>,
         selection_active: bool,
         outline_width: f32,
-        bounds_aabb: Option<([f32; 3], [f32; 3])>,
         outline_color: [f32; 4],
     ) {
+        let sel_id = *self.inputs.selection.lock().unwrap();
+        // Index of the body whose `origin` NodeId matches the active
+        // selection. The outline pass uses this so the silhouette
+        // rims the body the user actually clicked on — not just the
+        // first body in the group. `None` falls back to body 0 in
+        // the renderer (e.g. selection-active but origin un-matched
+        // somehow).
+        let outline_body_index = sel_id.and_then(|id| {
+            bodies.iter().position(|b| b.origin == Some(id))
+        });
         let mut s = self.scene.borrow_mut();
         s.bodies = bodies;
         if let Some(b) = first_body {
@@ -27,18 +36,12 @@ impl Viewport3dWidget {
         s.camera = self.cam();
         s.outline_enabled = selection_active;
         s.outline_width = outline_width;
+        s.outline_body_index = outline_body_index;
         s.gizmo_lines.clear();
         s.gizmo_triangles.clear();
-        if let Some((mn, mx)) = bounds_aabb {
-            let center = [
-                (mn[0] + mx[0]) * 0.5,
-                (mn[1] + mx[1]) * 0.5,
-                (mn[2] + mx[2]) * 0.5,
-            ];
-            let size = [mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]];
-            s.gizmo_lines
-                .push(GizmoLineSet::bounds_box(center, size, None));
-        }
+        // Bounds-box gizmo dropped — the selection-outline rim
+        // already gives a visible "this is selected" cue. The bounds
+        // box added noise without orientation context.
         // Z control gizmo — anchored above the selected body's world
         // AABB. Camera-distance-proportional sizing keeps the gizmo
         // a constant pixel-size at any zoom; idle colour mirrors the

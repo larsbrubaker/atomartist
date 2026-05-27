@@ -177,20 +177,28 @@ impl NodeDef for OutputNode {
         }
 
         // 2) Concatenate every connected Geometry3d input's bodies
-        //    into the __display__ group. The viewport iterates the
-        //    bodies and renders each with its own colour + transform,
-        //    so multiple upstream nodes (or a single multi-body group
-        //    like a 3MF import) survive intact instead of being
-        //    collapsed into a single tinted mesh.
+        //    into the __display__ group. Stamp `body.origin` with the
+        //    FIRST node wired into this slot (the noodle's source
+        //    node) so clicking a rendered body in the 3-D viewport
+        //    selects that node — matches NodeDesigner's
+        //    `meshData.sourceNodeId` selection rule.
         let mut bodies = Vec::new();
         for slot in &ctx.instance.inputs {
             if slot.name.as_ref().is_empty() {
                 continue;
             }
             if let PortValue::Geometry3d(g) = ctx.input(slot.uid) {
+                let source = ctx.input_source(slot.uid);
                 for b in g.iter() {
                     if num_verts(&b.mesh) > 0 && num_tris(&b.mesh) > 0 {
-                        bodies.push(b.clone());
+                        let mut body = b.clone();
+                        // Always overwrite — body.origin from upstream
+                        // ops (Transform / Align / …) is irrelevant
+                        // to selection. Only the node directly wired
+                        // to Output is selectable from the 3-D
+                        // viewport.
+                        body.origin = source;
+                        bodies.push(body);
                     }
                 }
             }
@@ -393,6 +401,69 @@ mod tests {
             }
             other => panic!("expected multi-body Geometry3d, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn display_bodies_carry_first_upstream_node_id_as_origin() {
+        // Box → Transform → Output. Picking should select Transform
+        // (the node directly wired to Output), not Box (the original
+        // mesh source). NodeDesigner rule: pick a body in the 3-D
+        // viewport → select the first node connected to Output.
+        let reg = registry();
+        let mut g = Graph::new();
+        let bx = g.add_new_node("Box", [0.0, 0.0], &reg).unwrap();
+        let tf = g.add_new_node("Transform", [100.0, 0.0], &reg).unwrap();
+        let out = g.add_new_node("Output", [200.0, 0.0], &reg).unwrap();
+
+        let bx_out = g.get(bx).unwrap().output_by_name("out").unwrap().uid;
+        let tf_in = g.get(tf).unwrap().input_by_name("input").unwrap().uid;
+        let tf_out = g.get(tf).unwrap().output_by_name("out").unwrap().uid;
+        let out_in = g.get(out).unwrap().inputs[0].uid;
+        g.connect(Noodle::new(bx, bx_out, tf, tf_in), &reg).unwrap();
+        g.connect(Noodle::new(tf, tf_out, out, out_in), &reg).unwrap();
+
+        evaluate_all(&mut g, &reg).unwrap();
+        let display_uid = g.get(out).unwrap().output_by_name(DISPLAY_OUTPUT_NAME).unwrap().uid;
+        match g.get(out).unwrap().cached_outputs.get(&display_uid) {
+            Some(PortValue::Geometry3d(geom)) => {
+                assert_eq!(geom.len(), 1);
+                let body = geom.first().unwrap();
+                assert_eq!(
+                    body.origin,
+                    Some(tf),
+                    "body.origin must be Transform — the node directly wired to Output",
+                );
+            }
+            other => panic!("expected Geometry3d, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn each_output_slot_stamps_its_own_source_origin() {
+        // Two boxes wired into Output as separate slots → each body
+        // carries its own source NodeId.
+        let reg = registry();
+        let mut g = Graph::new();
+        let bx1 = g.add_new_node("Box", [0.0, 0.0], &reg).unwrap();
+        let bx2 = g.add_new_node("Box", [100.0, 0.0], &reg).unwrap();
+        let out = g.add_new_node("Output", [200.0, 0.0], &reg).unwrap();
+        let bx1_out = g.get(bx1).unwrap().output_by_name("out").unwrap().uid;
+        let bx2_out = g.get(bx2).unwrap().output_by_name("out").unwrap().uid;
+        let s1 = g.get(out).unwrap().inputs[0].uid;
+        g.connect(Noodle::new(bx1, bx1_out, out, s1), &reg).unwrap();
+        let s2 = g.get(out).unwrap().inputs.last().unwrap().uid;
+        g.connect(Noodle::new(bx2, bx2_out, out, s2), &reg).unwrap();
+
+        evaluate_all(&mut g, &reg).unwrap();
+        let display_uid = g.get(out).unwrap().output_by_name(DISPLAY_OUTPUT_NAME).unwrap().uid;
+        let bodies = match g.get(out).unwrap().cached_outputs.get(&display_uid) {
+            Some(PortValue::Geometry3d(geom)) => geom.bodies.clone(),
+            other => panic!("expected Geometry3d, got {:?}", other),
+        };
+        assert_eq!(bodies.len(), 2);
+        // Order matches input-slot order: slot 1 → bx1, slot 2 → bx2.
+        assert_eq!(bodies[0].origin, Some(bx1));
+        assert_eq!(bodies[1].origin, Some(bx2));
     }
 
     #[test]
