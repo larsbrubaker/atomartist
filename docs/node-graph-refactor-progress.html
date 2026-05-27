@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>AtomArtist — outstanding work for NodeDesigner / MatterCAD parity</title>
+<title>AtomArtist — remaining work for NodeDesigner / MatterCAD parity</title>
 <style>
 :root {
   --bg: #fafaf7;
@@ -120,9 +120,10 @@ hr { border: 0; border-top: 1px dashed var(--rule); margin: 32px 0 20px; }
 <body>
 <main>
 
-<h1>AtomArtist — what's left to reach NodeDesigner / MatterCAD parity</h1>
+<h1>AtomArtist — remaining work toward NodeDesigner / MatterCAD parity</h1>
 <p class="subtitle">
-  Outstanding-work catalogue. Reference sources at
+  Outstanding-work catalogue. Completed clusters are intentionally removed so
+  this stays useful as a pickup list. Reference sources at
   <code class="ref-nd">C:\Development\FDS\NodeDesigner</code> (JS / TS)
   and <code class="ref-mc">C:\Development\MatterCAD</code> (C#).
 </p>
@@ -130,16 +131,19 @@ hr { border: 0; border-top: 1px dashed var(--rule); margin: 32px 0 20px; }
 <div class="banner">
   <strong>Snapshot:</strong> Engine, multi-body Geometry3d with per-vertex
   colour, dual depth-peel + contact shadows + accumulation AA (all multi-body),
-  selection outline (single-body fallback), matrix composition through ops
+  selection outline for the active body, matrix composition through ops
   (no more bake), Z-up world everywhere, per-body click selection via
   <code>Body.origin</code> NodeId, gizmo foundation (filled-tri pipeline +
   sphere/cube handles + ray-vs-AABB handle picking), <strong>XY bed-plane
   body drag + Z control drag</strong> with per-stroke matrix coalescing,
-  dynamic-input Output node, ~25 node types, <strong>undo / redo stack
-  wired through every mutation</strong> (canvas + viewport). <strong>Remaining
-  work is the bulk of what makes the application feel like NodeDesigner /
-  MatterCAD</strong> — long tail of node types, property editors, remaining
-  gizmo variants (rotate / bounds-edit / handle-meshes), editing UX, file I/O.
+  dynamic-input Output node, ~26 node types, <strong>undo / redo stack
+  wired through current canvas + viewport mutations</strong>, node snap guides,
+  orthographic projection, shaded / wireframe render style, native
+  <code>.atmr</code> project save/load with asset embedding, STL export, and
+  mesh import via dropped files. <strong>Remaining work is the long tail that
+  makes the application feel like NodeDesigner / MatterCAD</strong> — node
+  types, richer property editors, remaining gizmo variants (rotate /
+  bounds-edit / handle-meshes), higher-level editing UX, and broader file I/O.
 </div>
 
 <div class="banner" style="background:#f0eef9;border-left-color:#5a4ea3;">
@@ -163,10 +167,10 @@ hr { border: 0; border-top: 1px dashed var(--rule); margin: 32px 0 20px; }
 
 <h2>1. Node coverage — the long tail</h2>
 <p class="section-hint">
-  Current AtomArtist: 8 3-D primitives, 4 2-D primitives, 5 3-D ops, 3 2-D ops,
-  2 math, 1 mesh-import (~25 total). MatterCAD ships ~80 Object3D subclasses;
-  NodeDesigner ~40. Below is the gap, grouped so a sitting can pick one cluster
-  and finish it.
+  Current AtomArtist: 7 3-D primitives, 4 2-D primitives, 6 3-D ops, 3 2-D ops,
+  2 math, 2 mesh/import nodes, GraphInput, and Output (~26 total). MatterCAD
+  ships ~80 Object3D subclasses; NodeDesigner ~40. Below is the gap, grouped
+  so a sitting can pick one cluster and finish it.
 </p>
 
 <h3>1.1 Missing 3-D primitives <span class="badge small">small</span></h3>
@@ -291,12 +295,11 @@ hr { border: 0; border-top: 1px dashed var(--rule); margin: 32px 0 20px; }
   path + per-body click selection all landed. Remaining items below.
 </p>
 <ul>
-  <li><strong>Multi-body selection outline</strong> — outline pass still single-body
-    (uses <code>s.bodies_gpu.first()</code> in <code>render_impl.rs</code>).
-    Add body BGL binding to the outline ID pipeline at
-    <code>post_outline/pipelines.rs</code>, loop bodies in
-    <code>post_outline::execute</code>. Outline doesn't show colour so this is
-    purely a silhouette extension.</li>
+  <li><strong>Multi-body selection outline for multi-select</strong> — the outline
+    now targets the selected body's <code>Body.origin</code> instead of blindly
+    falling back to body 0. Future multi-select / group-select should outline
+    every selected body, which means the outline pass needs to iterate multiple
+    selected body handles instead of a single <code>outline_body_index</code>.</li>
   <li><strong>3MF importer emits multi-body</strong> — current mesh-drop path
     flattens to a single body. 3MF supports per-body materials + colours; the
     importer (file format support, see §6) should fan-out into multiple
@@ -350,8 +353,7 @@ hr { border: 0; border-top: 1px dashed var(--rule); margin: 32px 0 20px; }
 
 <h3>4.3 Camera + render style</h3>
 <ul>
-  <li><strong>Orthographic toggle</strong> — MatterCAD + NodeDesigner both expose perspective ↔ ortho. <code>OrbitCamera::projection_matrix</code> currently only emits perspective.</li>
-  <li><strong>Hidden-line render style</strong> — <code class="ref-mc">.../View3D/ModelRenderStyle.cs</code> lists shaded / wireframe / <em>hidden-line</em>. We have the first two; hidden-line draws only silhouette + crease edges.</li>
+  <li><strong>Hidden-line render style</strong> — <code class="ref-mc">.../View3D/ModelRenderStyle.cs</code> lists shaded / wireframe / <em>hidden-line</em>. We have shaded + wireframe and the perspective ↔ orthographic toggle; hidden-line still needs silhouette + crease-edge extraction.</li>
   <li><strong>Lighting debug panel</strong> — <code class="ref-nd">lighting-panel.js</code> (434) + <code class="ref-nd">lighting-debug-panel.js</code> (361). All uniforms it would tweak are already wired on <code>WgpuSceneRenderer</code>; missing piece is the atomartist-ui floating panel.</li>
   <li><strong>Vertex format expansion</strong> — NodeDesigner's shader supports UV (textured materials) and barycentric (wireframe-overlay shader). Our <code>Vertex</code> is pos+normal+(new)color; add UV when a textured material node lands.</li>
 </ul>
@@ -362,9 +364,8 @@ hr { border: 0; border-top: 1px dashed var(--rule); margin: 32px 0 20px; }
 <ul>
   <li><strong>Copy / cut / paste / duplicate</strong> — NodeDesigner's <code class="ref-nd">canvas.copyToClipboard / pasteFromClipboard</code> + <code>ui/edit-menu-actions.js</code>. We have deletion; clipboard ops are missing. Tricky bits: socket UIDs must regenerate on paste, noodles inside the pasted subgraph must remap.</li>
   <li><strong>Group / ungroup</strong> — collapse selection to a <code>GroupObject3D</code>-style container, expand back. Pairs with §1.6.</li>
-  <li><strong>Multi-select drag</strong> — engine supports selection; canvas-side multi-drag with consistent offset is missing.</li>
+  <li><strong>Marquee / rubber-band selection</strong> — selection state and shift-click multi-select are in place; the missing piece is drag-selecting a rectangle of nodes (plus the visual in §4.2).</li>
   <li><strong>Alignment / distribution tools</strong> — MatterCAD has Align-Left / Center-Horiz / Distribute-Vertical etc. as menu actions on the selected nodes (or selected 3-D objects). Map both layers.</li>
-  <li><strong>Snap to grid / smart snap guides</strong> — <code class="ref-nd">graph/state/smart-snap.js</code>. PowerPoint-style alignment + spacing guides during node drag. Threshold 8px canvas-space. agg-gui has window snapping (in flight separately); the node-canvas variant is a port of that pattern.</li>
 </ul>
 
 <h3>5.2 Undo / redo — remaining coverage <span class="badge gap">extend per new action</span></h3>
@@ -379,13 +380,14 @@ hr { border: 0; border-top: 1px dashed var(--rule); margin: 32px 0 20px; }
   the Edit menu. Outstanding:
 </p>
 <ul>
-  <li><strong>New mutation paths land with their command.</strong> Z
-    control drag (§4.1 Stage 2), XY / rotate / bounds-edit gizmos
-    (§4.1), context-menu Duplicate / Group / Mute / Bypass (§5.3),
-    inline rename (§5.3), drag-reorder sockets (§5.3), file-load itself
-    (currently clears history — could capture pre-load state for
-    "Undo Load"). Each new action must push a matching <code>*Cmd</code>
-    or coalesce into an existing one — leave nothing un-undoable.</li>
+  <li><strong>New mutation paths land with their command.</strong>
+    Future rotate / bounds-edit / handle-mesh gizmos (§4.1), context-menu
+    Duplicate / Group / Mute / Bypass (§5.3), inline rename (§5.3),
+    drag-reorder sockets (§5.3), selection-marquee actions (§5.1), and
+    file-load itself (currently clears history — could capture pre-load
+    state for "Undo Load"). Each new action must push a matching
+    <code>*Cmd</code> or coalesce into an existing one — leave nothing
+    un-undoable.</li>
   <li><strong>Per-node-type ChangeColor / ChangeOpacity / SetOutputType
     coverage.</strong> <code>ChangePropertyCmd</code> works for any
     <code>PortValue</code>, but the Output Type tag (Default / Solid /
@@ -430,40 +432,45 @@ hr { border: 0; border-top: 1px dashed var(--rule); margin: 32px 0 20px; }
   <li><strong>Right-click context menu expansion</strong> — current menu has Delete + Add. NodeDesigner / MatterCAD versions cover Duplicate, Group, Make Component, Change Colour, Set Output Type (Solid / Hole), Disable, Mute, Bypass, Comment, Frame.</li>
   <li><strong>Comment / frame nodes</strong> — visual-only nodes that group + caption a region of the canvas. NodeDesigner has it; we don't.</li>
   <li><strong>Mute / bypass</strong> — disable a node temporarily without disconnecting (passes input through).</li>
-  <li><strong>Disconnect by drag</strong> — currently shipped; verify the bezier orientation fix holds at high zoom-out.</li>
 </ul>
 
 <h3>5.4 Keyboard shortcuts</h3>
 <ul>
-  <li>Standard set: Ctrl-Z / Ctrl-Shift-Z (undo / redo), Ctrl-C / V / X / D (copy / paste / cut / duplicate), Ctrl-A (select all), Ctrl-G / Ctrl-Shift-G (group / ungroup), Delete, Tab (search palette), F2 (rename), Esc (cancel drag / clear selection).</li>
-  <li>3-D viewport: 1-7 numpad for view presets (front / back / top / bottom / left / right / iso), F (frame selection), Space (toggle perspective / ortho), W (wireframe), S (shaded), L (line / hidden-line).</li>
+  <li><strong>Canvas remaining:</strong> Ctrl-C / V / X / D (copy / paste / cut / duplicate), Ctrl-A (select all — menu item exists but needs the selection action), Ctrl-G / Ctrl-Shift-G (group / ungroup), Tab (search palette), F2 (rename), Esc (cancel drag / clear selection). Delete / Backspace are wired for selected-node deletion; undo / redo are wired through the Edit menu.</li>
+  <li><strong>3-D viewport remaining:</strong> 1-7 numpad for view presets (front / back / top / bottom / left / right / iso), F (frame selection), W (wireframe), S (shaded), L (hidden-line once it exists). Perspective ↔ orthographic is already exposed through the HUD button.</li>
 </ul>
 
 <h2>6. File I/O</h2>
+<p class="section-hint">
+  Native save/load is now wired for <code>.atmr</code> zip projects (with
+  embedded asset entries) and legacy raw <code>.json</code>. Mesh drop/import
+  accepts STL / OBJ / 3MF and stores imported meshes as canonical 3MF assets.
+  User-visible export currently covers STL.
+</p>
 <ul>
   <li><strong>Import: 3MF multi-body</strong> — <code class="ref-mc">.../ThreeMfImporter.cs</code> + NodeDesigner's <code class="ref-nd">@jscadui/3mf-export</code> usage. Use <code>threemf-rs</code> or write a minimal reader against the zip + XML spec. Each <code>&lt;object&gt;</code> + <code>&lt;item&gt;</code> becomes a <code>Body</code>; <code>&lt;basematerials&gt;</code> drives per-body colour.</li>
   <li><strong>Import: SVG</strong> — paired with §1.5 SVG node. <code>usvg</code> parses; <code>kurbo</code> flattens beziers.</li>
   <li><strong>Import: glTF</strong> — NodeDesigner supports via three.js. AtomArtist: <code>gltf</code> crate; useful for downstream BIM / archviz workflows.</li>
   <li><strong>Import: AMF, DXF</strong> — MatterCAD covers via separate libraries. Lower priority — most users hit STL / OBJ / 3MF.</li>
-  <li><strong>Export pipeline</strong> — currently nothing user-visible. Needs:
+  <li><strong>Export pipeline beyond STL</strong> — add:
     <ul>
-      <li>Export node (writes from a sink). Or menu action "Export Output node's geometry to..." picker.</li>
-      <li>Format writers: STL (binary + ASCII), OBJ (with materials.mtl sidecar), 3MF (with per-body materials), SVG (for 2-D paths), glTF.</li>
+      <li>Export node (writes from a sink) if graph-driven export becomes useful; the menu action already covers STL from the current Output geometry.</li>
+      <li>Format writers: OBJ (with materials.mtl sidecar), 3MF (with per-body materials), SVG (for 2-D paths), glTF, plus optional ASCII STL if users ask for it.</li>
     </ul>
   </li>
-  <li><strong>Native AtomArtist project format</strong> — currently <code>graph_json.rs</code> v2. Add:
+  <li><strong>Native AtomArtist project format extensions</strong> — current <code>.atmr</code> is a zip container with <code>graph.json</code> and embedded assets. Remaining polish:
     <ul>
-      <li>File extension + magic header (e.g. <code>.atmr</code> + JSON-with-front-matter, OR a zip container per MatterCAD's <code>.mcx</code>).</li>
-      <li>Asset embedding (dropped meshes live in <code>assets/</code> with sha256 ref — needs a zip container, not raw JSON).</li>
-      <li>Format-version field + migration ladder (we already broke v1; future bumps should migrate, not break).</li>
-      <li>Autosave + recent-files list — atomartist-ui responsibility.</li>
+      <li>Project manifest / magic entry so an arbitrary zip can be rejected before parsing <code>graph.json</code>.</li>
+      <li>Format-version migration ladder for future schema bumps.</li>
+      <li>Recent-files list and richer autosave / recovery UX in the native shell.</li>
+      <li>Browser/WASM file picker + save/download plumbing.</li>
     </ul>
   </li>
 </ul>
 
 <h2>7. Graph engine extensions</h2>
 <ul>
-  <li><strong>Async evaluation</strong> — <code class="ref-nd">matter-graph-async-execution.js</code> (313 lines). Heavy ops (booleans, fit-to-bounds, mesh repair) should run off the UI thread. Re-eval debouncing + cancellation when a parameter changes mid-run.</li>
+  <li><strong>Evaluation scheduling hardening</strong> — native builds already run <code>schedule_evaluate</code> on a background thread (WASM stays synchronous). Missing NodeDesigner-style pieces from <code class="ref-nd">matter-graph-async-execution.js</code>: debouncing, cancellation / stale-result suppression when a parameter changes mid-run, and a bounded worker model for heavy ops.</li>
   <li><strong>Expression evaluation in number fields</strong> — see §2 (the <code>*OrExpression</code> editors). Cross-cuts engine + property panel: properties become formulas referencing other properties by name (<code>$radius * 2 + 0.5</code>). Sandboxed evaluator with variable lookup against the node's own properties + scene globals.</li>
   <li><strong>Drivers / animated values</strong> — NodeDesigner has time-driven node parameters. Lower priority unless animation export is on the roadmap.</li>
   <li><strong>Source-side hooks</strong> — engine has <code>on_input_connected</code> / <code>_disconnected</code> / <code>validate_input_connection</code>. Symmetric output-side hooks not implemented. Add when a node needs to react to its consumers.</li>
@@ -482,7 +489,7 @@ hr { border: 0; border-top: 1px dashed var(--rule); margin: 32px 0 20px; }
     <td><span class="badge next">queued</span></td></tr>
 <tr><td>Async-execution suite (<code class="ref-nd">matter-graph-async-execution.test.ts</code>)</td>
     <td>—</td>
-    <td>blocked on §7 async work</td></tr>
+    <td>partially blocked on §7 cancellation / debouncing semantics</td></tr>
 <tr><td>Field-system suite (any tests under <code class="ref-nd">graph/state/field-system*</code>)</td>
     <td>—</td>
     <td>blocked on §1.7</td></tr>
@@ -492,16 +499,16 @@ hr { border: 0; border-top: 1px dashed var(--rule); margin: 32px 0 20px; }
 <h2>9. Decisions still pending</h2>
 <ul>
   <li><strong>Negative-determinant transforms.</strong> Mirror node (§1.2) needs <code>apply_transform</code> to flip triangle winding when <code>det(M) &lt; 0</code>. Add a winding-flip step in <code>geometry/mesh3d::apply_transform</code> guarded on the sign of the 3×3 determinant.</li>
-  <li><strong>Project file container.</strong> Raw JSON (current) vs zip-with-assets (MatterCAD's <code>.mcx</code> approach). Once dropped meshes / images need to round-trip with the save file, raw JSON breaks.</li>
+  <li><strong>Project format evolution.</strong> <code>.atmr</code> zip-with-assets is the current container. Still decide whether to add a manifest / magic entry and how strict future schema migrations should be before the next breaking graph format change.</li>
   <li><strong>Field architecture.</strong> Closure-on-PortValue vs separate sample-time kernel (§1.7). Defer until the first field-consumer node lands.</li>
   <li><strong>Boolean ops + per-vertex colour propagation.</strong> The renderer's per-vertex colour path is live, but boolean nodes still emit single-colour output. Decide whether the cut-surface vertices inherit from the closest input (NodeDesigner pattern) or get a third "cut surface" colour (some CAD tools). Affects how the §3 "Per-vertex colour producers" bullet lands.</li>
-  <li><strong>Undo stack vs ChangeTracker.</strong> Engine has <code>ChangeTracker</code> (JSON-snapshot dirty bit) but no typed undo command stack. §5.2 lays out the MatterCAD-pattern command types; decide whether to layer commands on top of the existing tracker or replace it.</li>
+  <li><strong>Dirty-state source of truth.</strong> Typed undo commands are live; <code>ChangeTracker</code> still exists as a snapshot-based dirty detector. Decide whether save-point tracking belongs in <code>UndoBuffer</code>, <code>ChangeTracker</code>, or a thin bridge between them.</li>
 </ul>
 
 <h2>10. House-keeping debt</h2>
 <ul>
-  <li><strong>File-line guardrail.</strong> Files closest to the 800-line cap now: <code>demo-native/src/main.rs</code> (745 — watch), <code>scene_renderer/mod.rs</code> (718 — watch closely; multi-body grew this). Refactor before adding more state.</li>
-  <li><strong>Renderer body-handle plumbing.</strong> <code>BodyDrawHandle</code> shared across opaque + dual-peel + bed-shadow. Outline pass still uses <code>bodies_gpu.first()</code> — last consumer to switch (§3 first bullet).</li>
+  <li><strong>File-line guardrail.</strong> Files closest to the 800-line cap now: <code>atomartist-renderer/src/viewport_widget.rs</code> (761), <code>demo-native/src/main.rs</code> (745), and <code>scene_renderer/mod.rs</code> (726). Refactor before adding more state.</li>
+  <li><strong>Renderer body-handle plumbing.</strong> <code>BodyDrawHandle</code> is shared across opaque + dual-peel + bed-shadow. Outline now supports a selected body index; revisit if multi-select requires outlining several bodies in one pass (§3 first bullet).</li>
   <li><strong>Cached-output retention.</strong> <code>NodeInstance.cached_outputs</code> grows unbounded across edits. Add an LRU eviction or per-eval clear policy before large graphs become memory-heavy.</li>
   <li><strong>WASM smoke test.</strong> Sandbox can't bind a local HTTP port. Run <code>python -m http.server 8765</code> from <code>demo-wasm/</code> and verify canvas + selection rim + AA convergence by hand after each render-pipeline change.</li>
 </ul>
@@ -532,9 +539,9 @@ hr { border: 0; border-top: 1px dashed var(--rule); margin: 32px 0 20px; }
   <li class="path">scene_renderer/opaque_pass.rs — opaque + depth-only pipelines, <code>build_body_bgl</code>, <code>vertex_layouts()</code> (slot 0 = pos+normal, slot 1 = vec4 color)</li>
   <li class="path">scene_renderer/opaque_shaders.rs — Blinn-Phong WGSL with <code>B</code> per-body uniform + <code>@location(2)</code> v_color</li>
   <li class="path">scene_renderer/depth_peel/ — MatterCAD-style dual peeling (init / peel / resolve), now multi-body</li>
-  <li class="path">scene_renderer/post_outline/ — selection outline (still single-body — §3 first bullet)</li>
+  <li class="path">scene_renderer/post_outline/ — selection outline for one selected body; extend for multi-select silhouettes per §3</li>
   <li class="path">scene_renderer/gizmo_pass/ — line-list + filled-tri pipelines; <code>handles::{sphere_handle, cube_handle}</code> for §4.1 control gizmos</li>
-  <li class="path">viewport_widget/z_control_gizmo.rs — Stage 1 Z control geometry (drag wiring TBD per §4.1)</li>
+  <li class="path">viewport_widget/z_control_gizmo.rs — Z control geometry + layout; drag state lives in <code>viewport_widget/viewport_widget_interactions.rs</code></li>
   <li class="path">viewport_widget/scene_state.rs — extracted from viewport_widget.rs to keep parent under the 800-line cap</li>
   <li class="path">bed/shadow.rs — contact-shadow chain; now iterates bodies via the shared body-uniform binding</li>
 </ul>
@@ -553,7 +560,7 @@ hr { border: 0; border-top: 1px dashed var(--rule); margin: 32px 0 20px; }
   <li><code>cd C:\Development\rust-apps\atomartist</code></li>
   <li><code>cargo test --workspace</code> — 500+ passing at this snapshot. The <code>first_party_project_files_stay_under_line_limit</code> test is the canonical line-cap reporter.</li>
   <li><code>cargo check -p demo-wasm --target wasm32-unknown-unknown</code> — must stay clean.</li>
-  <li><strong>§4.1 remaining gizmos (rotate / bounds-edit / handle-meshes)</strong> — XY-edge + Z drags landed; rotate-corner and bounds-edit are next. Same pattern: extend `CameraDrag` with a new variant, write the per-frame math in `viewport_widget/body_drag.rs`, push through `set_node_matrix_with_undo`.</li>
+  <li><strong>§4.1 remaining gizmos (XY edge arrows / rotate / bounds-edit / handle-meshes)</strong> — body XY drag and Z-control drag landed; XY edge arrows, rotate-corner, and bounds-edit are next. Same pattern: extend <code>CameraDrag</code> with a new variant, write the per-frame math in <code>viewport_widget/body_drag.rs</code>, and push through <code>set_node_matrix_with_undo</code> or the relevant property command.</li>
   <li>Or pick a single §1.x node cluster and finish it (small primitives, transform variants, deformations, path ops, generators, structural nodes, fields). Each cluster's NodeDef + tests + property panel row + node-search palette listing should land together.</li>
   <li>Or pick §5.3 (canvas affordances — node search palette, inline rename, drag-reorder, expanded context menu, comment / frame nodes). The undo stack handles every action through the existing AppStateModel commands once new mutations route through it.</li>
   <li>Test-first bug-fixing rule per <code>CLAUDE.md</code> — if a port reveals a bug, write the reproducing test before the fix.</li>
