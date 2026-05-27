@@ -2,6 +2,19 @@
 
 [![AtomArtist](readme_hero.png)](https://larsbrubaker.github.io/atomartist/)
 
+## Support the Project
+
+<a href="https://buymeacoffee.com/larsbrubaker"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="50" width="210"></a>
+
+AtomArtist is open-source and free to use, maintained in spare time as a labor of love. Friends James Smith and Dan Ruskin help out from time to time too.
+
+If you find it useful, here are a few ways to help keep development going:
+
+- **Donations:** [Buy Me a Coffee](https://buymeacoffee.com/larsbrubaker) — every coffee helps.
+- **Star the repo:** Costs nothing and helps others find the project.
+- **Report issues:** [Open an issue](https://github.com/larsbrubaker/atomartist/issues) for bugs or feature ideas.
+- **Contribute:** PRs welcome — open an issue first to discuss larger changes.
+
 A visual node-based 3D design tool. Wire together typed nodes — primitives, transforms,
 boolean operations, extrusions, imported meshes — and watch the resulting 3D geometry
 update live in the viewport.
@@ -93,19 +106,6 @@ cargo test --workspace
 ```
 
 ---
-
-## Support the Project
-
-<a href="https://buymeacoffee.com/larsbrubaker"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="50" width="210"></a>
-
-AtomArtist is open-source and free to use, maintained in spare time as a labor of love. Friends James Smith and Dan Ruskin help out from time to time too.
-
-If you find it useful, here are a few ways to help keep development going:
-
-- **Donations:** [Buy Me a Coffee](https://buymeacoffee.com/larsbrubaker) — every coffee helps.
-- **Star the repo:** Costs nothing and helps others find the project.
-- **Report issues:** [Open an issue](https://github.com/larsbrubaker/atomartist/issues) for bugs or feature ideas.
-- **Contribute:** PRs welcome — open an issue first to discuss larger changes.
 
 ## License
 
