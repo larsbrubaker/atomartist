@@ -1,5 +1,7 @@
 # AtomArtist
 
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy_Me_A_Coffee-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/larsbrubaker)
+
 [![AtomArtist](readme_hero.png)](https://larsbrubaker.github.io/atomartist/)
 
 A visual node-based 3D design tool. Wire together typed nodes — primitives, transforms,
