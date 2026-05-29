@@ -5,6 +5,7 @@
 
 use super::*;
 use super::body_drag;
+use super::rotate_gizmo;
 use super::viewport_widget_helpers::selected_body_world_aabb;
 use super::z_control_gizmo;
 use crate::picking::{pick_handle, pick_origin, raycast_mesh, GizmoHandle, HitPlane};
@@ -80,13 +81,18 @@ impl Viewport3dWidget {
                             // Hit-test in priority order:
                             //   1. Z control sphere — small target,
                             //      must win over the body underneath.
-                            //   2. Anything else (body or empty) →
+                            //   2. Rotate ring handle — also a small
+                            //      target sitting off to the side of
+                            //      the body; must win over the body.
+                            //   3. Anything else (body or empty) →
                             //      Selecting variant with the body
                             //      pick captured so mouse-up can
                             //      reliably select, and mouse-move
                             //      past threshold can promote to
                             //      `DragBodyXY` for translate.
                             if let Some(pending) = self.try_start_z_drag(pos) {
+                                self.drag = pending;
+                            } else if let Some(pending) = self.try_start_rotate_drag(pos) {
                                 self.drag = pending;
                             } else {
                                 let (picked_body, anchor_bed_pt) =
@@ -292,6 +298,54 @@ impl Viewport3dWidget {
                 }
                 EventResult::Consumed
             }
+            CameraDrag::RotateBodyZ { .. } => {
+                // Pull the fields out (drops the mutable `drag` borrow)
+                // so we can call back into `self.cam()` / `self.inputs`.
+                if let CameraDrag::RotateBodyZ {
+                    node_id,
+                    start_local,
+                    center_xy,
+                    plane_z,
+                    last_angle,
+                    accumulated,
+                    start_matrix,
+                } = self.drag.clone()
+                {
+                    let w = self.bounds.width.max(1.0);
+                    let h = self.bounds.height.max(1.0);
+                    let cursor_td = (pos.x, h - pos.y);
+                    let (ray_o, ray_d) = {
+                        let cam = self.cam();
+                        cam.screen_to_ray(cursor_td, (w, h))
+                    };
+                    if let Some(cur_angle) =
+                        body_drag::bed_angle_about_center(ray_o, ray_d, plane_z, center_xy)
+                    {
+                        // Integrate the shortest signed step into the
+                        // running total so a multi-turn swing tracks
+                        // the pointer across the ±π atan2 seam.
+                        let step = body_drag::normalize_angle(cur_angle - last_angle);
+                        let new_accumulated = accumulated + step;
+                        let new_matrix = body_drag::rotate_about_world_z(
+                            start_matrix,
+                            center_xy,
+                            new_accumulated,
+                        );
+                        self.inputs.push_node_matrix(node_id, new_matrix);
+                        // Stash the updated angle integrator back.
+                        self.drag = CameraDrag::RotateBodyZ {
+                            node_id,
+                            start_local,
+                            center_xy,
+                            plane_z,
+                            last_angle: cur_angle,
+                            accumulated: new_accumulated,
+                            start_matrix,
+                        };
+                    }
+                }
+                EventResult::Consumed
+            }
             CameraDrag::DragBodyXY { .. } => {
                 // Branch-local borrow management: pull the fields out
                 // so the mutable `drag` borrow is dropped before we
@@ -387,6 +441,14 @@ impl Viewport3dWidget {
                 self.commit_selection(Some(node_id));
                 EventResult::Consumed
             }
+            CameraDrag::RotateBodyZ { node_id, .. } => {
+                // Rotation committed — the body's new orientation is
+                // already in the graph + coalesced onto the undo stack.
+                // Keep the rotated body selected (matches the translate
+                // gizmos).
+                self.commit_selection(Some(node_id));
+                EventResult::Consumed
+            }
             _ => EventResult::Consumed,
         }
     }
@@ -442,6 +504,47 @@ impl Viewport3dWidget {
             start_local: pos,
             anchor_xy: [cube_center[0], cube_center[1]],
             anchor_z,
+            start_matrix,
+        })
+    }
+
+    /// If the click at `pos` lands on the rotate gizmo's ring handle of
+    /// the currently-selected body, return a pending `RotateBodyZ`
+    /// state. `None` otherwise. Mirrors [`Self::try_start_z_drag`] —
+    /// same handle-pick + matrix-read shape, but seeds the pointer
+    /// angle on the ring's horizontal plane instead of a Z anchor.
+    pub(super) fn try_start_rotate_drag(&self, pos: Point) -> Option<CameraDrag> {
+        let sel_id = (*self.inputs.selection.lock().unwrap())?;
+        let geom = self.current_geometry();
+        let world_aabb = selected_body_world_aabb(geom.as_deref(), sel_id)?;
+        let cam = self.cam();
+        let vh = self.bounds.height.max(1.0) as f32;
+        let layout = rotate_gizmo::rotate_layout_for_aabb(world_aabb, &cam, vh);
+        let half = layout.handle_size * 0.5;
+        let handle = GizmoHandle {
+            id: rotate_gizmo::ROTATE_HANDLE_ID,
+            center: layout.handle_center,
+            half_extent: [half, half, half],
+        };
+        let w = self.bounds.width.max(1.0);
+        let h = self.bounds.height.max(1.0);
+        let cursor_td = (pos.x, h - pos.y);
+        let (ray_o, ray_d) = self.cam().screen_to_ray(cursor_td, (w, h));
+        pick_handle(std::slice::from_ref(&handle), ray_o, ray_d)?;
+        let start_matrix = self.read_node_matrix(sel_id)?;
+        // Seed the integrator at the pointer's current angle so the
+        // first move computes a delta of ~0 — the body doesn't jump on
+        // grab. `None` (pointer ray parallel to the ring plane) aborts
+        // the drag rather than starting from a bogus angle.
+        let anchor_angle =
+            body_drag::bed_angle_about_center(ray_o, ray_d, layout.plane_z, layout.center_xy)?;
+        Some(CameraDrag::RotateBodyZ {
+            node_id: sel_id,
+            start_local: pos,
+            center_xy: layout.center_xy,
+            plane_z: layout.plane_z,
+            last_angle: anchor_angle,
+            accumulated: 0.0,
             start_matrix,
         })
     }

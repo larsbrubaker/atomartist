@@ -62,6 +62,14 @@ impl Viewport3dWidget {
                     z_control_gizmo::z_control_for_aabb(world_aabb, &cam, vh, idle);
                 s.gizmo_lines.push(arrow);
                 s.gizmo_triangles.push(sphere);
+                // Rotate gizmo — a ring + grab handle encircling the
+                // body at its mid-height. Same idle colour + camera
+                // sizing as the Z control so the two controls read as a
+                // matched set.
+                let (ring, knob) =
+                    rotate_gizmo::rotate_gizmo_for_aabb(world_aabb, &cam, vh, idle);
+                s.gizmo_lines.push(ring);
+                s.gizmo_triangles.push(knob);
             }
         }
         s.outline_color = outline_color;

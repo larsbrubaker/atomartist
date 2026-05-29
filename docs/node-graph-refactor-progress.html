@@ -329,18 +329,23 @@ hr { border: 0; border-top: 1px dashed var(--rule); margin: 32px 0 20px; }
 <h3>4.1 Control gizmos — remaining variants <span class="badge gap">extend per gizmo</span></h3>
 <p>
   Drag infrastructure landed: ray construction, body / handle picking,
-  bed-plane projection, Z-axis projection, matrix write-back through
-  <code>AppState::set_node_matrix_with_undo</code> with per-stroke
-  coalescing. Body XY drag (mouse-down on a body's mesh → translate on
-  the bed plane) and Z control drag (mouse-down on the sphere handle
-  → translate along world Z) are wired. The pattern lives in
-  <code>viewport_widget/body_drag.rs</code> (pure math) +
+  bed-plane projection, Z-axis projection, ring-plane angle read, matrix
+  write-back through <code>AppState::set_node_matrix_with_undo</code>
+  with per-stroke coalescing. Body XY drag (mouse-down on a body's mesh
+  → translate on the bed plane), Z control drag (mouse-down on the
+  sphere handle → translate along world Z), and <strong>rotate-Z drag</strong>
+  (mouse-down on the rotate ring handle → spin about the world vertical
+  axis through the body's footprint centre) are wired. The pattern lives
+  in <code>viewport_widget/body_drag.rs</code> (pure math) +
   <code>viewport_widget/viewport_widget_interactions.rs</code>
-  (state machine). Remaining gizmos:
+  (state machine), with the <code>CameraDrag</code> state enum extracted
+  to <code>viewport_widget/camera_drag.rs</code> and per-gizmo geometry
+  in <code>viewport_widget/{z_control_gizmo,rotate_gizmo}.rs</code>.
+  Remaining gizmos:
 </p>
 <ul>
   <li><strong>XY edge-arrow control</strong> — <code class="ref-nd">xy-control-gizmo.js</code> (561) + <code class="ref-nd">xy-width-depth-drag.js</code> (807). 4 edge arrows that scale width / depth (not whole-body translate — that's already covered by the bed-plane drag landed above). Reuse the existing handle-pick + drag-state pattern; the write target is the upstream primitive's <code>width</code> / <code>depth</code> property instead of <code>matrix</code>.</li>
-  <li><strong>Rotate corner</strong> — <code class="ref-nd">rotate-corner-gizmo.js</code> (813) + <code class="ref-nd">rotate-corner-drag.js</code> (274). Corner-mounted rotation handles. Pattern: project ray onto the rotation plane → compute angle delta → compose into the body's <code>matrix</code> rotation.</li>
+  <li><strong>Rotate corner — Z-axis landed; X / Y axes + corner handles remaining.</strong> <code class="ref-nd">rotate-corner-gizmo.js</code> (813) + <code class="ref-nd">rotate-corner-drag.js</code> (274). The world-Z rotate is wired as a ring + grab handle: <code>body_drag::bed_angle_about_center</code> reads the pointer angle on the ring's horizontal plane, <code>body_drag::rotate_about_world_z</code> pre-multiplies <code>T(C)·Rz(θ)·T(-C)</code> onto the node matrix so the spin lands about the world axis regardless of upstream transforms, and the per-frame step is integrated through the ±π atan2 seam via <code>normalize_angle</code> for multi-turn drags. Remaining: rotation about world X / Y (tilt) and NodeDesigner's four corner-mounted handles if we want axis-specific grab targets rather than a single ring.</li>
   <li><strong>Bounds edit handles</strong> — extend the read-only bounds gizmo with 8 corner + 6 face drag handles for resizing <code>FitToBounds</code> (writes <code>width</code> / <code>height</code> / <code>depth</code>).</li>
   <li><strong>Drag-on-line / drag-on-plane handles</strong> — <code class="ref-nd">handle-meshes.js</code> (257). Per-vertex draggable spheres for node properties that expose a "grab this point" affordance. Geometry side already lands via <code>sphere_handle</code> / <code>cube_handle</code>; needs node-property → handle position binding + drag-back-into-property write.</li>
   <li><strong>Selection-while-dragging</strong> — currently a body XY drag promotes the dragged body to the active selection on mouse-up. NodeDesigner also shows the gizmos LIVE as soon as the body becomes selected mid-drag (i.e. on the first 2-px movement past threshold). Consider promoting selection earlier so the Z-control + future gizmos appear without waiting for mouse-up.</li>
@@ -517,7 +522,7 @@ hr { border: 0; border-top: 1px dashed var(--rule); margin: 32px 0 20px; }
 
 <h2>10. House-keeping debt</h2>
 <ul>
-  <li><strong>File-line guardrail.</strong> Files closest to the 800-line cap now: <code>atomartist-renderer/src/viewport_widget.rs</code> (761), <code>demo-native/src/main.rs</code> (745), and <code>scene_renderer/mod.rs</code> (726). Refactor before adding more state.</li>
+  <li><strong>File-line guardrail.</strong> Files closest to the 800-line cap now: <code>demo-native/src/main.rs</code> (745) and <code>scene_renderer/mod.rs</code> (726). <code>viewport_widget.rs</code> dropped to 686 after the <code>CameraDrag</code> enum moved out to <code>viewport_widget/camera_drag.rs</code> during the rotate-gizmo work. Refactor before adding more state.</li>
   <li><strong>Renderer body-handle plumbing.</strong> <code>BodyDrawHandle</code> is shared across opaque + dual-peel + bed-shadow. Outline now supports a selected body index; revisit if multi-select requires outlining several bodies in one pass (§3 first bullet).</li>
   <li><strong>Cached-output retention.</strong> <code>NodeInstance.cached_outputs</code> grows unbounded across edits. Add an LRU eviction or per-eval clear policy before large graphs become memory-heavy.</li>
   <li><strong>WASM smoke test.</strong> Sandbox can't bind a local HTTP port. Run <code>python -m http.server 8765</code> from <code>demo-wasm/</code> and verify canvas + selection rim + AA convergence by hand after each render-pipeline change.</li>
@@ -553,7 +558,9 @@ hr { border: 0; border-top: 1px dashed var(--rule); margin: 32px 0 20px; }
   <li class="path">scene_renderer/depth_peel/ — MatterCAD-style dual peeling (init / peel / resolve), now multi-body</li>
   <li class="path">scene_renderer/post_outline/ — selection outline for one selected body; extend for multi-select silhouettes per §3</li>
   <li class="path">scene_renderer/gizmo_pass/ — line-list + filled-tri pipelines; <code>handles::{sphere_handle, cube_handle}</code> for §4.1 control gizmos</li>
-  <li class="path">viewport_widget/z_control_gizmo.rs — Z control geometry + layout; drag state lives in <code>viewport_widget/viewport_widget_interactions.rs</code></li>
+  <li class="path">viewport_widget/camera_drag.rs — <code>CameraDrag</code> drag-state enum (one variant per camera gesture + body/gizmo drag); transitions in <code>viewport_widget_interactions.rs</code></li>
+  <li class="path">viewport_widget/z_control_gizmo.rs — Z control geometry + layout</li>
+  <li class="path">viewport_widget/rotate_gizmo.rs — rotate-Z ring + grab-handle geometry + layout; drag math in <code>body_drag.rs</code> (<code>bed_angle_about_center</code>, <code>normalize_angle</code>, <code>rotate_about_world_z</code>)</li>
   <li class="path">viewport_widget/scene_state.rs — extracted from viewport_widget.rs to keep parent under the 800-line cap</li>
   <li class="path">bed/shadow.rs — contact-shadow chain; now iterates bodies via the shared body-uniform binding</li>
 </ul>
@@ -572,7 +579,7 @@ hr { border: 0; border-top: 1px dashed var(--rule); margin: 32px 0 20px; }
   <li><code>cd C:\Development\rust-apps\atomartist</code></li>
   <li><code>cargo test --workspace</code> — 500+ passing at this snapshot. The <code>first_party_project_files_stay_under_line_limit</code> test is the canonical line-cap reporter.</li>
   <li><code>cargo check -p demo-wasm --target wasm32-unknown-unknown</code> — must stay clean.</li>
-  <li><strong>§4.1 remaining gizmos (XY edge arrows / rotate / bounds-edit / handle-meshes)</strong> — body XY drag and Z-control drag landed; XY edge arrows, rotate-corner, and bounds-edit are next. Same pattern: extend <code>CameraDrag</code> with a new variant, write the per-frame math in <code>viewport_widget/body_drag.rs</code>, and push through <code>set_node_matrix_with_undo</code> or the relevant property command.</li>
+  <li><strong>§4.1 remaining gizmos (XY edge arrows / bounds-edit / handle-meshes / multi-axis rotate)</strong> — body XY drag, Z-control drag, and world-Z rotate landed; XY edge arrows and bounds-edit are next. Same pattern: add a <code>CameraDrag</code> variant in <code>viewport_widget/camera_drag.rs</code>, write the per-frame math in <code>viewport_widget/body_drag.rs</code> (unit-tested as pure functions), build the gizmo geometry as a sibling of <code>z_control_gizmo.rs</code> / <code>rotate_gizmo.rs</code>, push the gizmo sets in <code>scene_state.rs</code>, add a <code>try_start_*_drag</code> hit-test to the mouse-down priority ladder, and route the write through <code>set_node_matrix_with_undo</code> (matrix gizmos) or the relevant property command (width/depth/bounds gizmos).</li>
   <li>Or pick §1.6 Components: first harden the NodeDesigner-style input / output socket model, then add embedded component JSON documents in <code>.atmr</code>, reusable component instances, component DAG validation, Save Selection as Component, Add Component search/import, and breadcrumb drill-down navigation.</li>
   <li>Or pick a single §1.x node cluster and finish it (small primitives, transform variants, deformations, path ops, generators, structural nodes, fields). Each cluster's NodeDef + tests + property panel row + node-search palette listing should land together.</li>
   <li>Or pick §5.3 (canvas affordances — node search palette, inline rename, drag-reorder, expanded context menu, comment / frame nodes). The undo stack handles every action through the existing AppStateModel commands once new mutations route through it.</li>
