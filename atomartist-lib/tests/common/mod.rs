@@ -15,7 +15,8 @@
 
 #![allow(dead_code)]
 
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 use atomartist_lib::graph::node::PortValue;
 use atomartist_lib::graph::socket::SocketUidAlloc;
@@ -134,30 +135,45 @@ impl NodeDef for BlockingConsumer {
     }
 }
 
+/// Per-instance connect / disconnect hook counters for
+/// [`CountingConsumer`]. The counts live in `Arc<AtomicU32>` carried by
+/// the registered def — NOT in a process-global — so each test that
+/// builds its own registry via [`registry_with_counters`] observes an
+/// isolated count and parallel `cargo test` runs never race. `Clone`
+/// hands the same shared counters to both the registered def and the
+/// asserting test.
+#[derive(Clone, Default)]
+pub struct ConnectCounters {
+    connects: Arc<AtomicU32>,
+    disconnects: Arc<AtomicU32>,
+}
+
+impl ConnectCounters {
+    pub fn connect_count(&self) -> u32 {
+        self.connects.load(Ordering::Relaxed)
+    }
+    pub fn disconnect_count(&self) -> u32 {
+        self.disconnects.load(Ordering::Relaxed)
+    }
+}
+
 /// Counts the number of times its connect / disconnect hooks fire.
 /// JS's `node.onConnectionsChange = () => { ... }` on the input side
 /// maps onto atomartist's `on_input_connected` /
-/// `on_input_disconnected` — this fixture lets a test assert both
-/// fire exactly once per wire mutation.
+/// `on_input_disconnected` — this fixture lets a test assert both fire
+/// exactly once per wire mutation.
 ///
-/// State lives behind global mutexes because `NodeDef::on_*` receive
-/// `&self` and the registry holds the def behind `Arc<dyn NodeDef>`.
-/// Tests must call [`CountingConsumer::reset`] first.
-pub struct CountingConsumer;
-
-static CONNECT_COUNT: Mutex<u32> = Mutex::new(0);
-static DISCONNECT_COUNT: Mutex<u32> = Mutex::new(0);
+/// `NodeDef::on_*` receive `&self` and the registry holds the def
+/// behind `Arc<dyn NodeDef>`, so the counts ride a shared
+/// [`ConnectCounters`] handed in at construction. No global state →
+/// no cross-test races.
+pub struct CountingConsumer {
+    counters: ConnectCounters,
+}
 
 impl CountingConsumer {
-    pub fn reset() {
-        *CONNECT_COUNT.lock().unwrap() = 0;
-        *DISCONNECT_COUNT.lock().unwrap() = 0;
-    }
-    pub fn connect_count() -> u32 {
-        *CONNECT_COUNT.lock().unwrap()
-    }
-    pub fn disconnect_count() -> u32 {
-        *DISCONNECT_COUNT.lock().unwrap()
+    pub fn new(counters: ConnectCounters) -> Self {
+        Self { counters }
     }
 }
 
@@ -173,10 +189,10 @@ impl NodeDef for CountingConsumer {
         Ok(NodeOutputs::default())
     }
     fn on_input_connected(&self, _ctx: &mut ConnectCtx) {
-        *CONNECT_COUNT.lock().unwrap() += 1;
+        self.counters.connects.fetch_add(1, Ordering::Relaxed);
     }
     fn on_input_disconnected(&self, _ctx: &mut DisconnectCtx) {
-        *DISCONNECT_COUNT.lock().unwrap() += 1;
+        self.counters.disconnects.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -217,8 +233,20 @@ impl NodeDef for MultiOutputSource {
     }
 }
 
-/// Build a registry pre-populated with every test fixture node.
+/// Build a registry pre-populated with every test fixture node. The
+/// `CountingConsumer` gets throwaway counters; use
+/// [`registry_with_counters`] when a test needs to read connect /
+/// disconnect hook counts.
 pub fn registry() -> NodeRegistry {
+    registry_with_counters().0
+}
+
+/// Like [`registry`], but also returns the [`ConnectCounters`] wired
+/// into the registered `CountingConsumer`, so connect / disconnect-hook
+/// tests assert the count off per-test state instead of a shared global
+/// (which raced under parallel `cargo test`).
+pub fn registry_with_counters() -> (NodeRegistry, ConnectCounters) {
+    let counters = ConnectCounters::default();
     let mut r = NodeRegistry::new();
     r.register(ProducerNumber);
     r.register(ConsumerNumber);
@@ -226,14 +254,14 @@ pub fn registry() -> NodeRegistry {
     r.register(PassthroughNumber);
     r.register(LoopableNumber);
     r.register(BlockingConsumer);
-    r.register(CountingConsumer);
+    r.register(CountingConsumer::new(counters.clone()));
     r.register(BareNode);
     r.register(MultiOutputSource);
     // Register all built-in atomartist node types so tests that
     // exercise dynamic-input nodes (Output, Combine, …) can spawn
     // them by `type_id`.
     atomartist_lib::nodes::register_all(&mut r);
-    r
+    (r, counters)
 }
 
 // ---------------------------------------------------------------------------

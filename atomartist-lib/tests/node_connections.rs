@@ -35,7 +35,7 @@ use atomartist_lib::graph::socket::SocketUid;
 use atomartist_lib::SocketType;
 
 use common::{
-    in_ep, noodle_into, noodles_from, out_ep, registry, CountingConsumer,
+    in_ep, noodle_into, noodles_from, out_ep, registry, registry_with_counters,
 };
 
 // ===========================================================================
@@ -246,8 +246,7 @@ fn output_can_connect_to_multiple_inputs() {
 /// JS: "connect triggers onConnectionsChange on target"
 #[test]
 fn connect_fires_on_input_connected_on_target() {
-    CountingConsumer::reset();
-    let reg = registry();
+    let (reg, counters) = registry_with_counters();
     let mut g = Graph::new();
     let src = g.add_new_node("test::ProducerNumber", [0.0, 0.0], &reg).unwrap();
     let dst = g.add_new_node("test::CountingConsumer", [100.0, 0.0], &reg).unwrap();
@@ -259,7 +258,7 @@ fn connect_fires_on_input_connected_on_target() {
         &reg,
     )
     .unwrap();
-    assert_eq!(CountingConsumer::connect_count(), 1);
+    assert_eq!(counters.connect_count(), 1);
 }
 
 /// JS: "connect triggers onConnectionsChange on source"
@@ -397,8 +396,7 @@ fn disconnect_removes_connection_from_input() {
 /// JS: "disconnectInput triggers onConnectionsChange"
 #[test]
 fn disconnect_fires_on_input_disconnected_on_target() {
-    CountingConsumer::reset();
-    let reg = registry();
+    let (reg, counters) = registry_with_counters();
     let mut g = Graph::new();
     let src = g.add_new_node("test::ProducerNumber", [0.0, 0.0], &reg).unwrap();
     let dst = g.add_new_node("test::CountingConsumer", [100.0, 0.0], &reg).unwrap();
@@ -408,7 +406,7 @@ fn disconnect_fires_on_input_disconnected_on_target() {
     };
     g.connect(noodle, &reg).unwrap();
     g.disconnect(&noodle, &reg).unwrap();
-    assert_eq!(CountingConsumer::disconnect_count(), 1);
+    assert_eq!(counters.disconnect_count(), 1);
 }
 
 // ===========================================================================
