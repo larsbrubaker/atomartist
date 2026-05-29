@@ -110,6 +110,18 @@ pub struct Viewport3dWidget {
     /// `on_mouse_move` resets the drag the next time a hover event
     /// comes in with no buttons held.
     pressed_buttons: u8,
+    /// Which rotate-gizmo axis handle (0=X, 1=Y, 2=Z) the cursor is
+    /// currently hovering, if any. Updated each `MouseMove` while idle
+    /// (no drag) so the hovered handle paints accent-colored and its
+    /// rotation compass appears — MatterCAD's `MouseIsOver` behaviour,
+    /// but tracked per-axis since we have three handles. `None` when
+    /// the cursor is over no rotate handle.
+    hovered_rotate_axis: Option<u8>,
+    /// Latest keyboard modifier state, refreshed on every mouse-down and
+    /// key up/down. `MouseMove` carries no modifiers, so the rotate drag
+    /// reads this to honour the Shift-to-45° snap lock live mid-drag
+    /// (MatterCAD's `ModifierKeys == Shift` check).
+    current_mods: Modifiers,
 }
 
 impl Viewport3dWidget {
@@ -135,6 +147,8 @@ impl Viewport3dWidget {
             },
             pivot_on_scene: false,
             pressed_buttons: 0,
+            hovered_rotate_axis: None,
+            current_mods: Modifiers::default(),
         }
     }
 
@@ -647,6 +661,7 @@ impl Widget for Viewport3dWidget {
     fn on_event(&mut self, event: &Event) -> EventResult {
         match event {
             Event::MouseDown { pos, button, modifiers, .. } => {
+                self.current_mods = *modifiers;
                 self.note_mouse_down(*button);
                 self.on_mouse_down(*pos, *button, *modifiers)
             }
@@ -656,7 +671,16 @@ impl Widget for Viewport3dWidget {
             }
             Event::MouseMove { pos } => self.on_mouse_move(*pos),
             Event::MouseWheel { pos, delta_y, .. } => self.on_wheel_at_pos(*pos, *delta_y),
-            Event::KeyDown { key, modifiers } => self.on_key_down(key, *modifiers),
+            Event::KeyDown { key, modifiers } => {
+                // Track Shift etc. live so a mid-drag rotate can read the
+                // snap-lock state (MouseMove carries no modifiers).
+                self.current_mods = *modifiers;
+                self.on_key_down(key, *modifiers)
+            }
+            Event::KeyUp { modifiers, .. } => {
+                self.current_mods = *modifiers;
+                EventResult::Ignored
+            }
             _ => EventResult::Ignored,
         }
     }
@@ -664,6 +688,9 @@ impl Widget for Viewport3dWidget {
 
 #[path = "viewport_widget/viewport_widget_interactions.rs"]
 mod viewport_widget_interactions;
+
+#[path = "viewport_widget/rotate_interactions.rs"]
+mod rotate_interactions;
 
 #[path = "viewport_widget/scene_state.rs"]
 mod scene_state;
@@ -675,7 +702,7 @@ use camera_drag::CameraDrag;
 #[path = "viewport_widget/z_control_gizmo.rs"]
 mod z_control_gizmo;
 
-#[path = "viewport_widget/rotate_gizmo.rs"]
+#[path = "viewport_widget/rotate_gizmo/mod.rs"]
 mod rotate_gizmo;
 
 #[path = "viewport_widget/body_drag.rs"]

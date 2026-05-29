@@ -97,35 +97,38 @@ pub(super) enum CameraDrag {
         anchor_z: f32,
         start_matrix: [f32; 16],
     },
-    /// Left-button down landed on the rotate gizmo's ring handle. Each
-    /// `MouseMove` intersects the cursor ray with the horizontal plane
-    /// at `plane_z`, measures the angle about `center_xy`, and applies
-    /// a world-Z rotation of the accumulated angle delta to
-    /// `start_matrix`. The rotation is pre-multiplied (applied on the
-    /// LEFT of the node matrix) so the body spins about the world
-    /// vertical axis through `center_xy` regardless of any upstream
-    /// transform — see [`super::body_drag::rotate_about_world_z`].
-    /// MatterCAD's `RotateObject3D` corner control follows the same
-    /// pattern.
-    RotateBodyZ {
+    /// Left-button down landed on one of the rotate gizmo's three
+    /// per-axis corner handles (MatterCAD's `RotateCornerControl`).
+    /// Each `MouseMove` intersects the cursor ray with the rotation
+    /// plane (`normal = axis`, through `center`), measures the pointer
+    /// angle in that plane, snaps it, and applies the rotation about
+    /// the world `axis` through `center` to `start_matrix`. The
+    /// rotation is pre-multiplied (applied on the LEFT of the node
+    /// matrix) so the body spins about the world axis regardless of
+    /// any upstream transform — see
+    /// [`atomartist_lib::graph::node::rotate_about_world_axis`]. The
+    /// matrix is always derived from `start_matrix` + the snapped
+    /// delta, so a coalesced drag undoes back to `start_matrix`.
+    RotateBodyAxis {
         node_id: NodeId,
-        start_local: Point,
-        /// World XY of the rotation axis (the selected body's footprint
-        /// centre at drag start). Fixed across the drag.
-        center_xy: [f32; 2],
-        /// World Z of the plane the cursor ray is intersected against
-        /// to read the pointer's angle. The body's mid-height at drag
-        /// start — keeps the angle read stable as the body spins.
-        plane_z: f32,
-        /// Pointer angle (radians, CCW from world +X about `center_xy`)
-        /// at the previous `MouseMove`. Combined with `accumulated` to
-        /// integrate full multi-turn rotations without the ±π atan2
-        /// wrap snapping the body.
-        last_angle: f32,
-        /// Running sum of per-frame angle steps since drag start. The
-        /// body's rotation each frame is `start_matrix` rotated by this
-        /// total, so a coalesced drag undoes back to `start_matrix`.
-        accumulated: f32,
+        /// Which world axis the body spins about: 0=X, 1=Y, 2=Z.
+        axis: u8,
+        /// World point the rotation axis passes through — the
+        /// selection's centre with the axis component moved to the
+        /// control corner's plane. Fixed across the drag.
+        center: [f32; 3],
+        /// Pointer angle in the rotation plane at mouse-down. The
+        /// snapped rotation each frame is relative to this anchor.
+        anchor_angle: f32,
+        /// Current snapped rotation (radians) from the anchor. Updated
+        /// every `MouseMove`; read by the compass to draw the swept
+        /// wedge + needle and by the degrees readout. Starts at 0.
+        snapped: f32,
+        /// World-space ring radius (centre→control distance) captured at
+        /// mouse-down. Held fixed so the compass stays put while the
+        /// body's AABB rotates under it, and reused as the base for the
+        /// 8-point snap-mark radius.
+        radius: f32,
         start_matrix: [f32; 16],
     },
 }

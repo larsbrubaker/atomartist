@@ -56,20 +56,86 @@ impl Viewport3dWidget {
                     visuals.text_color.b,
                     1.0,
                 ];
+                let accent = [
+                    visuals.accent.r,
+                    visuals.accent.g,
+                    visuals.accent.b,
+                    1.0,
+                ];
                 let cam = self.cam();
                 let vh = self.bounds.height.max(1.0) as f32;
                 let (arrow, sphere) =
                     z_control_gizmo::z_control_for_aabb(world_aabb, &cam, vh, idle);
                 s.gizmo_lines.push(arrow);
                 s.gizmo_triangles.push(sphere);
-                // Rotate gizmo — a ring + grab handle encircling the
-                // body at its mid-height. Same idle colour + camera
-                // sizing as the Z control so the two controls read as a
-                // matched set.
-                let (ring, knob) =
-                    rotate_gizmo::rotate_gizmo_for_aabb(world_aabb, &cam, vh, idle);
-                s.gizmo_lines.push(ring);
-                s.gizmo_triangles.push(knob);
+                // Rotate gizmo — three per-axis corner handles (MatterCAD
+                // RotateCornerControl). Two display modes:
+                //
+                // * While a rotation is in flight, hide the arrow handles
+                //   (they'd jitter with the spinning AABB) and draw only
+                //   the compass, anchored to the mouse-down capture so it
+                //   stays put — MatterCAD hides the arrows while a control
+                //   is engaged.
+                // * Idle: draw all three handles (accent the hovered one),
+                //   and show the ring + ticks for the hovered axis.
+                match &self.drag {
+                    CameraDrag::RotateBodyAxis {
+                        axis,
+                        center,
+                        anchor_angle,
+                        snapped,
+                        radius,
+                        ..
+                    } => {
+                        let (band, ticks) = rotate_gizmo::ring_and_ticks(
+                            *center, *axis, *radius, &cam, vh, accent, idle,
+                        );
+                        s.gizmo_triangles.push(band);
+                        s.gizmo_lines.push(ticks);
+                        let (otris, olines) = rotate_gizmo::drag_overlay(
+                            *center,
+                            *axis,
+                            *radius,
+                            *anchor_angle,
+                            *snapped,
+                            &cam,
+                            vh,
+                            accent,
+                            idle,
+                        );
+                        for t in otris {
+                            s.gizmo_triangles.push(t);
+                        }
+                        for l in olines {
+                            s.gizmo_lines.push(l);
+                        }
+                    }
+                    _ => {
+                        let layouts = rotate_gizmo::rotate_axis_layouts(world_aabb, &cam, vh);
+                        for handle in rotate_gizmo::rotate_handles(
+                            &layouts,
+                            self.hovered_rotate_axis,
+                            idle,
+                            accent,
+                        ) {
+                            s.gizmo_triangles.push(handle);
+                        }
+                        if let Some(axis) = self.hovered_rotate_axis {
+                            let l = layouts[axis as usize];
+                            let rc = l.rotation_center;
+                            let cc = l.control_center;
+                            let radius = ((cc[0] - rc[0]).powi(2)
+                                + (cc[1] - rc[1]).powi(2)
+                                + (cc[2] - rc[2]).powi(2))
+                            .sqrt();
+                            let (band, ticks) = rotate_gizmo::ring_and_ticks(
+                                rc, axis, radius, &cam, vh, accent, idle,
+                            );
+                            s.gizmo_triangles.push(band);
+                            s.gizmo_lines.push(ticks);
+                        }
+                    }
+                }
             }
         }
         s.outline_color = outline_color;

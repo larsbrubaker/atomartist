@@ -119,6 +119,108 @@ pub fn matmul4x4(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
     r
 }
 
+/// Column-major rotation about a world axis (`0`=X, `1`=Y, `2`=Z) by
+/// `angle` radians, right-handed. Translation column is identity — use
+/// [`rotate_about_world_axis`] to spin about a point other than the
+/// world origin.
+fn axis_rotation_matrix(axis_index: u8, angle: f32) -> [f32; 16] {
+    let (s, c) = angle.sin_cos();
+    match axis_index {
+        // X: Y→Z
+        0 => [
+            1.0, 0.0, 0.0, 0.0,
+            0.0, c, s, 0.0,
+            0.0, -s, c, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ],
+        // Y: Z→X
+        1 => [
+            c, 0.0, -s, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            s, 0.0, c, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ],
+        // Z: X→Y (default for any out-of-range index)
+        _ => [
+            c, s, 0.0, 0.0,
+            -s, c, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ],
+    }
+}
+
+/// Pre-multiply a world-space rotation of `angle` radians about the
+/// world `axis_index` axis (`0`=X, `1`=Y, `2`=Z) passing through
+/// `center` onto `start`.
+///
+/// The rendered `Body.matrix` is `node_matrix · upstream`
+/// (`registry::geometry_props::compose_with_upstream`). Applying the
+/// rotation on the **left** (`R · node_matrix · upstream`) rotates the
+/// composed body about `center` in *world* space while leaving the
+/// upstream factor untouched — so a gizmo drag spins the body about a
+/// world axis regardless of any upstream transform. `R` is
+/// `T(center) · R_axis(angle) · T(-center)`, built directly in
+/// column-major form: the rotation block is `R_axis`, and the
+/// translation column is `center - R_axis · center` so `center` stays
+/// fixed.
+///
+/// Used by the rotate gizmo (3-axis corner control) and by the
+/// type-an-angle field, which share this so a dragged and a typed
+/// rotation land identically.
+pub fn rotate_about_world_axis(
+    start: &[f32; 16],
+    center: [f32; 3],
+    axis_index: u8,
+    angle: f32,
+) -> [f32; 16] {
+    let mut world_rot = axis_rotation_matrix(axis_index, angle);
+    // R_axis · center (column-major element (row, col) = m[col*4 + row]).
+    let rc = [
+        world_rot[0] * center[0] + world_rot[4] * center[1] + world_rot[8] * center[2],
+        world_rot[1] * center[0] + world_rot[5] * center[1] + world_rot[9] * center[2],
+        world_rot[2] * center[0] + world_rot[6] * center[1] + world_rot[10] * center[2],
+    ];
+    // Translation that keeps `center` fixed: center - R·center.
+    world_rot[12] = center[0] - rc[0];
+    world_rot[13] = center[1] - rc[1];
+    world_rot[14] = center[2] - rc[2];
+    matmul4x4(&world_rot, start)
+}
+
+/// Wrap `angle` into the half-open interval `(-π, π]`. Turns a raw
+/// `current - anchor` pointer-angle difference into the shortest signed
+/// rotation, so a rotate drag takes the short way round and never
+/// snaps a near-full turn when the pointer crosses the ±π atan2 seam.
+pub fn normalize_angle(angle: f32) -> f32 {
+    use std::f32::consts::PI;
+    let two_pi = 2.0 * PI;
+    let mut a = angle % two_pi;
+    if a > PI {
+        a -= two_pi;
+    } else if a <= -PI {
+        a += two_pi;
+    }
+    a
+}
+
+/// Angle (radians) of `hit` about `center`, measured in the plane
+/// perpendicular to the world `axis_index` axis. Mirrors MatterCAD's
+/// `RotateCornerControl.Mouse3DInfo.GetAngleForAxis`: X uses
+/// `atan2(dz, dy)`, Y uses `atan2(dx, dz)`, Z uses `atan2(dy, dx)`.
+/// The per-axis ordering is chosen so an increasing angle corresponds
+/// to a right-handed (positive) rotation about that axis — i.e. the
+/// grabbed point follows the cursor when this feeds
+/// [`rotate_about_world_axis`].
+pub fn angle_on_axis_plane(hit: [f32; 3], center: [f32; 3], axis_index: u8) -> f32 {
+    let d = [hit[0] - center[0], hit[1] - center[1], hit[2] - center[2]];
+    match axis_index {
+        0 => d[2].atan2(d[1]),
+        1 => d[0].atan2(d[2]),
+        _ => d[1].atan2(d[0]),
+    }
+}
+
 /// One node in a `Graph`. Owns its socket layout and the current values of
 /// its named properties; the executor caches the most recent evaluated
 /// outputs in `cached_outputs`.
@@ -277,5 +379,114 @@ mod tests {
         assert_eq!(n.input_by_uid(SocketUid(7)).unwrap().name.as_ref(), "size");
         assert_eq!(n.input_index_by_uid(SocketUid(7)), Some(0));
         assert!(n.input_by_name("missing").is_none());
+    }
+
+    /// Transform a point through a column-major 4×4 — test-only helper.
+    fn xform(m: &[f32; 16], p: [f32; 3]) -> [f32; 3] {
+        [
+            m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12],
+            m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13],
+            m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14],
+        ]
+    }
+
+    fn approx(a: [f32; 3], b: [f32; 3]) -> bool {
+        (a[0] - b[0]).abs() < 1e-4 && (a[1] - b[1]).abs() < 1e-4 && (a[2] - b[2]).abs() < 1e-4
+    }
+
+    #[test]
+    fn rotate_about_world_axis_quarter_turns_map_known_points() {
+        let q = std::f32::consts::FRAC_PI_2;
+        // X axis: +Y → +Z.
+        let mx = rotate_about_world_axis(&identity_matrix(), [0.0, 0.0, 0.0], 0, q);
+        assert!(approx(xform(&mx, [0.0, 1.0, 0.0]), [0.0, 0.0, 1.0]));
+        // Y axis: +Z → +X.
+        let my = rotate_about_world_axis(&identity_matrix(), [0.0, 0.0, 0.0], 1, q);
+        assert!(approx(xform(&my, [0.0, 0.0, 1.0]), [1.0, 0.0, 0.0]));
+        // Z axis: +X → +Y.
+        let mz = rotate_about_world_axis(&identity_matrix(), [0.0, 0.0, 0.0], 2, q);
+        assert!(approx(xform(&mz, [1.0, 0.0, 0.0]), [0.0, 1.0, 0.0]));
+    }
+
+    #[test]
+    fn rotate_about_world_axis_keeps_center_fixed() {
+        let center = [3.0, -2.0, 5.0];
+        for axis in 0..3u8 {
+            let m = rotate_about_world_axis(&identity_matrix(), center, axis, 1.1);
+            assert!(
+                approx(xform(&m, center), center),
+                "axis {axis} moved its own center",
+            );
+        }
+    }
+
+    #[test]
+    fn rotate_about_world_axis_zero_angle_is_identity() {
+        let start: [f32; 16] = [
+            2.0, 0.0, 0.0, 0.0,
+            0.0, 3.0, 0.0, 0.0,
+            0.0, 0.0, 4.0, 0.0,
+            5.0, 6.0, 7.0, 1.0,
+        ];
+        let out = rotate_about_world_axis(&start, [1.0, 2.0, 3.0], 1, 0.0);
+        for i in 0..16 {
+            assert!((out[i] - start[i]).abs() < 1e-5, "entry {i} drifted");
+        }
+    }
+
+    #[test]
+    fn rotate_about_world_axis_premultiplies_into_world_space() {
+        // Body translated to (10,0,0); +90° about world Z through the
+        // origin must swing its origin to (0,10,0) — a world-axis spin,
+        // not a spin about the body's own local origin.
+        let start: [f32; 16] = [
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            10.0, 0.0, 0.0, 1.0,
+        ];
+        let out = rotate_about_world_axis(&start, [0.0, 0.0, 0.0], 2, std::f32::consts::FRAC_PI_2);
+        assert!(approx(xform(&out, [0.0, 0.0, 0.0]), [0.0, 10.0, 0.0]));
+    }
+
+    #[test]
+    fn angle_on_axis_plane_matches_per_axis_atan2() {
+        let c = [1.0, 1.0, 1.0];
+        // Z plane: +X direction → 0, +Y direction → +π/2.
+        assert!(angle_on_axis_plane([2.0, 1.0, 1.0], c, 2).abs() < 1e-5);
+        assert!((angle_on_axis_plane([1.0, 2.0, 1.0], c, 2) - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
+        // X plane: +Y direction → 0 (atan2(dz,dy)), +Z direction → +π/2.
+        assert!(angle_on_axis_plane([1.0, 2.0, 1.0], c, 0).abs() < 1e-5);
+        assert!((angle_on_axis_plane([1.0, 1.0, 2.0], c, 0) - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
+        // Y plane: +Z direction → 0 (atan2(dx,dz)), +X direction → +π/2.
+        assert!(angle_on_axis_plane([1.0, 1.0, 2.0], c, 1).abs() < 1e-5);
+        assert!((angle_on_axis_plane([2.0, 1.0, 1.0], c, 1) - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
+    }
+
+    /// The measure (`angle_on_axis_plane`) and the apply
+    /// (`rotate_about_world_axis`) must agree in direction for every
+    /// axis: rotating by the measured angle of a point lands that point
+    /// on the axis's "zero" ray. This is what makes the grabbed handle
+    /// follow the cursor on all three rings.
+    #[test]
+    fn measure_and_apply_agree_per_axis() {
+        for axis in 0..3u8 {
+            let center = [0.0, 0.0, 0.0];
+            // A point off the zero-ray in this axis's plane.
+            let p = match axis {
+                0 => [0.0, 1.0, 1.0],   // X plane (y,z)
+                1 => [1.0, 0.0, 1.0],   // Y plane (z,x)
+                _ => [1.0, 1.0, 0.0],   // Z plane (x,y)
+            };
+            let a = angle_on_axis_plane(p, center, axis);
+            // Rotating by -a should bring the point onto the zero ray
+            // (angle 0) for that axis.
+            let m = rotate_about_world_axis(&identity_matrix(), center, axis, -a);
+            let rotated = xform(&m, p);
+            assert!(
+                angle_on_axis_plane(rotated, center, axis).abs() < 1e-4,
+                "axis {axis}: measure/apply disagree",
+            );
+        }
     }
 }
