@@ -14,13 +14,14 @@
 //! Colour matches MatterCAD: monochrome — idle = theme text colour,
 //! hover = accent — NOT per-axis red/green/blue.
 
+mod arrow;
 mod compass;
 mod corners;
 mod handle;
 
 pub use compass::{drag_overlay, ring_and_ticks};
 pub use corners::{rotate_axis_layouts, RotateAxisLayout};
-pub use handle::plate_handle;
+pub use handle::arrow_handle;
 
 use crate::scene_renderer::gizmo_pass::GizmoTriangleSet;
 
@@ -62,7 +63,7 @@ pub fn rotate_handles(
         .iter()
         .map(|l| {
             let color = if hovered_axis == Some(l.axis) { accent } else { idle };
-            plate_handle(l.control_center, l.axis, l.handle_size, color)
+            arrow_handle(l.control_center, l.axis, l.handle_size, color)
         })
         .collect()
 }

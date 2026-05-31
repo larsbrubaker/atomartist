@@ -418,7 +418,17 @@ impl TumbleCubeWidget {
                 }
                 EventResult::Consumed
             }
-            _ => EventResult::Consumed,
+            // A real cube drag just ended — that release was ours.
+            CubeDrag::Rotating { .. } => EventResult::Consumed,
+            // No cube gesture was in flight, so this release belongs to
+            // someone else. The cube is stacked ABOVE the 3-D viewport in
+            // `ViewportOverlay`, whose `on_event` forwards every MouseUp
+            // to each child (top-down) and stops at the first that
+            // consumes. Returning `Consumed` here would swallow the
+            // release that ends a viewport body-drag — leaving the body
+            // glued to the cursor. Ignore it so it falls through to the
+            // viewport (the overlay's last, bottom-most child).
+            CubeDrag::None => EventResult::Ignored,
         }
     }
 }

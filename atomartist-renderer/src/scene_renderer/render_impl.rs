@@ -80,6 +80,73 @@ mod shadow_key_tests {
     }
 }
 
+/// Model matrix for the body the selection-outline ID prepass
+/// rasterises. `index` addresses `bodies` (built in lockstep with the
+/// GPU body list by `ensure_body_buffers`). Returns identity when the
+/// index is out of range — a defensive fallback that draws the
+/// silhouette at the mesh origin rather than panicking.
+///
+/// This is the seam that keeps the outline glued to its body: the ID
+/// prepass shader multiplies each LOCAL mesh vertex by
+/// `proj · view · model`, so handing it the body's own matrix is what
+/// makes the silhouette translate and rotate with the body. Returning
+/// identity here (the prior behaviour) froze the outline at the
+/// untransformed mesh position.
+fn outline_model_matrix(bodies: &[atomartist_lib::geometry::Body], index: usize) -> [f32; 16] {
+    bodies.get(index).map(|b| b.matrix).unwrap_or_else(|| {
+        let mut m = [0.0_f32; 16];
+        m[0] = 1.0;
+        m[5] = 1.0;
+        m[10] = 1.0;
+        m[15] = 1.0;
+        m
+    })
+}
+
+#[cfg(test)]
+mod outline_matrix_tests {
+    use super::outline_model_matrix;
+    use atomartist_lib::geometry::Body;
+    use manifold_rust::types::MeshGL;
+    use std::sync::Arc;
+
+    fn body_at(tx: f32) -> Body {
+        let mesh = Arc::new(MeshGL {
+            num_prop: 6,
+            vert_properties: vec![0.0; 6],
+            tri_verts: vec![0, 0, 0],
+            ..Default::default()
+        });
+        let mut m = [0.0_f32; 16];
+        m[0] = 1.0;
+        m[5] = 1.0;
+        m[10] = 1.0;
+        m[15] = 1.0;
+        m[12] = tx;
+        Body::from_mesh(mesh).with_matrix(m)
+    }
+
+    #[test]
+    fn outline_uses_the_selected_bodys_matrix_not_identity() {
+        // Two bodies translated to different X. The outline MVP must
+        // pick up the *selected* body's translation — the regression
+        // that detached the outline used identity (tx = 0) for every
+        // body regardless of where it had been moved.
+        let bodies = [body_at(3.0), body_at(-7.0)];
+        assert_eq!(outline_model_matrix(&bodies, 0)[12], 3.0);
+        assert_eq!(outline_model_matrix(&bodies, 1)[12], -7.0);
+    }
+
+    #[test]
+    fn out_of_range_index_falls_back_to_identity() {
+        let bodies = [body_at(9.0)];
+        let m = outline_model_matrix(&bodies, 5);
+        assert_eq!(m[12], 0.0, "fallback must not inherit a stale translation");
+        assert_eq!(m[0], 1.0);
+        assert_eq!(m[15], 1.0);
+    }
+}
+
 impl WgpuCustomRender for WgpuSceneRenderer {
     fn render(&mut self, ctx: WgpuCustomRenderCtx<'_>) {
         let t_total = web_time::Instant::now();
@@ -386,9 +453,7 @@ impl WgpuCustomRender for WgpuSceneRenderer {
         // outline — every selected body contributes its silhouette
         // to the same ID texture — lands in a follow-up. The
         // outline pipeline needs the same body-uniform binding as
-        // opaque + peel before it can iterate bodies; until then,
-        // outline ignores `body.matrix` and inherits the camera MVP
-        // alone.
+        // opaque + peel before it can iterate bodies.
         let want_outline = self.outline_enabled
             && self.render_style == RenderStyle::Shaded
             && !s.bodies_gpu.is_empty();
@@ -398,15 +463,29 @@ impl WgpuCustomRender for WgpuSceneRenderer {
             // first body when no index was set / out of range. The
             // selection state lives on the host side (viewport
             // `ViewportInputs::selection`), so the renderer never
-            // looks up origin → body itself.
-            let outline_body = self
+            // looks up origin → body itself. `self.bodies` and
+            // `s.bodies_gpu` are built in lockstep by
+            // `ensure_body_buffers`, so this index addresses the same
+            // body in both.
+            let outline_idx = self
                 .outline_body_index
-                .and_then(|i| s.bodies_gpu.get(i))
-                .or_else(|| s.bodies_gpu.first());
+                .filter(|&i| i < s.bodies_gpu.len())
+                .unwrap_or(0);
+            let outline_body = s.bodies_gpu.get(outline_idx);
             if let (Some(body), Some(outline_targets)) = (outline_body, &s.outline_targets)
             {
+                // The ID prepass rasterises the selected mesh's LOCAL
+                // vertices, so its MVP must fold in that body's model
+                // matrix — exactly like the opaque + peel passes, which
+                // apply the matrix per-body in the shader. Without it
+                // the silhouette renders at the mesh's untransformed
+                // origin and the outline detaches from the body the
+                // moment it's translated or rotated.
+                let model =
+                    Mat4::from_cols_array(&outline_model_matrix(&self.bodies, outline_idx));
+                let outline_mvp = (jittered_proj * view * model).to_cols_array();
                 let outline_u = OutlineUniforms {
-                    mvp,
+                    mvp: outline_mvp,
                     outline_color: self.outline_color,
                     resolution: [fb_w as f32, fb_h as f32, 0.0, 0.0],
                     params: [self.outline_width.max(1.0), 0.35, 0.0, 0.0],

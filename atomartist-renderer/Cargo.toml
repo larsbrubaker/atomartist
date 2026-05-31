@@ -17,6 +17,10 @@ agg-gui        = { path = "../../agg-gui/agg-gui", default-features = false }
 atomartist-lib = { path = "../atomartist-lib" }
 demo-wgpu      = { path = "../../agg-gui/demo-wgpu", default-features = false }
 manifold-rust  = { path = "../../manifold-rust" }
+# Polygon tessellation for the rotate-gizmo arrow icon — the same
+# sibling crate `atomartist-lib`'s Extrude node uses. Triangulates the
+# MatterCAD rotation-arrow contour into the gizmo's flat handle plate.
+tess2-rust     = { path = "../../tess2-rust" }
 wgpu           = { version = "29", default-features = false, features = ["wgsl"] }
 bytemuck       = { version = "1", features = ["derive"] }
 glam           = { workspace = true }

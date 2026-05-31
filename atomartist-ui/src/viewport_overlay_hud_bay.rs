@@ -11,7 +11,7 @@
 use std::f64::consts::TAU;
 
 use agg_gui::{
-    Color, DrawCtx, Event, EventResult, HAnchor, Rect, Size, VAnchor, Widget, WidgetBase,
+    Color, DrawCtx, Event, EventResult, HAnchor, Point, Rect, Size, VAnchor, Widget, WidgetBase,
 };
 use agg_rust::arc::Arc as AggArc;
 use agg_rust::basics::{is_close, is_line_to, is_move_to, is_stop, VertexSource};
@@ -144,6 +144,17 @@ impl Widget for HudBayLayer {
     }
 
     fn on_event(&mut self, _: &Event) -> EventResult { EventResult::Ignored }
+
+    /// Purely decorative: the bay paints the HUD framing arcs but never
+    /// handles input. It stretches to fill the whole overlay, so the
+    /// default bounds-based `hit_test` would claim every pixel over the
+    /// 3-D viewport — and since the bay is stacked ABOVE the viewport in
+    /// `ViewportOverlay`, that stole pointer capture from a viewport
+    /// mid-drag (it's a later sibling, so hit-testing reaches it before
+    /// the viewport's `claims_pointer_exclusively`). Returning `false`
+    /// makes the bay transparent to hit-testing, so clicks + drags fall
+    /// through to the viewport beneath it.
+    fn hit_test(&self, _local_pos: Point) -> bool { false }
 }
 
 /// Render one HUD group with the same AGG math MatterCAD uses:
@@ -259,4 +270,28 @@ fn fill_vertex_source(ctx: &mut dyn DrawCtx, source: &mut dyn VertexSource, colo
         }
     }
     ctx.fill();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bay fills the whole overlay but is decorative only. It must
+    /// be transparent to hit-testing so it doesn't steal pointer
+    /// capture from the 3-D viewport it's stacked on top of — the
+    /// capture theft that left a body-drag's mouse-up routed away from
+    /// the viewport, gluing the body to the cursor.
+    #[test]
+    fn bay_never_claims_pointer_hits() {
+        let mut bay = HudBayLayer::new();
+        bay.layout(Size::new(800.0, 600.0));
+        // Several points across the full-screen bay, including its
+        // centre and corners — none may claim the hit.
+        for &(x, y) in &[(0.0, 0.0), (400.0, 300.0), (799.0, 599.0), (50.0, 550.0)] {
+            assert!(
+                !bay.hit_test(Point::new(x, y)),
+                "decorative bay must not hit-test true at ({x}, {y})",
+            );
+        }
+    }
 }

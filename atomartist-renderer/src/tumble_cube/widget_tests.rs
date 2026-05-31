@@ -255,6 +255,56 @@ fn click_in_centre_of_default_view_does_not_orient_to_bottom() {
     );
 }
 
+/// The cube must NOT swallow a mouse-up that wasn't part of a cube
+/// gesture. It is stacked ABOVE the 3-D viewport in `ViewportOverlay`,
+/// whose `on_event` forwards every MouseUp to each child top-down and
+/// stops at the first that consumes. If the idle cube consumed the
+/// release that ends a viewport body-drag, the body would stay glued
+/// to the cursor (the reported "doesn't release the object" bug). An
+/// idle MouseUp must therefore return `Ignored` so it falls through to
+/// the viewport; a MouseUp that ends a real cube gesture must still be
+/// `Consumed`.
+#[test]
+fn idle_mouse_up_falls_through_but_gesture_release_is_consumed() {
+    let camera = Arc::new(Mutex::new(OrbitCamera::default()));
+    let mut widget = TumbleCubeWidget::new(TumbleCubeInputs {
+        camera: camera.clone(),
+        animation_completed: None,
+    });
+    widget.set_bounds(Rect::new(0.0, 0.0, 100.0, 100.0));
+
+    // No prior MouseDown → CubeDrag::None. A stray release here belongs
+    // to whatever the user was actually dragging (the viewport beneath).
+    let idle = widget.on_event(&Event::MouseUp {
+        pos: Point::new(50.0, 50.0),
+        button: MouseButton::Left,
+        modifiers: Modifiers::default(),
+    });
+    assert_eq!(
+        idle,
+        EventResult::Ignored,
+        "an idle cube must not swallow a mouse-up meant for the viewport",
+    );
+
+    // A real cube gesture (down on the cube, then up) is the cube's own
+    // and must stay consumed so it doesn't double-dispatch.
+    widget.on_event(&Event::MouseDown {
+        pos: Point::new(50.0, 50.0),
+        button: MouseButton::Left,
+        modifiers: Modifiers::default(),
+    });
+    let release = widget.on_event(&Event::MouseUp {
+        pos: Point::new(50.0, 50.0),
+        button: MouseButton::Left,
+        modifiers: Modifiers::default(),
+    });
+    assert_eq!(
+        release,
+        EventResult::Consumed,
+        "the cube's own click release must remain consumed",
+    );
+}
+
 /// Cube drags must respect `OrbitMode`. With identical drag inputs,
 /// turntable and trackball produce different orientation deltas
 /// (matches `orbit_drag_honours_orbit_mode` in `camera_tests`).

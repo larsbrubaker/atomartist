@@ -118,6 +118,82 @@ fn click_with_micro_jitter_still_selects() {
     );
 }
 
+/// Build a viewport whose selected body's origin node exposes a
+/// writable `matrix`, backed by a shared cell that the read + write
+/// callbacks both touch. Mirrors how `atomartist-ui` wires
+/// `read_node_matrix` / `write_node_matrix` to the node's `matrix`
+/// property + undo stack — the existing `viewport_with_one_body`
+/// leaves both `None`, so the body there can never promote past
+/// `Selecting` into a real `DragBodyXY`. This helper is what lets a
+/// test exercise the drag-and-release path the user actually hits.
+fn viewport_with_draggable_body(
+    node_id: atomartist_lib::graph::node::NodeId,
+) -> (Viewport3dWidget, std::sync::Arc<std::sync::Mutex<[f32; 16]>>) {
+    use atomartist_lib::geometry::{Body, Geometry3d};
+    let mut identity = [0.0_f32; 16];
+    identity[0] = 1.0;
+    identity[5] = 1.0;
+    identity[10] = 1.0;
+    identity[15] = 1.0;
+    let matrix = std::sync::Arc::new(std::sync::Mutex::new(identity));
+    let mut inputs = empty_inputs();
+    let read_cell = matrix.clone();
+    let write_cell = matrix.clone();
+    inputs.read_node_matrix =
+        Some(std::sync::Arc::new(move |_id| Some(*read_cell.lock().unwrap())));
+    inputs.write_node_matrix =
+        Some(std::sync::Arc::new(move |_id, m| *write_cell.lock().unwrap() = m));
+    let mesh = std::sync::Arc::new(atomartist_lib::geometry::generate_box(20.0, 20.0, 20.0));
+    let mut body = Body::from_mesh(mesh);
+    body.origin = Some(node_id);
+    *inputs.last_mesh_output.lock().unwrap() =
+        Some(std::sync::Arc::new(Geometry3d::from_body(body)));
+    let mut w = Viewport3dWidget::new(inputs);
+    let _ = w.layout(Size::new(400.0, 300.0));
+    (w, matrix)
+}
+
+/// Full press → drag → release on a draggable body: the release MUST
+/// (a) clear the drag state so the body stops following the cursor and
+/// (b) leave the dragged translation committed to the node matrix.
+/// This is the path the bare `viewport_with_one_body` tests can't
+/// reach (their matrix callbacks are `None`, so the drag never
+/// promotes to `DragBodyXY`).
+#[test]
+fn drag_then_release_commits_position_and_releases() {
+    use agg_gui::Modifiers;
+    let node_id = atomartist_lib::graph::node::NodeId(99);
+    let (mut w, matrix) = viewport_with_draggable_body(node_id);
+    let down = Point { x: 200.0, y: 150.0 };
+    let mid = Point { x: 260.0, y: 150.0 };
+    let up = Point { x: 280.0, y: 160.0 };
+    fire(&mut w, Event::MouseDown { pos: down, button: MouseButton::Left, modifiers: Modifiers::default() });
+    fire(&mut w, Event::MouseMove { pos: mid });
+    // Drag must have promoted to a body translation by now.
+    assert!(
+        matches!(w.drag, CameraDrag::DragBodyXY { .. }),
+        "a past-threshold drag on a body with a writable matrix must promote to DragBodyXY, got {:?}",
+        w.drag,
+    );
+    fire(&mut w, Event::MouseMove { pos: up });
+    fire(&mut w, Event::MouseUp { pos: up, button: MouseButton::Left, modifiers: Modifiers::default() });
+
+    // (a) Released: drag state cleared so a later hover can't keep
+    //     moving the body.
+    assert!(
+        matches!(w.drag, CameraDrag::None),
+        "mouse-up during a body drag must release the object, got {:?}",
+        w.drag,
+    );
+    // (b) Position set: the dragged translation persists on the node
+    //     matrix after release (it is NOT reset back to the origin).
+    let m = *matrix.lock().unwrap();
+    let moved = m[12].abs() > 1e-4 || m[13].abs() > 1e-4;
+    assert!(moved, "released body must keep its dragged position, got translation [{}, {}]", m[12], m[13]);
+    // And the dragged body stays selected.
+    assert_eq!(*w.inputs.selection.lock().unwrap(), Some(node_id));
+}
+
 #[test]
 fn mouse_up_clears_drag_state() {
     use agg_gui::Modifiers;
