@@ -19,7 +19,7 @@ mod compass;
 mod corners;
 mod handle;
 
-pub use compass::{drag_overlay, ring_and_ticks};
+pub use compass::{drag_overlay, format_rotation_degrees, readout_position, ring_and_ticks};
 pub use corners::{rotate_axis_layouts, RotateAxisLayout};
 pub use handle::arrow_handle;
 

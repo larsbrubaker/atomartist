@@ -26,6 +26,10 @@ const RING_SEGMENTS: usize = 64;
 /// Snap points around a full turn (MatterCAD `numSnapPoints`).
 const SNAP_POINTS: usize = 8;
 
+/// Screen pixels beyond the handle radius where the live angle readout
+/// floats — MatterCAD's `radius + 100 * DeviceScale`.
+const READOUT_OFFSET_PX: f32 = 100.0;
+
 /// Inner / outer ring radii (world units) for a handle at `radius`
 /// (world centre→control distance), given the per-pixel scale at the
 /// rotation centre.
@@ -45,6 +49,29 @@ fn ring_pt(center: [f32; 3], axis: u8, r: f32, angle: f32) -> [f32; 3] {
         center[1] + (u[1] * c + v[1] * s) * r,
         center[2] + (u[2] * c + v[2] * s) * r,
     ]
+}
+
+/// World position of the live angle readout — `READOUT_OFFSET_PX`
+/// beyond the handle radius, along the drag's *anchor* direction so it
+/// stays put while the body spins. Ports MatterCAD's
+/// `unitPosition * (radius + 100 * DeviceScale)`. The host projects
+/// this to screen and draws [`format_rotation_degrees`] there.
+pub fn readout_position(
+    center: [f32; 3],
+    axis: u8,
+    anchor_angle: f32,
+    radius: f32,
+    upp: f32,
+) -> [f32; 3] {
+    ring_pt(center, axis, radius + READOUT_OFFSET_PX * upp, anchor_angle)
+}
+
+/// Format a rotation (radians) for the on-screen readout, mirroring
+/// MatterCAD's `"{0:0.0#}°"` — degrees to one decimal. The angle is the
+/// *accumulated* signed rotation, so a >180° (or negative) sweep reads
+/// as e.g. `270.0°` / `-270.0°` rather than wrapping.
+pub fn format_rotation_degrees(radians: f32) -> String {
+    format!("{:.1}°", radians.to_degrees())
 }
 
 fn line_set(vertices: Vec<[f32; 3]>, color: [f32; 4]) -> GizmoLineSet {
@@ -285,6 +312,27 @@ mod tests {
             drag_overlay([0.0, 0.0, 0.0], 2, 5.0, 0.3, 0.0, &cam(), 720.0, ACCENT, TEXT);
         // No wedge at 0° → just the 8 snap markers.
         assert_eq!(tris.len(), SNAP_POINTS);
+    }
+
+    #[test]
+    fn readout_sits_beyond_the_ring_on_the_anchor_ray() {
+        // Z plane (axis 2), anchor along +X (angle 0): the readout must
+        // sit radius + READOUT_OFFSET_PX·upp out along +X, in-plane.
+        let center = [1.0, 2.0, 3.0];
+        let p = readout_position(center, 2, 0.0, 5.0, 1.0);
+        assert!((p[0] - (1.0 + 5.0 + READOUT_OFFSET_PX)).abs() < 1e-3, "x = {}", p[0]);
+        assert!((p[1] - 2.0).abs() < 1e-3, "y = {}", p[1]);
+        assert!((p[2] - 3.0).abs() < 1e-3, "Z-plane readout left its plane: {}", p[2]);
+    }
+
+    #[test]
+    fn angle_formats_as_degrees_one_decimal() {
+        use std::f32::consts::PI;
+        assert_eq!(format_rotation_degrees(PI / 4.0), "45.0°");
+        assert_eq!(format_rotation_degrees(-PI), "-180.0°");
+        assert_eq!(format_rotation_degrees(0.0), "0.0°");
+        // Accumulated past a half-turn reads past it, not wrapped.
+        assert_eq!(format_rotation_degrees(3.0 * PI / 2.0), "270.0°");
     }
 
     #[test]
