@@ -143,4 +143,34 @@ pub(super) enum CameraDrag {
         radius: f32,
         start_matrix: [f32; 16],
     },
+    /// Left-button down landed on the height / scale-Z box (top-face
+    /// centre). Dragging it grows/shrinks the body in Z about its base.
+    /// Two paths, chosen at drag-start by whether the node exposes an
+    /// editable `height` parameter:
+    ///
+    /// * `start_height = Some` → edit the `height` property each frame
+    ///   and re-plant the base on the following evaluation (the mesh
+    ///   rebuilds async, so the base is re-anchored a frame later via a
+    ///   world-Z translate — see `drag_height`).
+    /// * `start_height = None` → scale the node matrix in Z about the
+    ///   base plane (analytical, no rebuild; `scale_z_about_bottom`).
+    DragBodyHeight {
+        node_id: NodeId,
+        /// Matrix snapshot at drag start — restored on Esc and the
+        /// baseline the matrix-scale path scales from.
+        start_matrix: [f32; 16],
+        /// The node's `height` parameter at drag start, if it has one.
+        /// `None` selects the matrix-scale path.
+        start_height: Option<f64>,
+        /// World Z of the body's base at drag start — kept planted.
+        bottom_z: f32,
+        /// World height (top − bottom) at drag start — denominator for
+        /// the scale ratio.
+        start_height_world: f32,
+        /// XY of the box (the vertical line the cursor projects onto).
+        anchor_xy: [f32; 2],
+        /// Cursor's projected Z on that line at drag start — subtracted
+        /// to get the per-frame top delta.
+        anchor_z: f32,
+    },
 }

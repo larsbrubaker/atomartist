@@ -72,6 +72,16 @@ impl Viewport3dWidget {
                     z_control_gizmo::z_control_for_aabb(world_aabb, &cam, vh, z_color);
                 s.gizmo_lines.push(arrow);
                 s.gizmo_triangles.push(cone);
+                // Height / scale-Z box on the top face (MatterCAD
+                // `ScaleHeightControl`). Accent while hovered or while a
+                // height drag is in flight.
+                let hbox_active = self.hovered_height_control
+                    || matches!(self.drag, CameraDrag::DragBodyHeight { .. });
+                let hbox_color = if hbox_active { accent } else { idle };
+                let (hbox_center, hbox_size) =
+                    z_control_gizmo::height_control_layout_for_aabb(world_aabb, &cam, vh);
+                s.gizmo_triangles
+                    .push(z_control_gizmo::height_control(hbox_center, hbox_size, hbox_color));
                 // Rotate gizmo — three per-axis corner handles (MatterCAD
                 // RotateCornerControl). Two display modes:
                 //
@@ -123,6 +133,11 @@ impl Viewport3dWidget {
                         let (mline, _, _) =
                             z_control_gizmo::z_measure(world_aabb, &cam, vh, idle);
                         s.gizmo_lines.push(mline);
+                    }
+                    CameraDrag::DragBodyHeight { .. } => {
+                        // Scaling in Z: hide the rotate handles — the
+                        // height box + its dimension readout (drawn by
+                        // the viewport's 2-D pass) are the focus.
                     }
                     _ => {
                         let layouts = rotate_gizmo::rotate_axis_layouts(world_aabb, &cam, vh);

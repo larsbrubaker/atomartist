@@ -96,6 +96,8 @@ impl Viewport3dWidget {
                             //      `DragBodyXY` for translate.
                             if let Some(pending) = self.try_start_z_drag(pos) {
                                 self.drag = pending;
+                            } else if let Some(pending) = self.try_start_height_drag(pos) {
+                                self.drag = pending;
                             } else if let Some(pending) = self.try_start_rotate_drag(pos) {
                                 self.drag = pending;
                             } else {
@@ -149,19 +151,24 @@ impl Viewport3dWidget {
         // is meaningless (the handles are moving / a rotation is in
         // flight), so clear it. Done before the `&mut self.drag` match
         // so the immutable hover pick doesn't fight the borrow.
-        // The Z control wins hover priority over the rotate handles —
-        // same order as the mouse-down hit-test (Z control is picked
-        // before the rotate handles). When the cursor is on the Z
-        // control we don't also light a rotate axis.
-        let (new_z_hover, new_axis_hover) = if matches!(self.drag, CameraDrag::None) {
-            let z = self.pick_z_hover(pos);
-            let axis = if z { None } else { self.pick_rotate_hover(pos) };
-            (z, axis)
-        } else {
-            (false, None)
-        };
-        if new_z_hover != self.hovered_z_control || new_axis_hover != self.hovered_rotate_axis {
+        // Hover priority matches the mouse-down hit-test order:
+        // Z-translate cone → height box → rotate handles. Only one
+        // control lights at a time.
+        let (new_z_hover, new_height_hover, new_axis_hover) =
+            if matches!(self.drag, CameraDrag::None) {
+                let z = self.pick_z_hover(pos);
+                let height = if z { false } else { self.pick_height_hover(pos) };
+                let axis = if z || height { None } else { self.pick_rotate_hover(pos) };
+                (z, height, axis)
+            } else {
+                (false, false, None)
+            };
+        if new_z_hover != self.hovered_z_control
+            || new_height_hover != self.hovered_height_control
+            || new_axis_hover != self.hovered_rotate_axis
+        {
             self.hovered_z_control = new_z_hover;
+            self.hovered_height_control = new_height_hover;
             self.hovered_rotate_axis = new_axis_hover;
             agg_gui::animation::request_draw();
         }
@@ -329,6 +336,11 @@ impl Viewport3dWidget {
                 self.drag_rotate(pos);
                 EventResult::Consumed
             }
+            CameraDrag::DragBodyHeight { .. } => {
+                // Per-frame height/scale-Z lives in `scale_interactions.rs`.
+                self.drag_height(pos);
+                EventResult::Consumed
+            }
             CameraDrag::DragBodyXY { .. } => {
                 // Branch-local borrow management: pull the fields out
                 // so the mutable `drag` borrow is dropped before we
@@ -432,6 +444,12 @@ impl Viewport3dWidget {
                 self.commit_selection(Some(node_id));
                 EventResult::Consumed
             }
+            CameraDrag::DragBodyHeight { node_id, .. } => {
+                // Height/scale committed (height param or matrix Z is
+                // already coalesced on the undo stack). Keep selected.
+                self.commit_selection(Some(node_id));
+                EventResult::Consumed
+            }
             _ => EventResult::Consumed,
         }
     }
@@ -455,18 +473,25 @@ impl Viewport3dWidget {
     /// drags / `Selecting` / no drag (Esc should fall through to e.g.
     /// dismiss a menu).
     pub(super) fn cancel_active_drag(&mut self) -> bool {
-        let (node_id, start_matrix) = match &self.drag {
+        // Push the pre-drag value(s) back through the same coalesced
+        // write the drag used, so the in-progress stroke collapses to a
+        // no-op and the body snaps home; then drop the drag state.
+        match self.drag.clone() {
             CameraDrag::DragBodyXY { node_id, start_matrix, .. }
             | CameraDrag::DragBodyZ { node_id, start_matrix, .. }
             | CameraDrag::RotateBodyAxis { node_id, start_matrix, .. } => {
-                (*node_id, *start_matrix)
+                self.inputs.push_node_matrix(node_id, start_matrix);
+            }
+            CameraDrag::DragBodyHeight { node_id, start_matrix, start_height, .. } => {
+                // Restore both the matrix (re-anchor translates) and the
+                // height parameter if this was the field-editing path.
+                self.inputs.push_node_matrix(node_id, start_matrix);
+                if let Some(h0) = start_height {
+                    self.inputs.push_node_number(node_id, "height", h0);
+                }
             }
             _ => return false,
-        };
-        // Push the pre-drag matrix back through the same coalesced
-        // write the drag used, so the in-progress stroke collapses to a
-        // no-op and the body snaps home; then drop the drag state.
-        self.inputs.push_node_matrix(node_id, start_matrix);
+        }
         self.drag = CameraDrag::None;
         agg_gui::animation::request_draw();
         true

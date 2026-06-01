@@ -45,8 +45,8 @@ use crate::picking::{resolve_pivot_or_fallback, HitPlane, PivotResolution};
 #[path = "viewport_widget_helpers.rs"]
 mod viewport_widget_helpers;
 use viewport_widget_helpers::{
-    cross3, dot3, estimate_outline_width, mesh_aabb, mouse_button_bit, normalize3,
-    paint_text_pill, project, selected_body_world_aabb, stroke_circle, sub3, vert_pos,
+    cross3, dot3, estimate_outline_width, mesh_aabb, mouse_button_bit, normalize3, project,
+    selected_body_world_aabb, stroke_circle, sub3, vert_pos,
 };
 use crate::scene_renderer::{GizmoLineSet, RenderStyle, WgpuSceneRenderer};
 
@@ -122,6 +122,10 @@ pub struct Viewport3dWidget {
     /// control paints accent-coloured on hover, exactly like the rotate
     /// handles and MatterCAD's `MoveInZControl` (`MouseIsOver`).
     hovered_z_control: bool,
+    /// Whether the cursor is over the height / scale-Z box (top-face
+    /// centre). Drives that control's accent highlight on hover, like
+    /// MatterCAD's `ScaleHeightControl`.
+    hovered_height_control: bool,
     /// Latest keyboard modifier state, refreshed on every mouse-down and
     /// key up/down. `MouseMove` carries no modifiers, so the rotate drag
     /// reads this to honour the Shift-to-45° snap lock live mid-drag
@@ -154,6 +158,7 @@ impl Viewport3dWidget {
             pressed_buttons: 0,
             hovered_rotate_axis: None,
             hovered_z_control: false,
+            hovered_height_control: false,
             current_mods: Modifiers::default(),
         }
     }
@@ -468,64 +473,10 @@ impl Viewport3dWidget {
         stroke_circle(ctx, sx, sy, r);
     }
 
-    /// During a rotate-handle drag, paint the live angle readout — a
-    /// port of MatterCAD's `angleTextControl`. Sits along the drag's
-    /// anchor direction, ~100 px beyond the compass ring, showing the
-    /// snapped rotation in degrees on a rounded theme-coloured pill (see
-    /// [`paint_text_pill`]). No-op unless a `RotateBodyAxis` drag is in
-    /// flight.
-    fn paint_rotation_readout(&self, ctx: &mut dyn DrawCtx, w: f64, h: f64) {
-        let CameraDrag::RotateBodyAxis {
-            axis,
-            center,
-            anchor_angle,
-            snapped,
-            radius,
-            ..
-        } = self.drag.clone()
-        else {
-            return;
-        };
-        let cam = self.cam();
-        let upp = cam.world_units_per_pixel_at(center, h.max(1.0) as f32);
-        let world = rotate_gizmo::readout_position(center, axis, anchor_angle, radius, upp);
-        let view = Mat4::from_cols_array(&cam.view_matrix());
-        let proj = Mat4::from_cols_array(&cam.projection_matrix((w / h.max(1.0)) as f32));
-        let mvp = (proj * view).to_cols_array();
-        let Some((sx, sy)) = project(&mvp, world, w, h) else {
-            return;
-        };
-        paint_text_pill(ctx, sx, sy, &rotate_gizmo::format_rotation_degrees(snapped));
-    }
-
-    /// While dragging in Z, paint the measurement distance — the body's
-    /// height above the bed — beside the witness line the scene pass
-    /// draws (see [`z_control_gizmo::z_measure`]). Mirrors MatterCAD's
-    /// measure readout during move-in-Z. No-op unless a `DragBodyZ` is
-    /// active.
-    fn paint_z_measure_readout(&self, ctx: &mut dyn DrawCtx, w: f64, h: f64) {
-        let CameraDrag::DragBodyZ { node_id, .. } = self.drag.clone() else {
-            return;
-        };
-        let geom = self.current_geometry();
-        let Some(world_aabb) = selected_body_world_aabb(geom.as_deref(), node_id) else {
-            return;
-        };
-        let cam = self.cam();
-        let vh = h.max(1.0) as f32;
-        let idle = {
-            let v = ctx.visuals();
-            [v.text_color.r, v.text_color.g, v.text_color.b, 1.0]
-        };
-        let (_, label_world, value) = z_control_gizmo::z_measure(world_aabb, &cam, vh, idle);
-        let view = Mat4::from_cols_array(&cam.view_matrix());
-        let proj = Mat4::from_cols_array(&cam.projection_matrix((w / h.max(1.0)) as f32));
-        let mvp = (proj * view).to_cols_array();
-        let Some((sx, sy)) = project(&mvp, label_world, w, h) else {
-            return;
-        };
-        paint_text_pill(ctx, sx, sy, &format!("{value:.2}"));
-    }
+    // Drag-readout overlays (`paint_rotation_readout`,
+    // `paint_z_measure_readout`, `paint_height_readout`) live in
+    // `viewport_widget/overlays.rs` so this file stays under the
+    // 800-line guardrail.
 
     fn tick_camera_animation(&self, dt_seconds: f32) {
         let mut slot = self.inputs.camera_animation.lock().unwrap();
@@ -715,6 +666,9 @@ impl Widget for Viewport3dWidget {
         // Z-drag distance readout (MatterCAD measure control), drawn
         // only while moving the body in Z.
         self.paint_z_measure_readout(ctx, w, h);
+        // Height readout (MatterCAD ScaleHeightControl), drawn only
+        // while scaling the body in Z.
+        self.paint_height_readout(ctx, w, h);
 
         // Border.
         ctx.set_stroke_color(Color::rgba(1.0, 1.0, 1.0, 0.10));
@@ -776,6 +730,12 @@ mod viewport_widget_interactions;
 
 #[path = "viewport_widget/rotate_interactions.rs"]
 mod rotate_interactions;
+
+#[path = "viewport_widget/scale_interactions.rs"]
+mod scale_interactions;
+
+#[path = "viewport_widget/overlays.rs"]
+mod overlays;
 
 #[path = "viewport_widget/scene_state.rs"]
 mod scene_state;

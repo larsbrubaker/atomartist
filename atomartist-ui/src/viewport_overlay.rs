@@ -80,6 +80,8 @@ pub fn build_viewport_overlay(state: AppState, font: Arc<Font>) -> Box<dyn Widge
     // crate having to know about AppState.
     let read_state = state.clone();
     let write_state = state.clone();
+    let read_num_state = state.clone();
+    let write_num_state = state.clone();
     let viewport_inputs = ViewportInputs {
         last_mesh_output: state.last_mesh_output.clone(),
         display_node: state.display_node.clone(),
@@ -101,6 +103,21 @@ pub fn build_viewport_overlay(state: AppState, font: Arc<Font>) -> Box<dyn Widge
         })),
         write_node_matrix: Some(std::sync::Arc::new(move |id, m| {
             write_state.set_node_matrix_with_undo(id, m);
+        })),
+        // Numeric-property read/write — the scale controls use the read
+        // to detect an editable dimension (e.g. "height") and snapshot
+        // it, and the write to edit it (coalesced + undoable).
+        read_node_number: Some(std::sync::Arc::new(move |id, name: &str| {
+            let g = read_num_state.graph.lock().unwrap();
+            g.get(id).and_then(|n| {
+                n.properties.get(name).and_then(|v| match v {
+                    atomartist_lib::graph::node::PortValue::Number(x) => Some(*x),
+                    _ => None,
+                })
+            })
+        })),
+        write_node_number: Some(std::sync::Arc::new(move |id, name: &str, value| {
+            write_num_state.set_node_number_with_undo(id, name, value);
         })),
     };
     let cube_inputs = TumbleCubeInputs {

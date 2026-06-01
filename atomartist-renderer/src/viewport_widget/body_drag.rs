@@ -92,6 +92,26 @@ pub fn z_translation(start_matrix: [f32; 16], anchor_z: f32, current_z: f32) -> 
     m
 }
 
+/// Scale `start_matrix` in **world Z** about the plane `z = bottom_z`,
+/// keeping that plane fixed so the body's base stays planted while it
+/// grows / shrinks upward. World-space pre-multiply by
+/// `Translate(0,0,b) · Scale(1,1,s) · Translate(0,0,-b)`, which leaves
+/// every row but Z untouched and maps `z' = b + s·(z − b)`.
+///
+/// Used by the height control's matrix path — objects with no editable
+/// height parameter scale their transform instead of a mesh field.
+/// Mirrors MatterCAD's `ScaleMatrixTopControl` (scale Z, lock bottom).
+pub fn scale_z_about_bottom(start_matrix: [f32; 16], scale: f32, bottom_z: f32) -> [f32; 16] {
+    let mut m = start_matrix;
+    // Only the Z row changes: for each column c, z' = s·z + b·(1−s)·w.
+    for c in 0..4 {
+        let z = start_matrix[c * 4 + 2];
+        let w = start_matrix[c * 4 + 3];
+        m[c * 4 + 2] = scale * z + bottom_z * (1.0 - scale) * w;
+    }
+    m
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,5 +183,42 @@ mod tests {
         assert_eq!(out[12], 0.0);
         assert_eq!(out[13], 0.0);
         assert!((out[14] - 7.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn scale_z_about_bottom_keeps_the_base_planted() {
+        // Identity start, scale ×2 about z = 10. A point at the bottom
+        // plane (z = 10) must stay; a point at z = 20 must map to z = 30
+        // (height from the base doubles).
+        let m = scale_z_about_bottom(identity(), 2.0, 10.0);
+        let z_of = |p: [f32; 4]| {
+            // column-major matrix · point
+            m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14] * p[3]
+        };
+        assert!((z_of([0.0, 0.0, 10.0, 1.0]) - 10.0).abs() < 1e-5, "base plane stays planted");
+        assert!((z_of([0.0, 0.0, 20.0, 1.0]) - 30.0).abs() < 1e-5, "top doubles its height");
+        // X / Y rows are untouched.
+        assert_eq!(m[0], 1.0);
+        assert_eq!(m[5], 1.0);
+    }
+
+    #[test]
+    fn scale_z_about_bottom_preserves_rotation_columns_xy() {
+        // A rotation+translation start matrix: scaling Z about the base
+        // must not disturb the X/Y rows of any column.
+        let start: [f32; 16] = [
+            0.0, 1.0, 0.0, 0.0,
+            -1.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            3.0, 4.0, 5.0, 1.0,
+        ];
+        let out = scale_z_about_bottom(start, 3.0, 0.0);
+        // bottom_z = 0 → z' = 3·z, translation Z scales too: 5 → 15.
+        assert!((out[14] - 15.0).abs() < 1e-5);
+        // X/Y of every column unchanged.
+        for c in 0..4 {
+            assert_eq!(out[c * 4], start[c * 4], "col {c} X row");
+            assert_eq!(out[c * 4 + 1], start[c * 4 + 1], "col {c} Y row");
+        }
     }
 }

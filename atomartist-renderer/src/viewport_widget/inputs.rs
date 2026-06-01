@@ -88,6 +88,16 @@ pub struct ViewportInputs {
     /// renderer paints with. Returning `None` aborts the drag (the
     /// node doesn't expose a `matrix` property).
     pub read_node_matrix: Option<Arc<dyn Fn(NodeId) -> Option<[f32; 16]>>>,
+    /// Reader for a named numeric property (e.g. `"height"`) on a node.
+    /// Returns `None` when the node has no such `Number` property — the
+    /// scale controls use this both to *detect* an editable dimension
+    /// (the "has a Height field" test) and to read its current value at
+    /// drag-start.
+    pub read_node_number: Option<Arc<dyn Fn(NodeId, &str) -> Option<f64>>>,
+    /// Writer for a named numeric property, coalesced + undoable
+    /// (wired to `AppState::set_node_number_with_undo`). Used by the
+    /// height / width / depth scale controls' field-editing path.
+    pub write_node_number: Option<Arc<dyn Fn(NodeId, &str, f64)>>,
 }
 
 impl ViewportInputs {
@@ -108,6 +118,8 @@ impl ViewportInputs {
             projection_animation: Arc::new(Mutex::new(None)),
             write_node_matrix: None,
             read_node_matrix: None,
+            read_node_number: None,
+            write_node_number: None,
         }
     }
 
@@ -125,5 +137,20 @@ impl ViewportInputs {
     /// matrix property.
     pub(crate) fn read_node_matrix(&self, id: NodeId) -> Option<[f32; 16]> {
         self.read_node_matrix.as_ref()?(id)
+    }
+
+    /// Read a node's numeric `name` property. `None` when no reader is
+    /// wired or the node has no such property — the scale controls
+    /// treat `None` as "no editable field, fall back to matrix scale".
+    pub(crate) fn read_node_number(&self, id: NodeId, name: &str) -> Option<f64> {
+        self.read_node_number.as_ref()?(id, name)
+    }
+
+    /// Push a numeric `name` property value through the registered
+    /// writer. No-op when none is wired.
+    pub(crate) fn push_node_number(&self, id: NodeId, name: &str, value: f64) {
+        if let Some(f) = &self.write_node_number {
+            f(id, name, value);
+        }
     }
 }

@@ -13,11 +13,22 @@
 //! of bbox + camera + viewport — easy to unit-test.
 
 use crate::camera::OrbitCamera;
-use crate::scene_renderer::gizmo_pass::{cone_handle, GizmoLineSet, GizmoTriangleSet};
+use crate::scene_renderer::gizmo_pass::{cone_handle, cube_handle, GizmoLineSet, GizmoTriangleSet};
 
 /// One handle id per Z control — single grab target for the
 /// translate-Z action.
 pub const Z_TRANSLATE_HANDLE_ID: u32 = 0;
+
+/// Handle id for the height / scale-Z box (top-face centre). Distinct
+/// from the Z-translate cone (0) and the rotate handles (10..12) so a
+/// combined hit-test tells them apart.
+pub const HEIGHT_HANDLE_ID: u32 = 1;
+
+/// Height-box edge length in screen pixels — a small cube on the top
+/// face (MatterCAD's `ScaleHeightControl` uses a 7px cube; we use a
+/// slightly larger one for grabbability, sitting just under the
+/// move-Z cone's arrow).
+const HEIGHT_BOX_PX: f32 = 11.0;
 
 /// Pixel-based size floors. The arrow line length AND the handle
 /// cube each have a minimum size in screen pixels so very small
@@ -128,6 +139,35 @@ pub fn build_z_control(
     (lines, cone)
 }
 
+/// World pose of the height / scale-Z box — a small cube centred on the
+/// selection's top-face centre, its base sitting on the top face. The
+/// box is the grab target for the height control (edits the body's
+/// `height` parameter, or scales the matrix in Z when there is none).
+/// Returns `(box_center, box_size)`; the box is constant pixel-size via
+/// the camera's world-units-per-pixel factor. Shared by the renderer
+/// (draw) and the viewport (hit-test) so both match.
+pub fn height_control_layout_for_aabb(
+    world_aabb: ([f32; 3], [f32; 3]),
+    camera: &OrbitCamera,
+    viewport_height: f32,
+) -> ([f32; 3], f32) {
+    let (mn, mx) = world_aabb;
+    let cx = (mn[0] + mx[0]) * 0.5;
+    let cy = (mn[1] + mx[1]) * 0.5;
+    let top_z = mx[2];
+    let upp = camera.world_units_per_pixel_at([cx, cy, top_z], viewport_height);
+    let size = HEIGHT_BOX_PX * upp;
+    // Base of the cube on the top face → centre half a box above it.
+    let center = [cx, cy, top_z + size * 0.5];
+    (center, size)
+}
+
+/// Build the height-box gizmo (a cube handle) at `center` with edge
+/// length `size`. `color` is idle (theme text) or accent on hover.
+pub fn height_control(center: [f32; 3], size: f32, color: [f32; 4]) -> GizmoTriangleSet {
+    cube_handle(center, size as f64, color)
+}
+
 /// Build the Z-drag **measurement** overlay shown while a `DragBodyZ`
 /// is in flight (MatterCAD pops a measure control + distance during the
 /// move-in-Z drag). A vertical witness line runs from the bed (`z = 0`)
@@ -177,6 +217,21 @@ mod tests {
     use super::*;
 
     const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
+
+    #[test]
+    fn height_box_sits_on_the_top_face_center() {
+        let cam = OrbitCamera::default();
+        let aabb = ([0.0, 0.0, 0.0], [10.0, 6.0, 4.0]);
+        let (center, size) = height_control_layout_for_aabb(aabb, &cam, 720.0);
+        assert!((center[0] - 5.0).abs() < 1e-4, "box centred on top-face X");
+        assert!((center[1] - 3.0).abs() < 1e-4, "box centred on top-face Y");
+        assert!(center[2] > 4.0, "box sits above the top face (z = 4)");
+        assert!(size > 0.0, "box must have a usable size");
+        // Cube geometry round-trips through the handle builder.
+        let g = height_control(center, size, RED);
+        assert_eq!(g.vertices.len(), 36, "cube = 12 triangles");
+        assert_eq!(g.color, RED);
+    }
 
     #[test]
     fn z_measure_spans_bed_to_body_bottom() {

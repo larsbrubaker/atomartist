@@ -226,13 +226,25 @@ impl AppState {
     /// canvas-side property panel only edits scalars). Caller
     /// guarantees the matrix is a valid 4×4 column-major transform.
     pub fn set_node_matrix_with_undo(&self, id: NodeId, matrix: [f32; 16]) {
-        let value = PortValue::Matrix4x4(matrix);
-        let name: std::sync::Arc<str> = std::sync::Arc::<str>::from("matrix");
-        // Try coalesce: if the top-of-stack command is a matching
-        // ChangePropertyCmd, merge new value in. Identical pattern to
-        // AppStateModel::set_property — kept symmetric so a 3-D-side
-        // drag and a property-panel slider both produce one undo
-        // step per stroke.
+        self.set_node_property_with_undo(id, "matrix", PortValue::Matrix4x4(matrix));
+    }
+
+    /// Write a fresh numeric `name` property (e.g. `"height"`) onto a
+    /// node, coalesced + undoable exactly like
+    /// [`Self::set_node_matrix_with_undo`]. Used by the 3-D scale
+    /// controls when the selected node exposes an editable dimension
+    /// parameter (the field-editing path, vs. matrix scaling).
+    pub fn set_node_number_with_undo(&self, id: NodeId, name: &str, value: f64) {
+        self.set_node_property_with_undo(id, name, PortValue::Number(value));
+    }
+
+    /// Shared coalesced-undo write for a single node property. Merges
+    /// mid-stroke samples into one undo step (matching `AppStateModel`'s
+    /// property-panel writes, so a 3-D drag and a slider edit of the
+    /// same property collapse together), then re-evaluates so the
+    /// viewport reflects the change each frame.
+    fn set_node_property_with_undo(&self, id: NodeId, name: &str, value: PortValue) {
+        let name: std::sync::Arc<str> = std::sync::Arc::<str>::from(name);
         let coalesced = {
             let name_clone = name.clone();
             self.undo.lock().unwrap().try_coalesce_last(|top| {
@@ -249,8 +261,6 @@ impl AppState {
             let cmd = ChangePropertyCmd::new(self.graph.clone(), id, name, value);
             self.undo.lock().unwrap().add_and_do(Box::new(cmd));
         }
-        // Drag-during-flight: re-evaluate so the viewport shows the
-        // moved body each frame.
         self.schedule_evaluate();
     }
 }

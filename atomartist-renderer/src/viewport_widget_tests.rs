@@ -258,6 +258,117 @@ fn z_control_highlights_on_hover() {
     assert!(!w.hovered_z_control, "moving off the Z control clears the highlight");
 }
 
+/// Build a selectable, scalable body: matrix + a named `height`
+/// number are both wired to shared cells, so tests can exercise the
+/// height control's field path (height present) or matrix path
+/// (`height = None`). Returns the widget + the matrix + height cells.
+fn viewport_with_height_body(
+    node_id: atomartist_lib::graph::node::NodeId,
+    height: Option<f64>,
+) -> (
+    Viewport3dWidget,
+    std::sync::Arc<std::sync::Mutex<[f32; 16]>>,
+    std::sync::Arc<std::sync::Mutex<f64>>,
+) {
+    use atomartist_lib::geometry::{Body, Geometry3d};
+    let mut identity = [0.0_f32; 16];
+    identity[0] = 1.0;
+    identity[5] = 1.0;
+    identity[10] = 1.0;
+    identity[15] = 1.0;
+    let matrix = std::sync::Arc::new(std::sync::Mutex::new(identity));
+    let height_cell = std::sync::Arc::new(std::sync::Mutex::new(height.unwrap_or(0.0)));
+    let mut inputs = empty_inputs();
+    let (rc, wc) = (matrix.clone(), matrix.clone());
+    inputs.read_node_matrix = Some(std::sync::Arc::new(move |_| Some(*rc.lock().unwrap())));
+    inputs.write_node_matrix = Some(std::sync::Arc::new(move |_, m| *wc.lock().unwrap() = m));
+    let has_height = height.is_some();
+    let hr = height_cell.clone();
+    inputs.read_node_number = Some(std::sync::Arc::new(move |_, name: &str| {
+        if has_height && name == "height" { Some(*hr.lock().unwrap()) } else { None }
+    }));
+    let hw = height_cell.clone();
+    inputs.write_node_number = Some(std::sync::Arc::new(move |_, name: &str, v| {
+        if name == "height" { *hw.lock().unwrap() = v; }
+    }));
+    let mesh = std::sync::Arc::new(atomartist_lib::geometry::generate_box(20.0, 20.0, 20.0));
+    let mut body = Body::from_mesh(mesh);
+    body.origin = Some(node_id);
+    *inputs.last_mesh_output.lock().unwrap() =
+        Some(std::sync::Arc::new(Geometry3d::from_body(body)));
+    let mut w = Viewport3dWidget::new(inputs);
+    let _ = w.layout(Size::new(400.0, 300.0));
+    *w.inputs.selection.lock().unwrap() = Some(node_id);
+    (w, matrix, height_cell)
+}
+
+/// Screen position of the height box for the selected body — used to
+/// aim mouse events at it.
+fn height_box_screen_pos(w: &Viewport3dWidget, node_id: atomartist_lib::graph::node::NodeId) -> Point {
+    let aabb = selected_body_world_aabb(w.current_geometry().as_deref(), node_id)
+        .expect("selected body has a world AABB");
+    let cam = w.cam();
+    let (box_center, _) = z_control_gizmo::height_control_layout_for_aabb(aabb, &cam, 300.0);
+    let m = mvp(&cam, 400.0_f32 / 300.0);
+    let (sx, sy) = project(&m, box_center, 400.0, 300.0).expect("height box projects on screen");
+    Point { x: sx, y: sy }
+}
+
+/// Dragging the height box of a node that HAS a `height` parameter must
+/// edit the parameter (field path), not just scale the matrix.
+#[test]
+fn dragging_height_box_edits_the_height_param() {
+    use agg_gui::Modifiers;
+    let node_id = atomartist_lib::graph::node::NodeId(60);
+    let (mut w, _matrix, height_cell) = viewport_with_height_body(node_id, Some(20.0));
+    let on_box = height_box_screen_pos(&w, node_id);
+    fire(&mut w, Event::MouseDown { pos: on_box, button: MouseButton::Left, modifiers: Modifiers::default() });
+    assert!(
+        matches!(w.drag, CameraDrag::DragBodyHeight { start_height: Some(_), .. }),
+        "a node with a height param must take the field path, got {:?}",
+        w.drag,
+    );
+    // Drag the cursor up the screen — the height parameter must change.
+    fire(&mut w, Event::MouseMove { pos: Point { x: on_box.x, y: on_box.y + 40.0 } });
+    let after = *height_cell.lock().unwrap();
+    assert!((after - 20.0).abs() > 1e-4, "height param should change on drag, stayed {after}");
+}
+
+/// A node with NO height parameter falls back to scaling the matrix in
+/// Z (the matrix path) — the height parameter is left untouched.
+#[test]
+fn dragging_height_box_without_field_scales_matrix() {
+    use agg_gui::Modifiers;
+    let node_id = atomartist_lib::graph::node::NodeId(61);
+    let (mut w, matrix, _height) = viewport_with_height_body(node_id, None);
+    let on_box = height_box_screen_pos(&w, node_id);
+    fire(&mut w, Event::MouseDown { pos: on_box, button: MouseButton::Left, modifiers: Modifiers::default() });
+    assert!(
+        matches!(w.drag, CameraDrag::DragBodyHeight { start_height: None, .. }),
+        "a node without a height param must take the matrix path, got {:?}",
+        w.drag,
+    );
+    fire(&mut w, Event::MouseMove { pos: Point { x: on_box.x, y: on_box.y + 40.0 } });
+    let m = *matrix.lock().unwrap();
+    // Matrix path scales Z about the base → the Z scale (m[10]) moves
+    // off 1.0 while X/Y stay put.
+    assert!((m[10] - 1.0).abs() > 1e-4, "Z scale should change, got {}", m[10]);
+    assert!((m[0] - 1.0).abs() < 1e-6 && (m[5] - 1.0).abs() < 1e-6, "X/Y scale untouched");
+}
+
+/// Hovering the height box highlights it (accent), like the rotate /
+/// Z controls.
+#[test]
+fn height_box_highlights_on_hover() {
+    let node_id = atomartist_lib::graph::node::NodeId(62);
+    let (mut w, _m, _h) = viewport_with_height_body(node_id, Some(20.0));
+    let on_box = height_box_screen_pos(&w, node_id);
+    fire(&mut w, Event::MouseMove { pos: on_box });
+    assert!(w.hovered_height_control, "hovering the height box must highlight it");
+    fire(&mut w, Event::MouseMove { pos: Point { x: 2.0, y: 2.0 } });
+    assert!(!w.hovered_height_control, "moving off clears the highlight");
+}
+
 #[test]
 fn mouse_up_clears_drag_state() {
     use agg_gui::Modifiers;
