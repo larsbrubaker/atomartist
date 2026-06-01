@@ -19,7 +19,7 @@
 //!     ~150 triangles; cube is 12). Even a dozen handles together is
 //!     ~2k triangles → submillisecond per frame.
 
-use atomartist_lib::geometry::{generate_box, generate_sphere};
+use atomartist_lib::geometry::{generate_box, generate_cone, generate_sphere};
 use manifold_rust::types::MeshGL;
 
 use super::GizmoTriangleSet;
@@ -90,9 +90,51 @@ pub fn cube_handle(center: [f32; 3], size: f64, color: [f32; 4]) -> GizmoTriangl
     }
 }
 
+/// Cone handle centred at `center`, `radius` at the base and `height`
+/// tall, apex pointing **+Z**. Used as the Z-translate handle (MatterCAD's
+/// `MoveInZControl` arrowhead is a cone, not a box — a box reads as a
+/// scale/height handle). `generate_cone` builds it centred on the origin
+/// with the apex at `+height/2`, so translating by `center` lands the
+/// apex `height/2` above `center`.
+pub fn cone_handle(center: [f32; 3], radius: f64, height: f64, color: [f32; 4]) -> GizmoTriangleSet {
+    let mesh = generate_cone(radius, height, 16);
+    let mut vertices = meshgl_to_tri_verts(&mesh);
+    for v in vertices.iter_mut() {
+        v[0] += center[0];
+        v[1] += center[1];
+        v[2] += center[2];
+    }
+    GizmoTriangleSet {
+        vertices,
+        color,
+        matrix: None,
+        draw_solid: true,
+        draw_overlay: true,
+        occluded_alpha: 0.35,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cone_handle_apex_points_up_from_center() {
+        // height 4 (apex +2 / base -2), radius 1, centred at (0,0,10):
+        // apex at z=12, base ring at z=8 spanning x∈[-1,1].
+        let h = cone_handle([0.0, 0.0, 10.0], 1.0, 4.0, [1.0, 0.0, 0.0, 1.0]);
+        let mut mn = [f32::INFINITY; 3];
+        let mut mx = [f32::NEG_INFINITY; 3];
+        for v in &h.vertices {
+            for k in 0..3 {
+                if v[k] < mn[k] { mn[k] = v[k]; }
+                if v[k] > mx[k] { mx[k] = v[k]; }
+            }
+        }
+        assert!((mx[2] - 12.0).abs() < 1e-3, "apex Z expected 12, got {}", mx[2]);
+        assert!((mn[2] - 8.0).abs() < 1e-3, "base Z expected 8, got {}", mn[2]);
+        assert!((mx[0] - 1.0).abs() < 1e-3 && (mn[0] + 1.0).abs() < 1e-3, "radius 1 in X");
+    }
 
     #[test]
     fn sphere_handle_translates_to_center() {

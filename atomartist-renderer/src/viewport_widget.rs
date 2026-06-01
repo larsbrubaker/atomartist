@@ -45,8 +45,8 @@ use crate::picking::{resolve_pivot_or_fallback, HitPlane, PivotResolution};
 #[path = "viewport_widget_helpers.rs"]
 mod viewport_widget_helpers;
 use viewport_widget_helpers::{
-    cross3, dot3, estimate_outline_width, mesh_aabb, mouse_button_bit, normalize3, project,
-    selected_body_world_aabb, stroke_circle, sub3, vert_pos,
+    cross3, dot3, estimate_outline_width, mesh_aabb, mouse_button_bit, normalize3,
+    paint_text_pill, project, selected_body_world_aabb, stroke_circle, sub3, vert_pos,
 };
 use crate::scene_renderer::{GizmoLineSet, RenderStyle, WgpuSceneRenderer};
 
@@ -117,6 +117,11 @@ pub struct Viewport3dWidget {
     /// but tracked per-axis since we have three handles. `None` when
     /// the cursor is over no rotate handle.
     hovered_rotate_axis: Option<u8>,
+    /// Whether the cursor is currently over the Z-translate control
+    /// (the cone + shaft). Updated each `MouseMove` while idle so the
+    /// control paints accent-coloured on hover, exactly like the rotate
+    /// handles and MatterCAD's `MoveInZControl` (`MouseIsOver`).
+    hovered_z_control: bool,
     /// Latest keyboard modifier state, refreshed on every mouse-down and
     /// key up/down. `MouseMove` carries no modifiers, so the rotate drag
     /// reads this to honour the Shift-to-45° snap lock live mid-drag
@@ -148,6 +153,7 @@ impl Viewport3dWidget {
             pivot_on_scene: false,
             pressed_buttons: 0,
             hovered_rotate_axis: None,
+            hovered_z_control: false,
             current_mods: Modifiers::default(),
         }
     }
@@ -465,8 +471,8 @@ impl Viewport3dWidget {
     /// During a rotate-handle drag, paint the live angle readout — a
     /// port of MatterCAD's `angleTextControl`. Sits along the drag's
     /// anchor direction, ~100 px beyond the compass ring, showing the
-    /// snapped rotation in degrees on a small contrast pill so it reads
-    /// on any background. No-op unless a `RotateBodyAxis` drag is in
+    /// snapped rotation in degrees on a rounded theme-coloured pill (see
+    /// [`paint_text_pill`]). No-op unless a `RotateBodyAxis` drag is in
     /// flight.
     fn paint_rotation_readout(&self, ctx: &mut dyn DrawCtx, w: f64, h: f64) {
         let CameraDrag::RotateBodyAxis {
@@ -489,31 +495,36 @@ impl Viewport3dWidget {
         let Some((sx, sy)) = project(&mvp, world, w, h) else {
             return;
         };
+        paint_text_pill(ctx, sx, sy, &rotate_gizmo::format_rotation_degrees(snapped));
+    }
 
-        let label = rotate_gizmo::format_rotation_degrees(snapped);
-        let visuals = ctx.visuals();
-        ctx.set_font_size(14.0);
-        if let Some(m) = ctx.measure_text(&label) {
-            // Centre the text on the projected point and back it with a
-            // dark translucent pill that reads against both the light
-            // and dark viewport backdrops.
-            let pad = 5.0;
-            ctx.set_fill_color(Color::rgba(0.08, 0.09, 0.11, 0.80));
-            ctx.begin_path();
-            ctx.rect(
-                sx - m.width * 0.5 - pad,
-                sy - (m.ascent + m.descent) * 0.5 - pad,
-                m.width + pad * 2.0,
-                m.ascent + m.descent + pad * 2.0,
-            );
-            ctx.fill();
-            let baseline = sy - (m.ascent - m.descent) * 0.5;
-            ctx.set_fill_color(visuals.accent);
-            ctx.fill_text(&label, sx - m.width * 0.5, baseline);
-        } else {
-            ctx.set_fill_color(visuals.accent);
-            ctx.fill_text(&label, sx, sy);
-        }
+    /// While dragging in Z, paint the measurement distance — the body's
+    /// height above the bed — beside the witness line the scene pass
+    /// draws (see [`z_control_gizmo::z_measure`]). Mirrors MatterCAD's
+    /// measure readout during move-in-Z. No-op unless a `DragBodyZ` is
+    /// active.
+    fn paint_z_measure_readout(&self, ctx: &mut dyn DrawCtx, w: f64, h: f64) {
+        let CameraDrag::DragBodyZ { node_id, .. } = self.drag.clone() else {
+            return;
+        };
+        let geom = self.current_geometry();
+        let Some(world_aabb) = selected_body_world_aabb(geom.as_deref(), node_id) else {
+            return;
+        };
+        let cam = self.cam();
+        let vh = h.max(1.0) as f32;
+        let idle = {
+            let v = ctx.visuals();
+            [v.text_color.r, v.text_color.g, v.text_color.b, 1.0]
+        };
+        let (_, label_world, value) = z_control_gizmo::z_measure(world_aabb, &cam, vh, idle);
+        let view = Mat4::from_cols_array(&cam.view_matrix());
+        let proj = Mat4::from_cols_array(&cam.projection_matrix((w / h.max(1.0)) as f32));
+        let mvp = (proj * view).to_cols_array();
+        let Some((sx, sy)) = project(&mvp, label_world, w, h) else {
+            return;
+        };
+        paint_text_pill(ctx, sx, sy, &format!("{value:.2}"));
     }
 
     fn tick_camera_animation(&self, dt_seconds: f32) {
@@ -701,6 +712,9 @@ impl Widget for Viewport3dWidget {
         // Live rotation angle readout (MatterCAD `angleTextControl`),
         // drawn only while a rotate-handle drag is in flight.
         self.paint_rotation_readout(ctx, w, h);
+        // Z-drag distance readout (MatterCAD measure control), drawn
+        // only while moving the body in Z.
+        self.paint_z_measure_readout(ctx, w, h);
 
         // Border.
         ctx.set_stroke_color(Color::rgba(1.0, 1.0, 1.0, 0.10));
@@ -741,6 +755,19 @@ impl Widget for Viewport3dWidget {
             }
             _ => EventResult::Ignored,
         }
+    }
+
+    /// The viewport isn't focusable, so keyboard shortcuts arrive here
+    /// (agg-gui offers unconsumed keys to every visible widget) rather
+    /// than through the focused-`on_event` path. Route them to the same
+    /// `on_key_down` handler — this is what lets `Esc` cancel an
+    /// in-flight drag, and the `W` / arrow camera shortcuts fire,
+    /// without the pane needing focus. Only consumes keys it actually
+    /// handles, so `Esc` still bubbles to close menus when no drag is
+    /// active.
+    fn on_unconsumed_key(&mut self, key: &Key, modifiers: Modifiers) -> EventResult {
+        self.current_mods = modifiers;
+        self.on_key_down(key, modifiers)
     }
 }
 

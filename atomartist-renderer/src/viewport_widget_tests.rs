@@ -194,6 +194,70 @@ fn drag_then_release_commits_position_and_releases() {
     assert_eq!(*w.inputs.selection.lock().unwrap(), Some(node_id));
 }
 
+/// Esc during a body drag must cancel it: clear the drag state AND
+/// restore the node matrix to its pre-drag value (MatterCAD parity).
+#[test]
+fn esc_cancels_body_drag_and_restores_matrix() {
+    use agg_gui::Modifiers;
+    let node_id = atomartist_lib::graph::node::NodeId(77);
+    let (mut w, matrix) = viewport_with_draggable_body(node_id);
+    let down = Point { x: 200.0, y: 150.0 };
+    let mid = Point { x: 270.0, y: 160.0 };
+    let far = Point { x: 300.0, y: 175.0 };
+    fire(&mut w, Event::MouseDown { pos: down, button: MouseButton::Left, modifiers: Modifiers::default() });
+    // First move past threshold promotes Selecting → DragBodyXY (no
+    // matrix write yet); the second move actually translates the body.
+    fire(&mut w, Event::MouseMove { pos: mid });
+    fire(&mut w, Event::MouseMove { pos: far });
+    assert!(matches!(w.drag, CameraDrag::DragBodyXY { .. }), "drag should be active before Esc");
+    let moved = *matrix.lock().unwrap();
+    assert!(moved[12].abs() > 1e-4 || moved[13].abs() > 1e-4, "drag should have moved the body");
+
+    // Esc → cancel.
+    fire(&mut w, Event::KeyDown { key: agg_gui::Key::Escape, modifiers: Modifiers::default() });
+    assert!(matches!(w.drag, CameraDrag::None), "Esc must clear the drag, got {:?}", w.drag);
+    let restored = *matrix.lock().unwrap();
+    assert!(restored[12].abs() < 1e-6, "X restored to start, got {}", restored[12]);
+    assert!(restored[13].abs() < 1e-6, "Y restored to start, got {}", restored[13]);
+}
+
+/// With no drag active, Esc must NOT be consumed by the viewport — it
+/// should bubble so menus / other widgets can act on it.
+#[test]
+fn esc_with_no_drag_is_not_consumed() {
+    use agg_gui::{Modifiers, Widget};
+    let node_id = atomartist_lib::graph::node::NodeId(78);
+    let (mut w, _matrix) = viewport_with_draggable_body(node_id);
+    let r = w.on_event(&Event::KeyDown { key: agg_gui::Key::Escape, modifiers: Modifiers::default() });
+    assert_eq!(r, EventResult::Ignored, "idle Esc must fall through");
+}
+
+/// Hovering the Z-control handle must set `hovered_z_control` (which
+/// drives the accent highlight, MatterCAD parity); moving off it clears
+/// the flag. Drives the real `on_mouse_move` hover path.
+#[test]
+fn z_control_highlights_on_hover() {
+    let node_id = atomartist_lib::graph::node::NodeId(55);
+    let mut w = viewport_with_one_body(node_id);
+    *w.inputs.selection.lock().unwrap() = Some(node_id);
+
+    // Project the Z-control handle to screen using the same camera +
+    // layout the widget's hover pick uses, then hover there.
+    let aabb = selected_body_world_aabb(w.current_geometry().as_deref(), node_id)
+        .expect("selected body has a world AABB");
+    let cam = w.cam();
+    let (_, (cube_center, _)) = z_control_gizmo::z_control_layout_for_aabb(aabb, &cam, 300.0);
+    let m = mvp(&cam, 400.0_f32 / 300.0);
+    let (sx, sy) = project(&m, cube_center, 400.0, 300.0).expect("Z control projects on screen");
+
+    fire(&mut w, Event::MouseMove { pos: Point { x: sx, y: sy } });
+    assert!(w.hovered_z_control, "hovering the Z control must highlight it");
+
+    // Move to a far corner — off the control — and the highlight clears.
+    fire(&mut w, Event::MouseMove { pos: Point { x: 2.0, y: 2.0 } });
+    assert!(!w.hovered_z_control, "moving off the Z control clears the highlight");
+}
+
 #[test]
 fn mouse_up_clears_drag_state() {
     use agg_gui::Modifiers;

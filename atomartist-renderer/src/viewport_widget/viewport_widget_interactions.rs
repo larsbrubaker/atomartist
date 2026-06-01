@@ -149,13 +149,20 @@ impl Viewport3dWidget {
         // is meaningless (the handles are moving / a rotation is in
         // flight), so clear it. Done before the `&mut self.drag` match
         // so the immutable hover pick doesn't fight the borrow.
-        let new_hover = if matches!(self.drag, CameraDrag::None) {
-            self.pick_rotate_hover(pos)
+        // The Z control wins hover priority over the rotate handles —
+        // same order as the mouse-down hit-test (Z control is picked
+        // before the rotate handles). When the cursor is on the Z
+        // control we don't also light a rotate axis.
+        let (new_z_hover, new_axis_hover) = if matches!(self.drag, CameraDrag::None) {
+            let z = self.pick_z_hover(pos);
+            let axis = if z { None } else { self.pick_rotate_hover(pos) };
+            (z, axis)
         } else {
-            None
+            (false, None)
         };
-        if new_hover != self.hovered_rotate_axis {
-            self.hovered_rotate_axis = new_hover;
+        if new_z_hover != self.hovered_z_control || new_axis_hover != self.hovered_rotate_axis {
+            self.hovered_z_control = new_z_hover;
+            self.hovered_rotate_axis = new_axis_hover;
             agg_gui::animation::request_draw();
         }
         // Orbit / pan / zoom drag branches all mutate camera state
@@ -440,14 +447,42 @@ impl Viewport3dWidget {
         agg_gui::animation::request_draw();
     }
 
+    /// Cancel an in-flight body drag — XY bed-plane, Z-control, or a
+    /// rotation — restoring the node's matrix to the snapshot captured
+    /// at drag-start and clearing the drag. Mirrors MatterCAD's `Esc`
+    /// → `CancelOperation`. Returns `true` when a cancelable drag was
+    /// active (so the caller can consume the key); `false` for camera
+    /// drags / `Selecting` / no drag (Esc should fall through to e.g.
+    /// dismiss a menu).
+    pub(super) fn cancel_active_drag(&mut self) -> bool {
+        let (node_id, start_matrix) = match &self.drag {
+            CameraDrag::DragBodyXY { node_id, start_matrix, .. }
+            | CameraDrag::DragBodyZ { node_id, start_matrix, .. }
+            | CameraDrag::RotateBodyAxis { node_id, start_matrix, .. } => {
+                (*node_id, *start_matrix)
+            }
+            _ => return false,
+        };
+        // Push the pre-drag matrix back through the same coalesced
+        // write the drag used, so the in-progress stroke collapses to a
+        // no-op and the body snaps home; then drop the drag state.
+        self.inputs.push_node_matrix(node_id, start_matrix);
+        self.drag = CameraDrag::None;
+        agg_gui::animation::request_draw();
+        true
+    }
+
     pub(super) fn read_node_matrix(&self, id: NodeId) -> Option<[f32; 16]> {
         self.inputs.read_node_matrix(id)
     }
 
-    /// If the click at `pos` lands on the Z-control sphere handle of
-    /// the currently-selected body, return a pending `DragBodyZ`
-    /// state. `None` otherwise.
-    pub(super) fn try_start_z_drag(&self, pos: Point) -> Option<CameraDrag> {
+    /// The Z-control's pick handle (the cube AABB around the cone) for
+    /// the currently-selected body, plus that body's `NodeId`. Shared by
+    /// the hover highlight ([`Self::pick_z_hover`]) and the drag-start
+    /// hit-test ([`Self::try_start_z_drag`]) so both target exactly the
+    /// same target. `None` when nothing is selected or the selection has
+    /// no world AABB.
+    fn z_control_handle(&self) -> Option<(NodeId, GizmoHandle)> {
         let sel_id = (*self.inputs.selection.lock().unwrap())?;
         let geom = self.current_geometry();
         let world_aabb = selected_body_world_aabb(geom.as_deref(), sel_id)?;
@@ -456,11 +491,36 @@ impl Viewport3dWidget {
         let (_, (cube_center, cube_size)) =
             z_control_gizmo::z_control_layout_for_aabb(world_aabb, &cam, vh);
         let half = cube_size * 0.5;
-        let handle = GizmoHandle {
-            id: z_control_gizmo::Z_TRANSLATE_HANDLE_ID,
-            center: cube_center,
-            half_extent: [half, half, half],
+        Some((
+            sel_id,
+            GizmoHandle {
+                id: z_control_gizmo::Z_TRANSLATE_HANDLE_ID,
+                center: cube_center,
+                half_extent: [half, half, half],
+            },
+        ))
+    }
+
+    /// Whether the cursor at `pos` is over the Z-control handle. Drives
+    /// the hover highlight, mirroring [`Self::pick_rotate_hover`] for the
+    /// rotate handles. `false` when nothing is selected.
+    pub(super) fn pick_z_hover(&self, pos: Point) -> bool {
+        let Some((_, handle)) = self.z_control_handle() else {
+            return false;
         };
+        let w = self.bounds.width.max(1.0);
+        let h = self.bounds.height.max(1.0);
+        let cursor_td = (pos.x, h - pos.y);
+        let (ray_o, ray_d) = self.cam().screen_to_ray(cursor_td, (w, h));
+        pick_handle(std::slice::from_ref(&handle), ray_o, ray_d).is_some()
+    }
+
+    /// If the click at `pos` lands on the Z-control handle of the
+    /// currently-selected body, return a pending `DragBodyZ` state.
+    /// `None` otherwise.
+    pub(super) fn try_start_z_drag(&self, pos: Point) -> Option<CameraDrag> {
+        let (sel_id, handle) = self.z_control_handle()?;
+        let cube_center = handle.center;
         let w = self.bounds.width.max(1.0);
         let h = self.bounds.height.max(1.0);
         let cursor_td = (pos.x, h - pos.y);
@@ -569,6 +629,18 @@ impl Viewport3dWidget {
         const ARROW_PAN_PX: f32 = 24.0;
         const ARROW_ORBIT_PX: f32 = 24.0;
         const KEYBOARD_ZOOM_FACTOR: f32 = 1.1;
+
+        // Esc cancels an in-flight body / rotation drag (MatterCAD
+        // parity). Only consume the key when there was actually a drag
+        // to cancel — otherwise let it bubble (close a menu, clear
+        // selection elsewhere, …).
+        if matches!(key, Key::Escape) {
+            return if self.cancel_active_drag() {
+                EventResult::Consumed
+            } else {
+                EventResult::Ignored
+            };
+        }
 
         // Every match arm below mutates camera state and ends with
         // `return EventResult::Consumed`; we centralise the

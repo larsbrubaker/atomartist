@@ -64,10 +64,14 @@ impl Viewport3dWidget {
                 ];
                 let cam = self.cam();
                 let vh = self.bounds.height.max(1.0) as f32;
-                let (arrow, sphere) =
-                    z_control_gizmo::z_control_for_aabb(world_aabb, &cam, vh, idle);
+                // Highlight the Z control accent on hover (MatterCAD's
+                // `MoveInZControl` `MouseIsOver`), matching the rotate
+                // handles.
+                let z_color = if self.hovered_z_control { accent } else { idle };
+                let (arrow, cone) =
+                    z_control_gizmo::z_control_for_aabb(world_aabb, &cam, vh, z_color);
                 s.gizmo_lines.push(arrow);
-                s.gizmo_triangles.push(sphere);
+                s.gizmo_triangles.push(cone);
                 // Rotate gizmo — three per-axis corner handles (MatterCAD
                 // RotateCornerControl). Two display modes:
                 //
@@ -109,6 +113,16 @@ impl Viewport3dWidget {
                         for l in olines {
                             s.gizmo_lines.push(l);
                         }
+                    }
+                    CameraDrag::DragBodyZ { .. } => {
+                        // Moving in Z: hide the rotate handles and show
+                        // the measurement witness line instead (the 2-D
+                        // distance label is drawn by the viewport's
+                        // overlay pass). MatterCAD swaps to the measure
+                        // control while dragging in Z.
+                        let (mline, _, _) =
+                            z_control_gizmo::z_measure(world_aabb, &cam, vh, idle);
+                        s.gizmo_lines.push(mline);
                     }
                     _ => {
                         let layouts = rotate_gizmo::rotate_axis_layouts(world_aabb, &cam, vh);

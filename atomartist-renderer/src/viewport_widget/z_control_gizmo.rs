@@ -13,7 +13,7 @@
 //! of bbox + camera + viewport — easy to unit-test.
 
 use crate::camera::OrbitCamera;
-use crate::scene_renderer::gizmo_pass::{cube_handle, GizmoLineSet, GizmoTriangleSet};
+use crate::scene_renderer::gizmo_pass::{cone_handle, GizmoLineSet, GizmoTriangleSet};
 
 /// One handle id per Z control — single grab target for the
 /// translate-Z action.
@@ -118,9 +118,58 @@ pub fn build_z_control(
         // Match NodeDesigner's control-gizmo overlay alpha.
         occluded_alpha: 0.35,
     };
-    let cube_center = [tip[0], tip[1], tip[2] + handle_size * 0.5];
-    let cube = cube_handle(cube_center, handle_size as f64, color);
-    (lines, cube)
+    // MatterCAD `MoveInZControl` uses a cone arrowhead for the
+    // translate-Z handle (a box is reserved for height / scale). Centre
+    // the cone at the same point the pick-AABB uses (`cube_center`), so
+    // the hit-test box still wraps it; its base sits at the arrow tip
+    // and the apex points +Z.
+    let cone_center = [tip[0], tip[1], tip[2] + handle_size * 0.5];
+    let cone = cone_handle(cone_center, (handle_size * 0.5) as f64, handle_size as f64, color);
+    (lines, cone)
+}
+
+/// Build the Z-drag **measurement** overlay shown while a `DragBodyZ`
+/// is in flight (MatterCAD pops a measure control + distance during the
+/// move-in-Z drag). A vertical witness line runs from the bed (`z = 0`)
+/// up to the selected body's bottom, offset just past the body's `+X`
+/// side so it doesn't overlap the mesh, with short end ticks. Returns
+/// the line set, the world point to anchor the 2-D distance label, and
+/// the measured height (body bottom above the bed) for the label text.
+///
+/// Drawn on top (`occluded_alpha = 1.0`) so the dimension reads even
+/// where the body would occlude it.
+pub fn z_measure(
+    world_aabb: ([f32; 3], [f32; 3]),
+    camera: &OrbitCamera,
+    viewport_height: f32,
+    color: [f32; 4],
+) -> (GizmoLineSet, [f32; 3], f32) {
+    let (mn, mx) = world_aabb;
+    let cy = (mn[1] + mx[1]) * 0.5;
+    let bottom = mn[2];
+    let upp = camera.world_units_per_pixel_at([mx[0], cy, bottom], viewport_height);
+    let margin = 20.0 * upp; // push the witness line past the body's side
+    let tick = 8.0 * upp; // end-tick half length
+    let ox = mx[0] + margin;
+    let mut vertices = Vec::with_capacity(6);
+    // Main vertical witness line, bed → body bottom.
+    vertices.push([ox, cy, 0.0]);
+    vertices.push([ox, cy, bottom]);
+    // End ticks (along X) at each end.
+    vertices.push([ox - tick, cy, 0.0]);
+    vertices.push([ox + tick, cy, 0.0]);
+    vertices.push([ox - tick, cy, bottom]);
+    vertices.push([ox + tick, cy, bottom]);
+    let lines = GizmoLineSet {
+        vertices,
+        color,
+        matrix: None,
+        draw_solid: true,
+        draw_overlay: true,
+        occluded_alpha: 1.0,
+    };
+    let label = [ox, cy, bottom * 0.5];
+    (lines, label, bottom)
 }
 
 #[cfg(test)]
@@ -130,6 +179,23 @@ mod tests {
     const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
 
     #[test]
+    fn z_measure_spans_bed_to_body_bottom() {
+        let cam = OrbitCamera::default();
+        // Body bottom at z=15.55, beside +X face at x=10.
+        let aabb = ([0.0, 0.0, 15.55], [10.0, 6.0, 25.0]);
+        let (lines, label, value) = z_measure(aabb, &cam, 720.0, RED);
+        assert!((value - 15.55).abs() < 1e-3, "measured height = body bottom Z");
+        // First segment runs from the bed (z=0) to the bottom (z=15.55).
+        assert!((lines.vertices[0][2]).abs() < 1e-4, "witness line starts at the bed");
+        assert!((lines.vertices[1][2] - 15.55).abs() < 1e-3, "witness line ends at the body bottom");
+        // Offset beyond the +X face, and the label rides the line midpoint.
+        assert!(lines.vertices[0][0] > 10.0, "witness line sits past the body's +X side");
+        assert!((label[2] - 15.55 * 0.5).abs() < 1e-3, "label anchored at the line midpoint");
+        // Drawn on top so the dimension never hides behind the body.
+        assert!((lines.occluded_alpha - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
     fn arrow_starts_at_anchor_and_extends_up_by_length() {
         let (lines, _) = build_z_control([1.0, 2.0, 3.0], 10.0, 1.0, RED);
         assert_eq!(lines.vertices[0], [1.0, 2.0, 3.0]);
@@ -137,26 +203,25 @@ mod tests {
     }
 
     #[test]
-    fn cube_handle_sits_above_tip() {
-        // Cube edge size = 2 → centre is 1 unit above the arrow tip.
-        let (_, cube) = build_z_control([0.0, 0.0, 0.0], 10.0, 2.0, RED);
+    fn cone_handle_sits_on_the_arrow_tip_pointing_up() {
+        // handle_size = 2 → cone height 2, base at the tip (z=10), apex
+        // one handle-size above (z=12).
+        let (_, cone) = build_z_control([0.0, 0.0, 0.0], 10.0, 2.0, RED);
         let mut min_z = f32::INFINITY;
         let mut max_z = f32::NEG_INFINITY;
-        for v in &cube.vertices {
+        for v in &cone.vertices {
             if v[2] < min_z { min_z = v[2]; }
             if v[2] > max_z { max_z = v[2]; }
         }
-        // Cube of size 2 centred at z = arrow_tip + 1 = 11 → extent
-        // [10, 12].
-        assert!((min_z - 10.0).abs() < 1e-3, "min Z expected 10, got {min_z}");
-        assert!((max_z - 12.0).abs() < 1e-3, "max Z expected 12, got {max_z}");
+        assert!((min_z - 10.0).abs() < 1e-3, "cone base expected at tip z=10, got {min_z}");
+        assert!((max_z - 12.0).abs() < 1e-3, "cone apex expected at z=12, got {max_z}");
     }
 
     #[test]
     fn caller_supplied_color_threads_through() {
-        let (lines, cube) = build_z_control([0.0, 0.0, 0.0], 1.0, 0.1, RED);
+        let (lines, cone) = build_z_control([0.0, 0.0, 0.0], 1.0, 0.1, RED);
         assert_eq!(lines.color, RED);
-        assert_eq!(cube.color, RED);
+        assert_eq!(cone.color, RED);
     }
 
     #[test]

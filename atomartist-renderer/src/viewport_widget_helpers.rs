@@ -176,6 +176,42 @@ pub(crate) fn stroke_circle(ctx: &mut dyn DrawCtx, cx: f64, cy: f64, r: f64) {
     ctx.stroke();
 }
 
+/// Draw a MatterCAD-style readout label centred at widget-local
+/// `(sx, sy)`: theme **text colour** on a rounded **background-colour**
+/// pill with a faint border, so it reads against the 3-D scene. Shared
+/// by the rotate-angle and Z-drag distance readouts. Falls back to
+/// plain text if the backend can't measure the run.
+pub(crate) fn paint_text_pill(ctx: &mut dyn DrawCtx, sx: f64, sy: f64, label: &str) {
+    let visuals = ctx.visuals();
+    ctx.set_font_size(14.0);
+    let Some(m) = ctx.measure_text(label) else {
+        ctx.set_fill_color(visuals.text_color);
+        ctx.fill_text(label, sx, sy);
+        return;
+    };
+    let pad = 6.0;
+    let radius = 6.0;
+    let bx = sx - m.width * 0.5 - pad;
+    let by = sy - (m.ascent + m.descent) * 0.5 - pad;
+    let bw = m.width + pad * 2.0;
+    let bh = m.ascent + m.descent + pad * 2.0;
+    // Rounded theme-background pill.
+    ctx.set_fill_color(visuals.bg_color);
+    ctx.begin_path();
+    ctx.rounded_rect(bx, by, bw, bh, radius);
+    ctx.fill();
+    // Faint border so the pill separates from a same-coloured backdrop.
+    ctx.set_stroke_color(visuals.text_color.with_alpha(0.25));
+    ctx.set_line_width(1.0);
+    ctx.begin_path();
+    ctx.rounded_rect(bx, by, bw, bh, radius);
+    ctx.stroke();
+    // Centred text in the theme text colour.
+    let baseline = sy - (m.ascent - m.descent) * 0.5;
+    ctx.set_fill_color(visuals.text_color);
+    ctx.fill_text(label, sx - m.width * 0.5, baseline);
+}
+
 /// Project a world-space point through the MVP matrix and map to
 /// widget-local pixel coords. Returns `None` if the point is
 /// behind the near plane (`w ≤ 0`). Matches the wgpu / Vulkan NDC
