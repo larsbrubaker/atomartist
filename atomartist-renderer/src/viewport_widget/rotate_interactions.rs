@@ -47,6 +47,19 @@ fn snap_rotation(delta: f32, cursor_dist: f32, radius: f32, upp: f32, shift: boo
     }
 }
 
+/// Fold one frame's pointer movement into the unwrapped rotation total.
+/// `cur_angle` / `last_angle` are raw plane angles from
+/// [`angle_on_axis_plane`] — each in `(−π, π]` with a branch cut at
+/// ±π. Summing the *shortest* per-frame step
+/// (`normalize_angle(cur − last)`) lets the running total cross ±180°
+/// (and ±360°) smoothly, so an arc dragged past a half-turn keeps
+/// growing instead of snapping to the short side. Per-frame steps stay
+/// well under π at any real mouse speed, so the shortest-path step is
+/// always the one the user intended.
+fn accumulate_rotation(accumulated: f32, last_angle: f32, cur_angle: f32) -> f32 {
+    accumulated + normalize_angle(cur_angle - last_angle)
+}
+
 impl Viewport3dWidget {
     /// Solve the three per-axis rotate-handle layouts + their pick
     /// AABBs for the currently-selected body. Shared by the mouse-down
@@ -124,6 +137,10 @@ impl Viewport3dWidget {
             axis,
             center: layout.rotation_center,
             anchor_angle,
+            // Seed the unwrap tracker at the anchor with zero progress;
+            // each move folds its shortest-path step into `accumulated`.
+            last_angle: anchor_angle,
+            accumulated: 0.0,
             snapped: 0.0,
             radius,
             start_matrix,
@@ -141,6 +158,8 @@ impl Viewport3dWidget {
             axis,
             center,
             anchor_angle,
+            last_angle,
+            accumulated,
             radius,
             start_matrix,
             ..
@@ -159,14 +178,26 @@ impl Viewport3dWidget {
             };
             if let Some(hit) = plane.ray_intersect(ray_o, ray_d) {
                 let cur_angle = angle_on_axis_plane(hit, center, axis);
-                let delta = normalize_angle(cur_angle - anchor_angle);
+                // Fold this frame's shortest-path step into the running
+                // total. A plain `normalize_angle(cur - anchor)` clamps
+                // to (−π, π], so a drag past 180° would wrap and the
+                // wedge would snap to the short side; accumulating the
+                // small per-frame increments lets the arc grow past
+                // 180° (and beyond) the way the user is actually
+                // sweeping it.
+                let new_accumulated = accumulate_rotation(accumulated, last_angle, cur_angle);
                 let cursor_dist = {
                     let d = [hit[0] - center[0], hit[1] - center[1], hit[2] - center[2]];
                     (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
                 };
                 let upp = self.cam().world_units_per_pixel_at(center, h as f32);
-                let snapped =
-                    snap_rotation(delta, cursor_dist, radius, upp, self.current_mods.shift);
+                let snapped = snap_rotation(
+                    new_accumulated,
+                    cursor_dist,
+                    radius,
+                    upp,
+                    self.current_mods.shift,
+                );
                 let new_matrix = rotate_about_world_axis(&start_matrix, center, axis, snapped);
                 self.inputs.push_node_matrix(node_id, new_matrix);
                 self.drag = CameraDrag::RotateBodyAxis {
@@ -174,6 +205,8 @@ impl Viewport3dWidget {
                     axis,
                     center,
                     anchor_angle,
+                    last_angle: cur_angle,
+                    accumulated: new_accumulated,
                     snapped,
                     radius,
                     start_matrix,
@@ -185,9 +218,44 @@ impl Viewport3dWidget {
 
 #[cfg(test)]
 mod tests {
-    use super::snap_rotation;
+    use super::{accumulate_rotation, snap_rotation};
 
     const DEG: f32 = std::f32::consts::PI / 180.0;
+
+    /// A continuous CCW drag whose raw plane angle wraps from +170° to
+    /// −170° at the branch cut must still report a monotonically
+    /// growing total that passes 180° — not snap back to the short
+    /// side. Sweep 0→60→120→170→190→240→270 (with the wrap in the
+    /// middle) and expect ~270° accumulated.
+    #[test]
+    fn rotation_accumulates_past_half_turn_without_wrapping() {
+        let raw_degs = [0.0, 60.0, 120.0, 170.0, -170.0, -120.0, -90.0];
+        let mut acc = 0.0;
+        let mut last = 0.0;
+        for d in raw_degs {
+            let cur = d * DEG;
+            acc = accumulate_rotation(acc, last, cur);
+            last = cur;
+        }
+        assert!(acc > 180.0 * DEG, "must pass 180°, got {}°", acc / DEG);
+        assert!((acc - 270.0 * DEG).abs() < 1e-4, "expected ~270°, got {}°", acc / DEG);
+    }
+
+    /// Same in the clockwise direction — the total must descend past
+    /// −180° rather than wrapping to a small positive angle.
+    #[test]
+    fn rotation_accumulates_negative_past_half_turn() {
+        let raw_degs = [0.0, -60.0, -120.0, -170.0, 170.0, 120.0, 90.0];
+        let mut acc = 0.0;
+        let mut last = 0.0;
+        for d in raw_degs {
+            let cur = d * DEG;
+            acc = accumulate_rotation(acc, last, cur);
+            last = cur;
+        }
+        assert!(acc < -180.0 * DEG, "must pass −180°, got {}°", acc / DEG);
+        assert!((acc + 270.0 * DEG).abs() < 1e-4, "expected ~−270°, got {}°", acc / DEG);
+    }
 
     // World-units-per-pixel and a handle radius chosen so the snap-mark
     // ring sits at radius + 50*upp = 100 world units (upp=1, radius=50).

@@ -32,6 +32,11 @@ pub struct RotateAxisLayout {
     pub control_center: [f32; 3],
     /// Plate side length in world units (constant screen-pixel size).
     pub handle_size: f32,
+    /// In-plane rotation (radians) applied to the arrow glyph so its
+    /// opening (and thus its two arrowheads) points toward the box
+    /// along the corner's two edges. Ports MatterCAD's per-corner
+    /// `RotationZ(90°×corner)` orientation of the rotation handle.
+    pub glyph_rotation: f32,
 }
 
 /// Solve the three per-axis layouts (returned in axis order: X, Y, Z)
@@ -118,11 +123,42 @@ fn axis_layout(
         let out = if corner[1] >= box_center[1] { 1.0 } else { -1.0 };
         control_center[1] = corner[1] + out * push;
     }
+    // Spin the arrow glyph so its opening faces the box centre — i.e.
+    // its two arrowheads point along the corner's two in-plane edges.
+    // Project the inward direction (control centre → box centre) onto
+    // the axis's `(u, v)` plane and rotate the glyph's natural opening
+    // to line up with it. Ports MatterCAD's `RotationZ(90°×corner)`.
+    let (pu, pv) = super::handle::plane_basis(axis);
+    let inward = [
+        box_center[0] - control_center[0],
+        box_center[1] - control_center[1],
+        box_center[2] - control_center[2],
+    ];
+    let iu = inward[0] * pu[0] + inward[1] * pu[1] + inward[2] * pu[2];
+    let iv = inward[0] * pv[0] + inward[1] * pv[1] + inward[2] * pv[2];
+    // Snap to the corner's quadrant *diagonal* (exact 45° + 90°·k) rather
+    // than the true inward angle. The true angle skews with the box's
+    // aspect ratio — a thin tile's X / Y handles sit in planes whose two
+    // in-plane extents differ wildly, so `atan2` lands well off 45° and
+    // the glyph tilts. Quantising to the quadrant keeps every handle on
+    // the clean 90° orientations MatterCAD locks to via
+    // `RotationZ(90°×corner)`; only the sign of the inward components
+    // (which corner we're on), not its magnitude, should matter.
+    use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
+    let quadrant = match (iu >= 0.0, iv >= 0.0) {
+        (true, true) => 0.0,
+        (false, true) => 1.0,
+        (false, false) => 2.0,
+        (true, false) => 3.0,
+    };
+    let diagonal = FRAC_PI_4 + quadrant * FRAC_PI_2;
+    let glyph_rotation = diagonal - super::arrow::GLYPH_OPENING_ANGLE;
     RotateAxisLayout {
         axis,
         rotation_center,
         control_center,
         handle_size: PLATE_PX * upp,
+        glyph_rotation,
     }
 }
 
@@ -183,6 +219,58 @@ mod tests {
         // Box above the bed → untouched.
         let corner3 = set_bottom_control_height([0.0, 0.0, 1.0], [5.0, 5.0, 4.0], [0.0, 0.0, 1.0]);
         assert_eq!(corner3[2], 1.0);
+    }
+
+    #[test]
+    fn arrow_opening_faces_the_box_center() {
+        // Each handle's glyph must be rotated so its opening points back
+        // toward the box (its arrowheads then lie along the corner's two
+        // edges). Verify the rotated opening direction has a positive
+        // dot with the inward (control-centre → box-centre) direction in
+        // each axis's plane — catches a sign flip in `glyph_rotation`.
+        let cam = OrbitCamera::default();
+        let aabb = ([0.0, 0.0, 0.0], [10.0, 6.0, 4.0]);
+        let box_center = [5.0, 3.0, 2.0];
+        let layouts = rotate_axis_layouts(aabb, &cam, 720.0);
+        for l in &layouts {
+            let (u, v) = super::super::handle::plane_basis(l.axis);
+            // Glyph opening direction after the in-plane rotation.
+            let opening = super::super::arrow::GLYPH_OPENING_ANGLE + l.glyph_rotation;
+            let (s, c) = opening.sin_cos();
+            let dir = [
+                u[0] * c + v[0] * s,
+                u[1] * c + v[1] * s,
+                u[2] * c + v[2] * s,
+            ];
+            // Inward direction projected back into the plane.
+            let inward = [
+                box_center[0] - l.control_center[0],
+                box_center[1] - l.control_center[1],
+                box_center[2] - l.control_center[2],
+            ];
+            let iu = inward[0] * u[0] + inward[1] * u[1] + inward[2] * u[2];
+            let iv = inward[0] * v[0] + inward[1] * v[1] + inward[2] * v[2];
+            let inward_plane = [
+                u[0] * iu + v[0] * iv,
+                u[1] * iu + v[1] * iv,
+                u[2] * iu + v[2] * iv,
+            ];
+            let dot = dir[0] * inward_plane[0] + dir[1] * inward_plane[1] + dir[2] * inward_plane[2];
+            assert!(dot > 0.0, "axis {} arrow opening must face the box, dot = {dot}", l.axis);
+
+            // The rotation must snap to an exact multiple of 90° — using
+            // an aspect-skewed box (10×6×4) so a non-quantised angle
+            // would visibly miss the grid.
+            use std::f32::consts::FRAC_PI_2;
+            let steps = l.glyph_rotation / FRAC_PI_2;
+            assert!(
+                (steps - steps.round()).abs() < 1e-4,
+                "axis {} glyph_rotation must be a clean 90° multiple, got {} rad ({} steps)",
+                l.axis,
+                l.glyph_rotation,
+                steps,
+            );
+        }
     }
 
     #[test]

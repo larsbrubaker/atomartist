@@ -28,20 +28,38 @@ pub fn plane_basis(axis: u8) -> ([f32; 3], [f32; 3]) {
 
 /// The rotate-arrow glyph centred at `center`, lying in the plane
 /// perpendicular to `axis`, sized so it fills a `size × size` square
-/// (matching the old plate's footprint). Emitted double-sided (front +
-/// reversed-winding back) so it reads from either side regardless of
-/// back-face culling.
+/// (matching the old plate's footprint) and spun in-plane by `rotation`
+/// radians so its opening points toward the box (see
+/// [`super::corners::RotateAxisLayout::glyph_rotation`]). Emitted
+/// double-sided (front + reversed-winding back) so it reads from either
+/// side regardless of back-face culling.
 ///
 /// The glyph's 2-D triangle soup (in `[-0.5, 0.5]`, Y-up) comes from
-/// [`super::arrow::arrow_icon_triangles`]; here we just scale by `size`
-/// and lift each vertex into the axis plane via the `(u, v)` basis.
-pub fn arrow_handle(center: [f32; 3], axis: u8, size: f32, color: [f32; 4]) -> GizmoTriangleSet {
+/// [`super::arrow::arrow_icon_triangles`]; here we rotate it in 2-D,
+/// scale by `size`, and lift each vertex into the axis plane via the
+/// `(u, v)` basis.
+///
+/// Drawn **on top** (`occluded_alpha = 1.0`) — a port of MatterCAD's
+/// `DrawOnTop = true` for `RotateCornerControl`. Without it the Z
+/// handle, which lies flat in the bed plane, z-fights the bed and its
+/// solid variant washes out to the 0.35 occluded alpha — reading as
+/// "not drawn" while the upright X / Y handles stay crisp.
+pub fn arrow_handle(
+    center: [f32; 3],
+    axis: u8,
+    size: f32,
+    rotation: f32,
+    color: [f32; 4],
+) -> GizmoTriangleSet {
     let (u, v) = plane_basis(axis);
-    // Map a normalised 2-D glyph point (`[-0.5, 0.5]`) into the world
-    // plane: scale by `size`, then ride the in-plane basis vectors.
+    let (sin_r, cos_r) = rotation.sin_cos();
+    // Rotate the glyph in its own 2-D frame, scale by `size`, then ride
+    // the in-plane basis vectors into world space.
     let map = |p: &[f32; 2]| {
-        let su = p[0] * size;
-        let sv = p[1] * size;
+        let rx = p[0] * cos_r - p[1] * sin_r;
+        let ry = p[0] * sin_r + p[1] * cos_r;
+        let su = rx * size;
+        let sv = ry * size;
         [
             center[0] + u[0] * su + v[0] * sv,
             center[1] + u[1] * su + v[1] * sv,
@@ -68,8 +86,9 @@ pub fn arrow_handle(center: [f32; 3], axis: u8, size: f32, color: [f32; 4]) -> G
         matrix: None,
         draw_solid: true,
         draw_overlay: true,
-        // Match the control-gizmo overlay alpha used by the Z control.
-        occluded_alpha: 0.35,
+        // DrawOnTop: full-opacity overlay so the handle is always
+        // visible, including the flat-on-bed Z handle.
+        occluded_alpha: 1.0,
     }
 }
 
@@ -93,7 +112,7 @@ mod tests {
 
     #[test]
     fn arrow_is_double_sided_and_in_plane() {
-        let handle = arrow_handle([1.0, 2.0, 3.0], 2, 4.0, RED);
+        let handle = arrow_handle([1.0, 2.0, 3.0], 2, 4.0, 0.0, RED);
         // Whole triangles, and an even split between the front + reversed
         // back windings.
         assert!(handle.vertices.len() >= 6, "arrow must have geometry");
@@ -110,7 +129,7 @@ mod tests {
         // The glyph maps from `[-0.5, 0.5]` scaled by `size`, so every
         // vertex must stay within ±size/2 of the centre in the plane.
         let size = 4.0_f32;
-        let handle = arrow_handle([0.0, 0.0, 0.0], 2, size, RED);
+        let handle = arrow_handle([0.0, 0.0, 0.0], 2, size, 0.0, RED);
         for vtx in &handle.vertices {
             assert!(vtx[0].abs() <= size * 0.5 + 1e-4, "x {} outside footprint", vtx[0]);
             assert!(vtx[1].abs() <= size * 0.5 + 1e-4, "y {} outside footprint", vtx[1]);

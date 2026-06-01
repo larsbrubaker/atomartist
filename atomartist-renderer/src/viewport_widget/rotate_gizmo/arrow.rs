@@ -29,6 +29,17 @@ const ROTATE_ARROW_PATH: &str = "M267.96599,177.26875L276.43374,168.80101C276.43
 /// size without bloating the triangle count.
 const CUBIC_SEGMENTS: usize = 16;
 
+/// Angle (radians, measured in the glyph's own 2-D frame from +X toward
+/// +Y) that the double-arrow's *opening* faces in its natural,
+/// unrotated orientation. The two arrowhead tips sit at roughly
+/// `OPENING ± 71°` (their bisector is the opening direction), so to make
+/// a handle's arrowheads point along the two box edges at its corner,
+/// rotate the glyph so this opening faces the corner's inward diagonal
+/// (toward the box centre). Derived from the glyph geometry: the tips
+/// land at ≈63° and ≈207° → bisector ≈135°. Tunable if the curl ever
+/// needs to flip — adding `PI` faces the opening the other way.
+pub const GLYPH_OPENING_ANGLE: f32 = 3.0 * std::f32::consts::FRAC_PI_4;
+
 /// Triangle soup (`[x, y]` triples, one winding) for the rotate-arrow
 /// glyph, centred on the origin and normalised to `[-0.5, 0.5]`.
 /// Cached after the first call. Falls back to a unit square if the glyph

@@ -63,7 +63,7 @@ pub fn rotate_handles(
         .iter()
         .map(|l| {
             let color = if hovered_axis == Some(l.axis) { accent } else { idle };
-            arrow_handle(l.control_center, l.axis, l.handle_size, color)
+            arrow_handle(l.control_center, l.axis, l.handle_size, l.glyph_rotation, color)
         })
         .collect()
 }

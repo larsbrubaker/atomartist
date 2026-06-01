@@ -134,16 +134,20 @@ pub fn drag_overlay(
 
     // Swept wedge: a filled fan from the centre out to `inner`, from
     // the anchor angle through the snapped delta. Subdivided so the
-    // arc edge stays smooth.
+    // arc edge stays smooth. Emitted double-sided (front + reversed
+    // winding) — the gizmo triangle pass back-face culls, so a
+    // single-sided fan vanishes when its plane is viewed from behind
+    // (e.g. the horizontal Z-axis compass seen from above).
     if snapped.abs() > 1e-4 {
         let steps = ((snapped.abs() / (TAU / RING_SEGMENTS as f32)).ceil() as usize).max(1);
-        let mut wedge = Vec::with_capacity(steps * 3);
+        let mut wedge = Vec::with_capacity(steps * 6);
         for s in 0..steps {
             let t0 = anchor_angle + snapped * (s as f32 / steps as f32);
             let t1 = anchor_angle + snapped * ((s + 1) as f32 / steps as f32);
-            wedge.push(center);
-            wedge.push(ring_pt(center, axis, inner, t0));
-            wedge.push(ring_pt(center, axis, inner, t1));
+            let p0 = ring_pt(center, axis, inner, t0);
+            let p1 = ring_pt(center, axis, inner, t1);
+            wedge.extend_from_slice(&[center, p0, p1]);
+            wedge.extend_from_slice(&[center, p1, p0]);
         }
         tris.push(tri_set(wedge, [accent[0], accent[1], accent[2], 0.35]));
     }
@@ -205,7 +209,12 @@ fn snap_marker(center: [f32; 3], axis: u8, snap_mark_radius: f32, a: f32, upp: f
     let tip = along(anchor, -tip_in, 0.0);
     let b1 = along(anchor, base_out, half);
     let b2 = along(anchor, base_out, -half);
-    vec![tip, b1, b2]
+    // Double-sided (front + reversed winding): the gizmo triangle pass
+    // back-face culls, so a single-winding marker disappears when its
+    // plane faces away from the camera — which is exactly the
+    // horizontal Z-axis compass viewed from above, the reported
+    // "no snap arrows on Z" case.
+    vec![tip, b1, b2, tip, b2, b1]
 }
 
 #[cfg(test)]
@@ -260,6 +269,14 @@ mod tests {
         // 1 needle line.
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].vertices.len(), 2);
+        // Wedge + every snap marker must be double-sided (vertex count
+        // a multiple of 6 = two windings per triangle) so they survive
+        // back-face culling when the compass plane faces away — the
+        // Z-axis "no snap arrows" regression.
+        assert_eq!(tris[0].vertices.len() % 6, 0, "wedge must be double-sided");
+        for marker in &tris[1..] {
+            assert_eq!(marker.vertices.len(), 6, "snap marker must be a double-sided triangle");
+        }
     }
 
     #[test]

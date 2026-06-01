@@ -120,6 +120,18 @@ pub(super) enum CameraDrag {
         /// Pointer angle in the rotation plane at mouse-down. The
         /// snapped rotation each frame is relative to this anchor.
         anchor_angle: f32,
+        /// Pointer plane-angle from the *previous* `MouseMove`. Each
+        /// frame folds the shortest-path step `(cur - last_angle)` into
+        /// `accumulated`, so the running total can pass ±180° (and
+        /// beyond) without the `atan2` branch cut snapping the wedge to
+        /// the short side. Seeded to `anchor_angle` at drag start.
+        last_angle: f32,
+        /// Unwrapped total raw rotation (radians) from the anchor —
+        /// the sum of every frame's shortest-path step. Unlike a plain
+        /// `normalize_angle(cur - anchor)` it is NOT clamped to
+        /// (−π, π], so a >180° drag stays >180°. Snapped into `snapped`
+        /// for the matrix + compass each frame.
+        accumulated: f32,
         /// Current snapped rotation (radians) from the anchor. Updated
         /// every `MouseMove`; read by the compass to draw the swept
         /// wedge + needle and by the degrees readout. Starts at 0.
