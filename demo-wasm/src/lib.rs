@@ -65,6 +65,29 @@ impl wgpu::rwh::HasDisplayHandle for WebDisplay {
     }
 }
 
+/// Replace the canvas with a readable error panel — users without
+/// WebGPU should see *why* the demo is blank, not a dead canvas with
+/// a console-only error.
+fn show_fatal(message: &str) {
+    let Some(document) = web_sys::window().and_then(|w| w.document()) else {
+        return;
+    };
+    let Some(canvas) = document.get_element_by_id("canvas") else {
+        return;
+    };
+    if let Ok(panel) = document.create_element("div") {
+        panel.set_attribute(
+            "style",
+            "max-width:40em;margin:4em auto;padding:1.5em 2em;\
+             font:16px/1.5 system-ui,sans-serif;color:#333;\
+             background:#fff3f0;border:1px solid #e0b4a8;border-radius:8px;",
+        )
+        .ok();
+        panel.set_text_content(Some(message));
+        canvas.replace_with_with_node_1(&panel).ok();
+    }
+}
+
 /// Browser entry point. Spawns the async wgpu init; until that resolves,
 /// `render()` is a no-op (JS's animation loop just keeps polling).
 #[wasm_bindgen(start)]
@@ -95,6 +118,7 @@ pub fn start() {
                 web_sys::console::error_1(&JsValue::from_str(&format!(
                     "wgpu init failed: {}", e
                 )));
+                show_fatal(&e);
             }
         }
     });
@@ -113,10 +137,14 @@ async fn init_wgpu() -> Result<(), String> {
     let initial_size = (canvas.width(), canvas.height());
     SIZE.with(|s| *s.borrow_mut() = initial_size);
 
-    // Build wgpu instance with WebGL2 backend.
+    // Browser WebGPU backend only. The scene renderer's opaque pass
+    // writes two colour attachments with different blend/write-mask
+    // states (INDEPENDENT_BLEND) — WebGL2 cannot express that and
+    // panics creating the scene pipeline, so there is no GL fallback;
+    // browsers without WebGPU get a clear message instead.
     let mut instance_desc =
         wgpu::InstanceDescriptor::new_with_display_handle(Box::new(WebDisplay));
-    instance_desc.backends = wgpu::Backends::GL;
+    instance_desc.backends = wgpu::Backends::BROWSER_WEBGPU;
     let instance = wgpu::Instance::new(instance_desc);
 
     let surface = instance
@@ -130,13 +158,18 @@ async fn init_wgpu() -> Result<(), String> {
             force_fallback_adapter: false,
         })
         .await
-        .map_err(|e| format!("request_adapter: {:?}", e))?;
+        .map_err(|_| {
+            "WebGPU is not available in this browser. AtomArtist needs WebGPU \
+             (Chrome/Edge 113+, Firefox 141+, Safari 26+ — or enable it in \
+             your browser's settings)."
+                .to_string()
+        })?;
 
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor {
             label: Some("atomartist-wasm"),
             required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::downlevel_webgl2_defaults(),
+            required_limits: wgpu::Limits::default(),
             memory_hints: wgpu::MemoryHints::Performance,
             experimental_features: wgpu::ExperimentalFeatures::default(),
             trace: wgpu::Trace::Off,

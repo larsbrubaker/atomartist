@@ -21,11 +21,15 @@ wasm-bindgen-futures     = "0.4"
 js-sys                   = "0.3"
 console_error_panic_hook = "0.1"
 
+# `webgpu` (not `webgl`): the scene renderer's opaque pass needs
+# per-target blend/write-mask states (INDEPENDENT_BLEND), which the
+# WebGL2 backend cannot express — it panics creating the scene
+# pipeline. Browser WebGPU supports the full feature set.
 [dependencies.wgpu]
 version = "29"
 default-features = false
-features = ["wgsl", "webgl"]
+features = ["wgsl", "webgpu"]
 
 [dependencies.web-sys]
 version  = "0.3"
-features = ["Window", "Document", "Element", "HtmlCanvasElement", "console"]
+features = ["Window", "Document", "Element", "Node", "HtmlCanvasElement", "console"]
