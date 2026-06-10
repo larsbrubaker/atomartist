@@ -82,6 +82,7 @@ pub fn build_viewport_overlay(state: AppState, font: Arc<Font>) -> Box<dyn Widge
     let write_state = state.clone();
     let read_num_state = state.clone();
     let write_num_state = state.clone();
+    let write_pair_state = state.clone();
     let viewport_inputs = ViewportInputs {
         last_mesh_output: state.last_mesh_output.clone(),
         display_node: state.display_node.clone(),
@@ -119,6 +120,14 @@ pub fn build_viewport_overlay(state: AppState, font: Arc<Font>) -> Box<dyn Widge
         write_node_number: Some(std::sync::Arc::new(move |id, name: &str, value| {
             write_num_state.set_node_number_with_undo(id, name, value);
         })),
+        // Atomic pair write — the height drag's field path sends the
+        // parameter and its base-lock matrix compensation together so
+        // every evaluation sees a consistent pair (no bounce).
+        write_node_number_and_matrix: Some(std::sync::Arc::new(
+            move |id, name: &str, value, matrix| {
+                write_pair_state.set_node_number_and_matrix_with_undo(id, name, value, matrix);
+            },
+        )),
     };
     let cube_inputs = TumbleCubeInputs {
         camera: state.camera.clone(),

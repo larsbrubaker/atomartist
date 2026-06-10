@@ -68,20 +68,24 @@ impl Viewport3dWidget {
                 // `MoveInZControl` `MouseIsOver`), matching the rotate
                 // handles.
                 let z_color = if self.hovered_z_control { accent } else { idle };
-                let (arrow, cone) =
-                    z_control_gizmo::z_control_for_aabb(world_aabb, &cam, vh, z_color);
-                s.gizmo_lines.push(arrow);
-                s.gizmo_triangles.push(cone);
-                // Height / scale-Z box on the top face (MatterCAD
-                // `ScaleHeightControl`). Accent while hovered or while a
-                // height drag is in flight.
+                s.gizmo_triangles
+                    .push(z_control_gizmo::z_control_for_aabb(world_aabb, &cam, vh, z_color));
+                // Height / scale-Z box (MatterCAD `ScaleHeightControl`).
+                // Mode-aware placement: rides the object's rotated
+                // top-face centre when the node has a height parameter,
+                // else the world-AABB top. Accent while hovered or
+                // while a height drag is in flight.
                 let hbox_active = self.hovered_height_control
                     || matches!(self.drag, CameraDrag::DragBodyHeight { .. });
                 let hbox_color = if hbox_active { accent } else { idle };
-                let (hbox_center, hbox_size) =
-                    z_control_gizmo::height_control_layout_for_aabb(world_aabb, &cam, vh);
-                s.gizmo_triangles
-                    .push(z_control_gizmo::height_control(hbox_center, hbox_size, hbox_color));
+                let (hbox_center, hbox_size, hbox_axes) =
+                    self.height_box_layout(sel_id, world_aabb, &cam, vh);
+                s.gizmo_triangles.push(z_control_gizmo::height_control(
+                    hbox_center,
+                    hbox_size,
+                    hbox_axes,
+                    hbox_color,
+                ));
                 // Rotate gizmo — three per-axis corner handles (MatterCAD
                 // RotateCornerControl). Two display modes:
                 //
@@ -126,20 +130,73 @@ impl Viewport3dWidget {
                     }
                     CameraDrag::DragBodyZ { .. } => {
                         // Moving in Z: hide the rotate handles and show
-                        // the measurement witness line instead (the 2-D
-                        // distance label is drawn by the viewport's
-                        // overlay pass). MatterCAD swaps to the measure
-                        // control while dragging in Z.
-                        let (mline, _, _) =
-                            z_control_gizmo::z_measure(world_aabb, &cam, vh, idle);
-                        s.gizmo_lines.push(mline);
+                        // measure bars from the bed up to the body's
+                        // bottom at the AABB-centre axis (the 2-D value
+                        // label is drawn by the viewport's overlay
+                        // pass). MatterCAD's `MoveInZControl`
+                        // measurement.
+                        let (mn, mx) = world_aabb;
+                        let cx = (mn[0] + mx[0]) * 0.5;
+                        let cyc = (mn[1] + mx[1]) * 0.5;
+                        let (bars, _, _) = z_control_gizmo::measure_bars(
+                            [cx, cyc, 0.0],
+                            [cx, cyc, mn[2]],
+                            &cam,
+                            vh,
+                            idle,
+                        );
+                        s.gizmo_lines.push(bars);
                     }
-                    CameraDrag::DragBodyHeight { .. } => {
-                        // Scaling in Z: hide the rotate handles — the
-                        // height box + its dimension readout (drawn by
-                        // the viewport's 2-D pass) are the focus.
+                    CameraDrag::DragBodyHeight {
+                        axis_origin,
+                        axis_dir,
+                        live_len,
+                        ..
+                    } => {
+                        // Scaling in Z: hide the rotate handles and show
+                        // measure bars spanning the body's base → top
+                        // along the drag axis (MatterCAD's
+                        // `ScaleHeightControl` measurement). Anchors
+                        // come from the drag state, so the bars track
+                        // the cursor without async-rebuild lag.
+                        let top = [
+                            axis_origin[0] + axis_dir[0] * live_len,
+                            axis_origin[1] + axis_dir[1] * live_len,
+                            axis_origin[2] + axis_dir[2] * live_len,
+                        ];
+                        let (bars, _, _) = z_control_gizmo::measure_bars(
+                            *axis_origin,
+                            top,
+                            &cam,
+                            vh,
+                            idle,
+                        );
+                        s.gizmo_lines.push(bars);
                     }
                     _ => {
+                        // Idle: hovering a Z/height control previews its
+                        // measure bars, exactly like hovering a rotate
+                        // handle previews its compass ring (MatterCAD
+                        // shows the measurement when `MouseIsOver`).
+                        if self.hovered_z_control {
+                            let (mn, mx) = world_aabb;
+                            let cx = (mn[0] + mx[0]) * 0.5;
+                            let cyc = (mn[1] + mx[1]) * 0.5;
+                            let (bars, _, _) = z_control_gizmo::measure_bars(
+                                [cx, cyc, 0.0],
+                                [cx, cyc, mn[2]],
+                                &cam,
+                                vh,
+                                idle,
+                            );
+                            s.gizmo_lines.push(bars);
+                        } else if self.hovered_height_control {
+                            if let Some((base, top)) = self.height_measure_anchors(sel_id) {
+                                let (bars, _, _) =
+                                    z_control_gizmo::measure_bars(base, top, &cam, vh, idle);
+                                s.gizmo_lines.push(bars);
+                            }
+                        }
                         let layouts = rotate_gizmo::rotate_axis_layouts(world_aabb, &cam, vh);
                         for handle in rotate_gizmo::rotate_handles(
                             &layouts,

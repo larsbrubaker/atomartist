@@ -48,7 +48,7 @@ pub mod handles;
 pub mod pipelines;
 pub mod shaders;
 
-pub use handles::{cone_handle, cube_handle, sphere_handle};
+pub use handles::{cone_handle, cube_handle, oriented_cube_handle, sphere_handle};
 pub use pipelines::{GizmoLinePipelines, GizmoLineUniforms, GizmoLineVertex};
 
 /// Host-side description of one filled-triangle gizmo — used by

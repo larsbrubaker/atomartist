@@ -143,34 +143,54 @@ pub(super) enum CameraDrag {
         radius: f32,
         start_matrix: [f32; 16],
     },
-    /// Left-button down landed on the height / scale-Z box (top-face
-    /// centre). Dragging it grows/shrinks the body in Z about its base.
+    /// Left-button down landed on the height / scale-Z box. Dragging it
+    /// grows/shrinks the body along its height axis about its base.
     /// Two paths, chosen at drag-start by whether the node exposes an
     /// editable `height` parameter:
     ///
-    /// * `start_height = Some` → edit the `height` property each frame
-    ///   and re-plant the base on the following evaluation (the mesh
-    ///   rebuilds async, so the base is re-anchored a frame later via a
-    ///   world-Z translate — see `drag_height`).
-    /// * `start_height = None` → scale the node matrix in Z about the
-    ///   base plane (analytical, no rebuild; `scale_z_about_bottom`).
+    /// * `start_height = Some` → **field path**: the box rides the
+    ///   *object's* top-face centre (local bounds top transformed by
+    ///   the body matrix — MatterCAD's `GetTopPosition`), the drag
+    ///   measures along the rotated local-Z axis, and each frame writes
+    ///   the `height` parameter **together with** a predicted
+    ///   compensating translation that keeps the rotated base point
+    ///   (`axis_origin`) locked — one atomic graph update per frame, so
+    ///   the async rebuild never paints an unanchored intermediate.
+    /// * `start_height = None` → **matrix path**: box on the world-AABB
+    ///   top centre; scale the node matrix in world Z about the base
+    ///   plane (analytical, no rebuild; `scale_z_about_bottom`).
     DragBodyHeight {
         node_id: NodeId,
-        /// Matrix snapshot at drag start — restored on Esc and the
-        /// baseline the matrix-scale path scales from.
+        /// Node-matrix snapshot at drag start — restored on Esc and the
+        /// baseline both paths derive their writes from.
         start_matrix: [f32; 16],
         /// The node's `height` parameter at drag start, if it has one.
         /// `None` selects the matrix-scale path.
         start_height: Option<f64>,
-        /// World Z of the body's base at drag start — kept planted.
-        bottom_z: f32,
-        /// World height (top − bottom) at drag start — denominator for
-        /// the scale ratio.
-        start_height_world: f32,
-        /// XY of the box (the vertical line the cursor projects onto).
-        anchor_xy: [f32; 2],
-        /// Cursor's projected Z on that line at drag start — subtracted
-        /// to get the per-frame top delta.
-        anchor_z: f32,
+        /// World base point kept locked while scaling: the transformed
+        /// local bottom-centre (field path) or the world-AABB bottom
+        /// centre (matrix path).
+        axis_origin: [f32; 3],
+        /// Unit drag axis: the body's rotated local +Z (field path) or
+        /// world +Z (matrix path). The cursor projects onto the line
+        /// `axis_origin + t · axis_dir`.
+        axis_dir: [f32; 3],
+        /// Body length along `axis_dir` at drag start — denominator
+        /// for the scale ratio.
+        start_len: f32,
+        /// Cursor's projected param on the axis line at drag start.
+        anchor_t: f32,
+        /// Local-space bottom anchor `(centre.x, centre.y, min.z)` of
+        /// the body mesh at drag start — input to the field path's
+        /// base-lock prediction (local Z scales about local 0 when the
+        /// height parameter changes).
+        bottom_local: [f32; 3],
+        /// Composed body matrix at drag start — transforms the
+        /// predicted local bottom into world for the base-lock.
+        start_body_matrix: [f32; 16],
+        /// Live length along the axis, updated each drag frame —
+        /// drives the on-screen height readout without re-reading
+        /// async geometry.
+        live_len: f32,
     },
 }

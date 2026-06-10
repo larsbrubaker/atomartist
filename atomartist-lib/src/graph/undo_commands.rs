@@ -264,6 +264,88 @@ impl UndoRedoCommand for ChangePropertyCmd {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }
 
+/// Change **several properties of one node** as a single undo step,
+/// with mid-stroke coalescing like [`ChangePropertyCmd`].
+///
+/// The 3-D height control writes `height` + `matrix` together every
+/// drag frame (the matrix carries the base-lock compensation for the
+/// height change); as two separate commands they would alternate on
+/// the stack and defeat top-of-stack coalescing. Bundled here the
+/// whole stroke is one command — and one Ctrl+Z restores both values,
+/// matching MatterCAD's single "Scale" undo entry.
+pub struct ChangePropsCmd {
+    graph: Arc<Mutex<Graph>>,
+    pub id: NodeId,
+    props: Vec<PropSlot>,
+}
+
+struct PropSlot {
+    name: Arc<str>,
+    new_value: PortValue,
+    /// Captured on first `do_it`, never overwritten — the pre-stroke
+    /// baseline that `undo_it` restores.
+    old_value: Option<PortValue>,
+}
+
+impl ChangePropsCmd {
+    pub fn new(
+        graph: Arc<Mutex<Graph>>,
+        id: NodeId,
+        props: Vec<(Arc<str>, PortValue)>,
+    ) -> Self {
+        let props = props
+            .into_iter()
+            .map(|(name, new_value)| PropSlot { name, new_value, old_value: None })
+            .collect();
+        Self { graph, id, props }
+    }
+
+    /// Whether this command targets `id` with exactly the property
+    /// names in `names` (order-sensitive) — the caller's coalesce test.
+    pub fn matches(&self, id: NodeId, names: &[&str]) -> bool {
+        self.id == id
+            && self.props.len() == names.len()
+            && self.props.iter().zip(names).all(|(s, n)| &*s.name == *n)
+    }
+
+    /// Coalesce a mid-stroke update into this command: apply the new
+    /// values to the graph and replace the `new_value`s, leaving the
+    /// captured `old_value` baselines untouched. Caller has verified
+    /// [`Self::matches`]; `values` pairs with the command's props by
+    /// order.
+    pub fn extend_into(&mut self, values: &[PortValue]) {
+        let mut g = self.graph.lock().unwrap();
+        for (slot, v) in self.props.iter_mut().zip(values) {
+            let _ = g.set_property(self.id, slot.name.clone(), v.clone());
+            slot.new_value = v.clone();
+        }
+    }
+}
+
+impl UndoRedoCommand for ChangePropsCmd {
+    fn name(&self) -> &str { "Change Properties" }
+    fn do_it(&mut self) {
+        let mut g = self.graph.lock().unwrap();
+        for slot in &mut self.props {
+            if slot.old_value.is_none() {
+                slot.old_value = g
+                    .get(self.id)
+                    .and_then(|n| n.properties.get(&slot.name).cloned());
+            }
+            let _ = g.set_property(self.id, slot.name.clone(), slot.new_value.clone());
+        }
+    }
+    fn undo_it(&mut self) {
+        let mut g = self.graph.lock().unwrap();
+        for slot in self.props.iter_mut().rev() {
+            if let Some(old) = slot.old_value.clone() {
+                let _ = g.set_property(self.id, slot.name.clone(), old);
+            }
+        }
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+}
+
 /// Bundle of commands run as one atomic undo step (e.g. a multi-node delete).
 pub struct BatchCmd {
     name: String,
@@ -352,6 +434,62 @@ mod tests {
         assert_eq!(g.lock().unwrap().node_count(), 0);
         cmd.do_it();
         assert_eq!(g.lock().unwrap().node_count(), 1, "redo restores");
+    }
+
+    /// The height drag's paired write: `height` + `matrix` land as ONE
+    /// command — mid-stroke samples coalesce into it, and a single
+    /// undo restores both pre-stroke values (MatterCAD's one "Scale"
+    /// undo entry).
+    #[test]
+    fn change_props_cmd_coalesces_and_undoes_both_values() {
+        let (g, reg) = setup();
+        let id = {
+            let mut graph = g.lock().unwrap();
+            let id = graph.add_new_node("Const", [0.0, 0.0], &reg).unwrap();
+            let _ = graph.set_property(id, "height", PortValue::Number(20.0));
+            let _ = graph.set_property(id, "matrix", PortValue::Matrix4x4([1.0; 16]));
+            id
+        };
+        let mut buf = UndoBuffer::new();
+        let mk = |h: f64, m: f32| -> Vec<(Arc<str>, PortValue)> {
+            vec![
+                (Arc::from("matrix"), PortValue::Matrix4x4([m; 16])),
+                (Arc::from("height"), PortValue::Number(h)),
+            ]
+        };
+        buf.add_and_do(Box::new(ChangePropsCmd::new(g.clone(), id, mk(25.0, 2.0))));
+
+        // Mid-stroke sample coalesces — still one undo entry.
+        let coalesced = buf.try_coalesce_last(|top| {
+            if let Some(cmd) = top.as_any_mut().downcast_mut::<ChangePropsCmd>() {
+                if cmd.matches(id, &["matrix", "height"]) {
+                    cmd.extend_into(&[
+                        PortValue::Matrix4x4([3.0; 16]),
+                        PortValue::Number(30.0),
+                    ]);
+                    return true;
+                }
+            }
+            false
+        });
+        assert!(coalesced, "same node + names must coalesce");
+
+        let read = |name: &str| g.lock().unwrap().get(id).unwrap().properties.get(name).cloned();
+        assert_eq!(read("height"), Some(PortValue::Number(30.0)));
+        assert_eq!(read("matrix"), Some(PortValue::Matrix4x4([3.0; 16])));
+
+        // ONE undo restores both pre-stroke values.
+        assert!(buf.can_undo());
+        buf.undo();
+        assert_eq!(read("height"), Some(PortValue::Number(20.0)), "undo restores height");
+        assert_eq!(read("matrix"), Some(PortValue::Matrix4x4([1.0; 16])), "undo restores matrix");
+        assert!(!buf.can_undo(), "the whole stroke was a single undo entry");
+
+        // Redo replays the final coalesced pair.
+        assert!(buf.can_redo());
+        buf.redo();
+        assert_eq!(read("height"), Some(PortValue::Number(30.0)));
+        assert_eq!(read("matrix"), Some(PortValue::Matrix4x4([3.0; 16])));
     }
 
     #[test]

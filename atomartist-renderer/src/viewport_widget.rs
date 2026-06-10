@@ -26,7 +26,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use agg_gui::{
     Color, DrawCtx, Event, EventResult, HAnchor, Key, Modifiers, MouseButton, Point, Rect, Size,
@@ -39,13 +39,12 @@ use manifold_rust::types::MeshGL;
 use glam::Mat4;
 
 use crate::camera::OrbitCamera;
-use crate::camera_animations::{CameraPoseAnimation, ProjectionAnimation};
 use crate::picking::{resolve_pivot_or_fallback, HitPlane, PivotResolution};
 
 #[path = "viewport_widget_helpers.rs"]
 mod viewport_widget_helpers;
 use viewport_widget_helpers::{
-    cross3, dot3, estimate_outline_width, mesh_aabb, mouse_button_bit, normalize3, project,
+    cross3, dot3, estimate_outline_width, mouse_button_bit, normalize3, project,
     selected_body_world_aabb, stroke_circle, sub3, vert_pos,
 };
 use crate::scene_renderer::{GizmoLineSet, RenderStyle, WgpuSceneRenderer};

@@ -92,6 +92,41 @@ pub fn z_translation(start_matrix: [f32; 16], anchor_z: f32, current_z: f32) -> 
     m
 }
 
+/// Parameter `t` of the closest point on the line
+/// `L(t) = line_origin + t · line_dir` to the mouse ray — the
+/// arbitrary-axis generalisation of [`z_axis_translation`]. The height
+/// control's field path drags along the body's **rotated** local-Z
+/// axis (MatterCAD measures `(newPosition - bottom).Length` along
+/// `top - bottom`), so the projection line is the rotated axis, not
+/// world Z. `line_dir` need not be unit length, but `t` is in units of
+/// `|line_dir|`; pass a unit vector to get world units. `None` when
+/// the ray is (near-)parallel to the line.
+pub fn axis_param(
+    ray_o: [f32; 3],
+    ray_d: [f32; 3],
+    line_origin: [f32; 3],
+    line_dir: [f32; 3],
+) -> Option<f32> {
+    // Skew-line closest point: lines P(t) = O + t·u (axis, param
+    // wanted) and Q(s) = ro + s·v (mouse ray), w = O − ro:
+    //   t = (b·e − c·d) / (a·c − b²)
+    // with a = u·u, b = u·v, c = v·v, d = u·w, e = v·w.
+    let u = line_dir;
+    let v = ray_d;
+    let w = [
+        line_origin[0] - ray_o[0],
+        line_origin[1] - ray_o[1],
+        line_origin[2] - ray_o[2],
+    ];
+    let dot = |p: [f32; 3], q: [f32; 3]| p[0] * q[0] + p[1] * q[1] + p[2] * q[2];
+    let (a, b, c, d, e) = (dot(u, u), dot(u, v), dot(v, v), dot(u, w), dot(v, w));
+    let denom = a * c - b * b;
+    if denom.abs() < 1e-6 {
+        return None;
+    }
+    Some((b * e - c * d) / denom)
+}
+
 /// Scale `start_matrix` in **world Z** about the plane `z = bottom_z`,
 /// keeping that plane fixed so the body's base stays planted while it
 /// grows / shrinks upward. World-space pre-multiply by

@@ -246,7 +246,7 @@ fn z_control_highlights_on_hover() {
     let aabb = selected_body_world_aabb(w.current_geometry().as_deref(), node_id)
         .expect("selected body has a world AABB");
     let cam = w.cam();
-    let (_, (cube_center, _)) = z_control_gizmo::z_control_layout_for_aabb(aabb, &cam, 300.0);
+    let (cube_center, _) = z_control_gizmo::z_control_layout_for_aabb(aabb, &cam, 300.0);
     let m = mvp(&cam, 400.0_f32 / 300.0);
     let (sx, sy) = project(&m, cube_center, 400.0, 300.0).expect("Z control projects on screen");
 
@@ -270,13 +270,28 @@ fn viewport_with_height_body(
     std::sync::Arc<std::sync::Mutex<[f32; 16]>>,
     std::sync::Arc<std::sync::Mutex<f64>>,
 ) {
-    use atomartist_lib::geometry::{Body, Geometry3d};
     let mut identity = [0.0_f32; 16];
     identity[0] = 1.0;
     identity[5] = 1.0;
     identity[10] = 1.0;
     identity[15] = 1.0;
-    let matrix = std::sync::Arc::new(std::sync::Mutex::new(identity));
+    viewport_with_height_body_matrix(node_id, height, identity)
+}
+
+/// [`viewport_with_height_body`] with an explicit node/body matrix —
+/// for exercising the height control against **rotated** bodies (box
+/// placement on the rotated top, base-lock compensation).
+fn viewport_with_height_body_matrix(
+    node_id: atomartist_lib::graph::node::NodeId,
+    height: Option<f64>,
+    body_matrix: [f32; 16],
+) -> (
+    Viewport3dWidget,
+    std::sync::Arc<std::sync::Mutex<[f32; 16]>>,
+    std::sync::Arc<std::sync::Mutex<f64>>,
+) {
+    use atomartist_lib::geometry::{Body, Geometry3d};
+    let matrix = std::sync::Arc::new(std::sync::Mutex::new(body_matrix));
     let height_cell = std::sync::Arc::new(std::sync::Mutex::new(height.unwrap_or(0.0)));
     let mut inputs = empty_inputs();
     let (rc, wc) = (matrix.clone(), matrix.clone());
@@ -294,6 +309,7 @@ fn viewport_with_height_body(
     let mesh = std::sync::Arc::new(atomartist_lib::geometry::generate_box(20.0, 20.0, 20.0));
     let mut body = Body::from_mesh(mesh);
     body.origin = Some(node_id);
+    body.matrix = body_matrix;
     *inputs.last_mesh_output.lock().unwrap() =
         Some(std::sync::Arc::new(Geometry3d::from_body(body)));
     let mut w = Viewport3dWidget::new(inputs);
@@ -354,6 +370,184 @@ fn dragging_height_box_without_field_scales_matrix() {
     // off 1.0 while X/Y stay put.
     assert!((m[10] - 1.0).abs() > 1e-4, "Z scale should change, got {}", m[10]);
     assert!((m[0] - 1.0).abs() < 1e-6 && (m[5] - 1.0).abs() < 1e-6, "X/Y scale untouched");
+}
+
+/// Column-major 90° rotation about X: local +Z → world −Y.
+const ROT_X90: [f32; 16] = [
+    1.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 1.0, 0.0,
+    0.0, -1.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 1.0,
+];
+
+/// Field mode must anchor the height box to the **object's** rotated
+/// top-face centre (MatterCAD `GetTopPosition`), not the world-AABB
+/// top. A 20³ box rotated 90° about X has its object-top at world
+/// `(0, -10, 0)` while the world-AABB top stays at `z = +10`.
+#[test]
+fn height_box_anchors_to_rotated_top_in_field_mode() {
+    let node_id = atomartist_lib::graph::node::NodeId(63);
+    let (w, _m, _h) = viewport_with_height_body_matrix(node_id, Some(20.0), ROT_X90);
+    let aabb = selected_body_world_aabb(w.current_geometry().as_deref(), node_id)
+        .expect("selected body has a world AABB");
+    let cam = w.cam();
+    let (center, size, axes) = w.height_box_layout(node_id, aabb, &cam, 300.0);
+    assert!(size > 0.0);
+    assert!(
+        center[1] < -9.0,
+        "box must ride the rotated top face (world y ≈ -10), got {center:?}",
+    );
+    assert!(
+        center[2].abs() < 1.0,
+        "box must NOT sit at the world-AABB top (z = +10), got {center:?}",
+    );
+    // The cube's basis must rotate with the body: local +Z → world -Y.
+    assert!(
+        axes[2][1] < -0.99,
+        "cube Z axis must follow the rotated top normal, got {:?}",
+        axes[2],
+    );
+    assert!(
+        axes[1][2] > 0.99,
+        "cube Y axis must follow the rotation (local +Y → world +Z), got {:?}",
+        axes[1],
+    );
+}
+
+/// The bounce + base-drift regression: a field-path height drag on a
+/// **rotated** body must write the base-lock matrix compensation in
+/// the SAME update as each height write (never a separate later
+/// correction), and that compensation must keep the rotated base point
+/// locked: `fix = B0 − M0·(bottom_local.xy, bottom_local.z · s)`. For
+/// the 20³ centered box under `ROT_X90` that is `(0, 10(1−s), 0)`.
+/// A second move must recompute from the drag-start snapshot (no
+/// cumulative drift).
+#[test]
+fn rotated_height_drag_locks_base_with_one_compensated_write() {
+    use agg_gui::Modifiers;
+    let node_id = atomartist_lib::graph::node::NodeId(64);
+    let (mut w, matrix, height_cell) =
+        viewport_with_height_body_matrix(node_id, Some(20.0), ROT_X90);
+    let aabb = selected_body_world_aabb(w.current_geometry().as_deref(), node_id)
+        .expect("selected body has a world AABB");
+    let cam = w.cam();
+    let (center, _, _) = w.height_box_layout(node_id, aabb, &cam, 300.0);
+    let m = mvp(&cam, 400.0_f32 / 300.0);
+    let (sx, sy) = project(&m, center, 400.0, 300.0).expect("height box projects on screen");
+    fire(&mut w, Event::MouseDown { pos: Point { x: sx, y: sy }, button: MouseButton::Left, modifiers: Modifiers::default() });
+    let CameraDrag::DragBodyHeight { start_height: Some(_), axis_dir, .. } = w.drag.clone()
+    else {
+        panic!("expected a field-path height drag, got {:?}", w.drag);
+    };
+    assert!(
+        axis_dir[1] < -0.99,
+        "drag axis must be the rotated local Z (world -Y), got {axis_dir:?}",
+    );
+
+    // Drag ~40 px along the projected axis direction.
+    let along = [
+        center[0] + axis_dir[0] * 2.0,
+        center[1] + axis_dir[1] * 2.0,
+        center[2] + axis_dir[2] * 2.0,
+    ];
+    let (ax, ay) = project(&m, along, 400.0, 300.0).expect("axis point projects");
+    let (dx, dy) = (ax - sx, ay - sy);
+    let dlen = (dx * dx + dy * dy).sqrt().max(1e-6);
+    let step = move |k: f64| Point { x: sx + dx / dlen * k, y: sy + dy / dlen * k };
+
+    let check_locked = |label: &str, matrix: &std::sync::Arc<std::sync::Mutex<[f32; 16]>>, h: f64| {
+        let s = (h / 20.0) as f32;
+        let mm = *matrix.lock().unwrap();
+        let expect_y = 10.0 * (1.0 - s);
+        assert!((mm[12]).abs() < 1e-3, "{label}: no X drift, got {}", mm[12]);
+        assert!((mm[14]).abs() < 1e-3, "{label}: no Z drift, got {}", mm[14]);
+        assert!(
+            (mm[13] - expect_y).abs() < 1e-3,
+            "{label}: base-lock compensation must be 10(1-s) = {expect_y}, got {}",
+            mm[13],
+        );
+    };
+
+    fire(&mut w, Event::MouseMove { pos: step(40.0) });
+    let h1 = *height_cell.lock().unwrap();
+    assert!((h1 - 20.0).abs() > 1e-3, "height param should change, stayed {h1}");
+    check_locked("first move", &matrix, h1);
+
+    // Second move: compensation recomputed from the drag-start
+    // snapshot — consistent with the new height, no accumulation.
+    fire(&mut w, Event::MouseMove { pos: step(70.0) });
+    let h2 = *height_cell.lock().unwrap();
+    assert!((h2 - h1).abs() > 1e-3, "second move should keep scaling");
+    check_locked("second move", &matrix, h2);
+}
+
+/// The plain unrotated bounce repro: a centered box grows both ways
+/// when `height` increases, so the same-frame compensation must lift
+/// the matrix by `10(s−1)` to keep the bottom planted at `z = −10`.
+#[test]
+fn centered_box_height_drag_keeps_bottom_planted() {
+    use agg_gui::Modifiers;
+    let node_id = atomartist_lib::graph::node::NodeId(65);
+    let (mut w, matrix, height_cell) = viewport_with_height_body(node_id, Some(20.0));
+    let on_box = height_box_screen_pos(&w, node_id);
+    fire(&mut w, Event::MouseDown { pos: on_box, button: MouseButton::Left, modifiers: Modifiers::default() });
+    fire(&mut w, Event::MouseMove { pos: Point { x: on_box.x, y: on_box.y + 40.0 } });
+    let h = *height_cell.lock().unwrap();
+    assert!((h - 20.0).abs() > 1e-3, "height param should change");
+    let s = (h / 20.0) as f32;
+    let mm = *matrix.lock().unwrap();
+    assert!(
+        (mm[14] - 10.0 * (s - 1.0)).abs() < 1e-3,
+        "compensation must keep the bottom at z = -10: expected tz = {}, got {}",
+        10.0 * (s - 1.0),
+        mm[14],
+    );
+    // The locked base: new matrix maps the predicted local bottom
+    // (0,0,-10s) back to the original world bottom z = -10.
+    let new_bottom = -10.0 * s + mm[14];
+    assert!((new_bottom + 10.0).abs() < 1e-3, "bottom must stay planted, got {new_bottom}");
+}
+
+/// Hovering the Z / height controls previews their measure bars in
+/// the scene (MatterCAD shows the measurement on `MouseIsOver`), the
+/// same way hovering a rotate handle previews its compass ring.
+#[test]
+fn hovering_controls_previews_measure_bars() {
+    let node_id = atomartist_lib::graph::node::NodeId(66);
+    let (mut w, _m, _h) = viewport_with_height_body(node_id, Some(20.0));
+    // Measure bars are the only 14-vertex line set (2 bars + line +
+    // 4 arrow wings).
+    let measure_count = |w: &Viewport3dWidget| {
+        w.populate_scene_state(vec![], None, true, 1.0, [0.0, 0.0, 0.0, 1.0]);
+        w.scene
+            .borrow()
+            .gizmo_lines
+            .iter()
+            .filter(|l| l.vertices.len() == 14)
+            .count()
+    };
+    assert_eq!(measure_count(&w), 0, "no measure preview while idle");
+
+    // Hover the height box → its base→top measure appears.
+    let on_box = height_box_screen_pos(&w, node_id);
+    fire(&mut w, Event::MouseMove { pos: on_box });
+    assert!(w.hovered_height_control);
+    assert_eq!(measure_count(&w), 1, "height-box hover previews the measure");
+
+    // Hover the Z cone → the bed→bottom measure appears.
+    let aabb = selected_body_world_aabb(w.current_geometry().as_deref(), node_id)
+        .expect("selected body has a world AABB");
+    let cam = w.cam();
+    let (cone_center, _) = z_control_gizmo::z_control_layout_for_aabb(aabb, &cam, 300.0);
+    let m = mvp(&cam, 400.0_f32 / 300.0);
+    let (sx, sy) = project(&m, cone_center, 400.0, 300.0).expect("cone projects on screen");
+    fire(&mut w, Event::MouseMove { pos: Point { x: sx, y: sy } });
+    assert!(w.hovered_z_control);
+    assert_eq!(measure_count(&w), 1, "Z-cone hover previews the measure");
+
+    // Off both → previews gone.
+    fire(&mut w, Event::MouseMove { pos: Point { x: 2.0, y: 2.0 } });
+    assert_eq!(measure_count(&w), 0, "moving off the controls clears the preview");
 }
 
 /// Hovering the height box highlights it (accent), like the rotate /

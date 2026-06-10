@@ -15,7 +15,7 @@ use agg_gui::undo::{UndoBuffer, UndoRedoCommand};
 use atomartist_lib::geometry::Geometry3d;
 use atomartist_lib::graph::executor::evaluate_dirty;
 use atomartist_lib::graph::node::{NodeId, PortValue};
-use atomartist_lib::graph::undo_commands::{AddNodeCmd, ChangePropertyCmd};
+use atomartist_lib::graph::undo_commands::{AddNodeCmd, ChangePropertyCmd, ChangePropsCmd};
 use atomartist_lib::registry::NodeRegistry;
 use atomartist_lib::nodes::mesh::mesh_node;
 use atomartist_lib::serialization::{
@@ -238,12 +238,58 @@ impl AppState {
         self.set_node_property_with_undo(id, name, PortValue::Number(value));
     }
 
+    /// Write a numeric property **and** the matrix in one atomic update
+    /// with a single evaluation. The height control's field path needs
+    /// the pair to land together: the height edit rebuilds the mesh and
+    /// the matrix carries the base-lock compensation — written
+    /// separately, an evaluation can catch the gap between them and
+    /// paint a frame where the body has scaled but not yet re-anchored
+    /// (visible bounce). One `ChangePropsCmd` per stroke, so a single
+    /// Ctrl+Z restores both values (MatterCAD's one "Scale" entry).
+    pub fn set_node_number_and_matrix_with_undo(
+        &self,
+        id: NodeId,
+        name: &str,
+        value: f64,
+        matrix: [f32; 16],
+    ) {
+        let values = [PortValue::Matrix4x4(matrix), PortValue::Number(value)];
+        let names = ["matrix", name];
+        let coalesced = self.undo.lock().unwrap().try_coalesce_last(|top| {
+            if let Some(cmd) = top.as_any_mut().downcast_mut::<ChangePropsCmd>() {
+                if cmd.matches(id, &names) {
+                    cmd.extend_into(&values);
+                    return true;
+                }
+            }
+            false
+        });
+        if !coalesced {
+            let props = names
+                .iter()
+                .zip(values.iter())
+                .map(|(n, v)| (std::sync::Arc::<str>::from(*n), v.clone()))
+                .collect();
+            let cmd = ChangePropsCmd::new(self.graph.clone(), id, props);
+            self.undo.lock().unwrap().add_and_do(Box::new(cmd));
+        }
+        self.schedule_evaluate();
+    }
+
     /// Shared coalesced-undo write for a single node property. Merges
     /// mid-stroke samples into one undo step (matching `AppStateModel`'s
     /// property-panel writes, so a 3-D drag and a slider edit of the
     /// same property collapse together), then re-evaluates so the
     /// viewport reflects the change each frame.
     fn set_node_property_with_undo(&self, id: NodeId, name: &str, value: PortValue) {
+        self.apply_property_cmd(id, name, value);
+        self.schedule_evaluate();
+    }
+
+    /// Apply one coalesced `ChangePropertyCmd` to the graph + undo
+    /// stack WITHOUT scheduling an evaluation — callers batch several
+    /// writes and evaluate once.
+    fn apply_property_cmd(&self, id: NodeId, name: &str, value: PortValue) {
         let name: std::sync::Arc<str> = std::sync::Arc::<str>::from(name);
         let coalesced = {
             let name_clone = name.clone();
@@ -261,7 +307,6 @@ impl AppState {
             let cmd = ChangePropertyCmd::new(self.graph.clone(), id, name, value);
             self.undo.lock().unwrap().add_and_do(Box::new(cmd));
         }
-        self.schedule_evaluate();
     }
 }
 

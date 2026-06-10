@@ -90,6 +90,36 @@ pub fn cube_handle(center: [f32; 3], size: f64, color: [f32; 4]) -> GizmoTriangl
     }
 }
 
+/// Cube handle like [`cube_handle`] but **oriented**: each local
+/// vertex is mapped through the given basis (`axes[0..3]` = where the
+/// local X/Y/Z axes land, expected orthonormal) before translating to
+/// `center`. The height control aligns its box with the body's rotated
+/// top face — MatterCAD applies the selection's rotation to the
+/// control mesh in `ScaleHeightControl.SetPosition`.
+pub fn oriented_cube_handle(
+    center: [f32; 3],
+    size: f64,
+    axes: [[f32; 3]; 3],
+    color: [f32; 4],
+) -> GizmoTriangleSet {
+    let mesh = generate_box(size, size, size);
+    let mut vertices = meshgl_to_tri_verts(&mesh);
+    for v in vertices.iter_mut() {
+        let (x, y, z) = (v[0], v[1], v[2]);
+        for k in 0..3 {
+            v[k] = x * axes[0][k] + y * axes[1][k] + z * axes[2][k] + center[k];
+        }
+    }
+    GizmoTriangleSet {
+        vertices,
+        color,
+        matrix: None,
+        draw_solid: true,
+        draw_overlay: true,
+        occluded_alpha: 0.35,
+    }
+}
+
 /// Cone handle centred at `center`, `radius` at the base and `height`
 /// tall, apex pointing **+Z**. Used as the Z-translate handle (MatterCAD's
 /// `MoveInZControl` arrowhead is a cone, not a box — a box reads as a

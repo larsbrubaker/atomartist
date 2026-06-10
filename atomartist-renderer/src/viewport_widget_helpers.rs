@@ -45,6 +45,25 @@ pub(crate) fn selected_body_world_aabb(
     None
 }
 
+/// Local-space AABB **and composed matrix** of the body whose `origin`
+/// matches `selection`. The height control's field path needs both: the
+/// box anchors to the *object's* top-face centre (local bounds centre
+/// transformed by the matrix — MatterCAD's `GetTopPosition`), which for
+/// a rotated body is not the world-AABB top.
+pub(crate) fn selected_body_local_aabb_and_matrix(
+    geometry: Option<&atomartist_lib::geometry::Geometry3d>,
+    selection: atomartist_lib::graph::node::NodeId,
+) -> Option<(([f32; 3], [f32; 3]), [f32; 16])> {
+    let geom = geometry?;
+    for body in geom.iter() {
+        if body.origin == Some(selection) {
+            let local = mesh_aabb(&body.mesh)?;
+            return Some((local, body.matrix));
+        }
+    }
+    None
+}
+
 /// Transform the 8 corners of a local AABB by `matrix` and return the
 /// world-space AABB enclosing the transformed corners. Mirrors the
 /// helper in `nodes/ops_3d/fit_to_bounds_node.rs`; we keep two copies
@@ -73,7 +92,7 @@ fn world_aabb_from_local(
     (wmn, wmx)
 }
 
-fn mat4_transform_point(m: &[f32; 16], p: [f32; 3]) -> [f32; 3] {
+pub(crate) fn mat4_transform_point(m: &[f32; 16], p: [f32; 3]) -> [f32; 3] {
     let x = m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12];
     let y = m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13];
     let z = m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14];

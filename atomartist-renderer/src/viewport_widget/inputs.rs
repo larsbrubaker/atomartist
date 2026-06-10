@@ -98,6 +98,13 @@ pub struct ViewportInputs {
     /// (wired to `AppState::set_node_number_with_undo`). Used by the
     /// height / width / depth scale controls' field-editing path.
     pub write_node_number: Option<Arc<dyn Fn(NodeId, &str, f64)>>,
+    /// Atomic writer for a numeric property **plus** the matrix in one
+    /// graph update + one evaluation (wired to
+    /// `AppState::set_node_number_and_matrix_with_undo`). The height
+    /// control's field path needs the pair together: the matrix
+    /// carries the base-lock compensation for the height change, and a
+    /// gap between them paints a one-frame bounce.
+    pub write_node_number_and_matrix: Option<Arc<dyn Fn(NodeId, &str, f64, [f32; 16])>>,
 }
 
 impl ViewportInputs {
@@ -120,6 +127,7 @@ impl ViewportInputs {
             read_node_matrix: None,
             read_node_number: None,
             write_node_number: None,
+            write_node_number_and_matrix: None,
         }
     }
 
@@ -151,6 +159,25 @@ impl ViewportInputs {
     pub(crate) fn push_node_number(&self, id: NodeId, name: &str, value: f64) {
         if let Some(f) = &self.write_node_number {
             f(id, name, value);
+        }
+    }
+
+    /// Push a numeric property and the matrix as ONE atomic graph
+    /// update (single evaluation). Falls back to two separate writes
+    /// when the combined writer isn't wired, so headless tests that
+    /// only register the simple writers still observe both values.
+    pub(crate) fn push_node_number_and_matrix(
+        &self,
+        id: NodeId,
+        name: &str,
+        value: f64,
+        matrix: [f32; 16],
+    ) {
+        if let Some(f) = &self.write_node_number_and_matrix {
+            f(id, name, value, matrix);
+        } else {
+            self.push_node_matrix(id, matrix);
+            self.push_node_number(id, name, value);
         }
     }
 }

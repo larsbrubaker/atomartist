@@ -13,7 +13,9 @@
 //! of bbox + camera + viewport — easy to unit-test.
 
 use crate::camera::OrbitCamera;
-use crate::scene_renderer::gizmo_pass::{cone_handle, cube_handle, GizmoLineSet, GizmoTriangleSet};
+use crate::scene_renderer::gizmo_pass::{
+    cone_handle, oriented_cube_handle, GizmoLineSet, GizmoTriangleSet,
+};
 
 /// One handle id per Z control — single grab target for the
 /// translate-Z action.
@@ -27,116 +29,57 @@ pub const HEIGHT_HANDLE_ID: u32 = 1;
 /// Height-box edge length in screen pixels — a small cube on the top
 /// face (MatterCAD's `ScaleHeightControl` uses a 7px cube; we use a
 /// slightly larger one for grabbability, sitting just under the
-/// move-Z cone's arrow).
-const HEIGHT_BOX_PX: f32 = 11.0;
+/// move-Z cone's arrow). Pub so the widget's mode-aware
+/// `height_box_layout` (field path: object-top placement) sizes its
+/// box identically to the AABB-mode layout below.
+pub(crate) const HEIGHT_BOX_PX: f32 = 11.0;
 
-/// Pixel-based size floors. The arrow line length AND the handle
-/// cube each have a minimum size in screen pixels so very small
-/// bodies still produce a usable hit target — but past that floor
-/// they grow with the body's AABB Z extent so a tall body shows a
-/// tall arrow (mirrors MatterCAD's `MoveInZControl`).
-const ARROW_LENGTH_MIN_PX: f32 = 60.0;
+/// Z-translate cone sizing, in screen pixels. MatterCAD's
+/// `MoveInZControl.SetPosition` parks the up-arrow `10 px +
+/// upArrowSize/2` above the AABB top — close to the body, no long
+/// shaft. Our cone must additionally clear the height box (which
+/// spans `0..HEIGHT_BOX_PX` above the top face, taller than
+/// MatterCAD's 7 px cube), so its base starts a clear gap above the
+/// box top — in MatterCAD the two controls never touch.
 const HANDLE_SIZE_PX: f32 = 12.0;
-const ANCHOR_OFFSET_PX: f32 = 10.0;
-/// Arrow line length as a fraction of the AABB Z extent. Caps the
-/// gizmo at a sensible proportion of the body — same fraction the
-/// MatterCAD measurement controls use.
-const ARROW_LENGTH_AABB_FACTOR: f32 = 0.5;
+const Z_CONE_GAP_PX: f32 = 8.0;
+const ANCHOR_OFFSET_PX: f32 = HEIGHT_BOX_PX + Z_CONE_GAP_PX;
 
-/// Build a Z control sized for the supplied world-space AABB. The
-/// gizmo is anchored above the AABB top-face centre with an offset +
-/// arrow length + handle size computed in **screen pixels** — the
-/// caller passes the camera + viewport height so the per-frame
-/// world-units-per-pixel factor lands inside the math. `idle_color`
-/// is the colour both the arrow lines and the sphere handle use.
+/// Build the Z-translate cone for the supplied world-space AABB —
+/// hovering just above the top-face centre (MatterCAD's
+/// `MoveInZControl` up arrow). `idle_color` is the cone colour.
 pub fn z_control_for_aabb(
     world_aabb: ([f32; 3], [f32; 3]),
     camera: &OrbitCamera,
     viewport_height: f32,
     idle_color: [f32; 4],
-) -> (GizmoLineSet, GizmoTriangleSet) {
-    let ((anchor, arrow_len, handle_r), _) =
-        z_control_layout_for_aabb(world_aabb, camera, viewport_height);
-    build_z_control(anchor, arrow_len, handle_r, idle_color)
+) -> GizmoTriangleSet {
+    let (center, size) = z_control_layout_for_aabb(world_aabb, camera, viewport_height);
+    cone_handle(center, (size * 0.5) as f64, size as f64, idle_color)
 }
 
-/// World-space pose of the Z control's draggable sphere — used by
-/// the viewport's mouse-down hit-test to spot a click on the handle
-/// before falling through to body-pick. Returns
-/// `((anchor, arrow_length, handle_radius), (sphere_center, sphere_radius))`.
-/// Both calls share the same math as [`z_control_for_aabb`] /
-/// [`build_z_control`] so the rendered geometry and the pick AABB
-/// match.
+/// World pose `(cone_center, size)` of the Z-translate cone — used by
+/// the draw AND the viewport's mouse-down/hover hit-tests so the
+/// rendered geometry and the pick AABB match. The cone floats
+/// `10 px + size/2` above the AABB top-face centre, constant
+/// pixel-size via the camera's world-units-per-pixel factor.
 pub fn z_control_layout_for_aabb(
     world_aabb: ([f32; 3], [f32; 3]),
     camera: &OrbitCamera,
     viewport_height: f32,
-) -> (([f32; 3], f32, f32), ([f32; 3], f32)) {
+) -> ([f32; 3], f32) {
     let (mn, mx) = world_aabb;
     let cx = (mn[0] + mx[0]) * 0.5;
     let cy = (mn[1] + mx[1]) * 0.5;
     let top_z = mx[2];
-    let z_extent = (mx[2] - mn[2]).max(0.0);
-    // World-units-per-pixel at the bbox top.
     let upp = camera.world_units_per_pixel_at([cx, cy, top_z], viewport_height);
-    // Arrow line length grows with AABB Z extent so tall bodies get
-    // a long arrow + short bodies get a short one — both stay
-    // visually proportional. Floor at a pixel-based minimum so
-    // tiny bodies still produce a usable handle.
-    let arrow_len = (z_extent * ARROW_LENGTH_AABB_FACTOR).max(ARROW_LENGTH_MIN_PX * upp);
-    // Cube handle stays pixel-sized — predictable hit target
-    // regardless of body size, matching MatterCAD's scale-handle
-    // sizing rule.
-    let handle_size = HANDLE_SIZE_PX * upp;
-    let anchor_offset = ANCHOR_OFFSET_PX * upp;
-    let anchor = [cx, cy, top_z + anchor_offset];
-    // Cube centre sits one half-cube above the arrow tip so the
-    // cube's bottom face touches the tip.
-    let cube_center = [
-        anchor[0],
-        anchor[1],
-        anchor[2] + arrow_len + handle_size * 0.5,
+    let size = HANDLE_SIZE_PX * upp;
+    let center = [
+        cx,
+        cy,
+        top_z + (ANCHOR_OFFSET_PX + HANDLE_SIZE_PX * 0.5) * upp,
     ];
-    ((anchor, arrow_len, handle_size), (cube_center, handle_size))
-}
-
-/// Build the Z control's gizmo sets. `anchor` is the world-space
-/// point at the *bottom* of the gizmo (typically the selected body's
-/// top face); the arrow line extends `+Z` by `arrow_length`. The
-/// handle cube sits one half-cube above the arrow tip — that's the
-/// click + drag target. MatterCAD's `MoveInZControl` uses the same
-/// shaft + cube layout.
-///
-/// `handle_size` is the cube's edge length. Use the same value the
-/// caller hands to [`pick_handle`] so the click hit-test box matches
-/// what's drawn.
-pub fn build_z_control(
-    anchor: [f32; 3],
-    arrow_length: f32,
-    handle_size: f32,
-    color: [f32; 4],
-) -> (GizmoLineSet, GizmoTriangleSet) {
-    let tip = [anchor[0], anchor[1], anchor[2] + arrow_length];
-    // Single line shaft from anchor to tip; the cube handle on top
-    // doubles as the arrowhead so we don't need a separate spike.
-    let vertices = vec![anchor, tip];
-    let lines = GizmoLineSet {
-        vertices,
-        color,
-        matrix: None,
-        draw_solid: true,
-        draw_overlay: true,
-        // Match NodeDesigner's control-gizmo overlay alpha.
-        occluded_alpha: 0.35,
-    };
-    // MatterCAD `MoveInZControl` uses a cone arrowhead for the
-    // translate-Z handle (a box is reserved for height / scale). Centre
-    // the cone at the same point the pick-AABB uses (`cube_center`), so
-    // the hit-test box still wraps it; its base sits at the arrow tip
-    // and the apex points +Z.
-    let cone_center = [tip[0], tip[1], tip[2] + handle_size * 0.5];
-    let cone = cone_handle(cone_center, (handle_size * 0.5) as f64, handle_size as f64, color);
-    (lines, cone)
+    (center, size)
 }
 
 /// World pose of the height / scale-Z box — a small cube centred on the
@@ -163,53 +106,124 @@ pub fn height_control_layout_for_aabb(
 }
 
 /// Build the height-box gizmo (a cube handle) at `center` with edge
-/// length `size`. `color` is idle (theme text) or accent on hover.
-pub fn height_control(center: [f32; 3], size: f32, color: [f32; 4]) -> GizmoTriangleSet {
-    cube_handle(center, size as f64, color)
+/// length `size`, oriented along `axes` so the box tilts with the
+/// body's rotated top face in field mode (MatterCAD rotates the
+/// `ScaleHeightControl` mesh with the selection). Pass identity axes
+/// for the axis-aligned matrix mode. `color` is idle (theme text) or
+/// accent on hover.
+pub fn height_control(
+    center: [f32; 3],
+    size: f32,
+    axes: [[f32; 3]; 3],
+    color: [f32; 4],
+) -> GizmoTriangleSet {
+    oriented_cube_handle(center, size as f64, axes, color)
 }
 
-/// Build the Z-drag **measurement** overlay shown while a `DragBodyZ`
-/// is in flight (MatterCAD pops a measure control + distance during the
-/// move-in-Z drag). A vertical witness line runs from the bed (`z = 0`)
-/// up to the selected body's bottom, offset just past the body's `+X`
-/// side so it doesn't overlap the mesh, with short end ticks. Returns
-/// the line set, the world point to anchor the 2-D distance label, and
-/// the measured height (body bottom above the bed) for the label text.
+/// Identity basis for [`height_control`] — the axis-aligned matrix
+/// mode / fallback orientation.
+pub const AXIS_ALIGNED: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+
+/// Measure-bars layout, in screen pixels — MatterCAD's
+/// `DrawMeasurementLines3D` (identical in `ScaleHeightControl` and
+/// `MoveInZControl`): bars start a small gap from the measured points
+/// and extend `MEASURE_BAR_PX` toward screen-right.
+const MEASURE_GAP_PX: f32 = 5.0;
+const MEASURE_BAR_PX: f32 = 55.0;
+const MEASURE_ARROW_PX: f32 = 8.0;
+
+/// Build a MatterCAD-style **measurement** between two world points:
+/// a perpendicular bar at each end (gap 5 px, length 55 px, pointing
+/// screen-right) and a connecting line between the bar midpoints with
+/// arrowheads at both ends. Used by the move-in-Z drag (bed → body
+/// bottom) and the height drag (body bottom → top) — both controls
+/// share this exact pattern in MatterCAD (`DrawMeasurementLines3D`).
 ///
-/// Drawn on top (`occluded_alpha = 1.0`) so the dimension reads even
-/// where the body would occlude it.
-pub fn z_measure(
-    world_aabb: ([f32; 3], [f32; 3]),
+/// Returns the line set, the world point at the connecting line's
+/// midpoint (anchor for the 2-D value label), and the measured
+/// distance `|end − start|`.
+pub fn measure_bars(
+    start: [f32; 3],
+    end: [f32; 3],
     camera: &OrbitCamera,
     viewport_height: f32,
     color: [f32; 4],
 ) -> (GizmoLineSet, [f32; 3], f32) {
-    let (mn, mx) = world_aabb;
-    let cy = (mn[1] + mx[1]) * 0.5;
-    let bottom = mn[2];
-    let upp = camera.world_units_per_pixel_at([mx[0], cy, bottom], viewport_height);
-    let margin = 20.0 * upp; // push the witness line past the body's side
-    let tick = 8.0 * upp; // end-tick half length
-    let ox = mx[0] + margin;
-    let mut vertices = Vec::with_capacity(6);
-    // Main vertical witness line, bed → body bottom.
-    vertices.push([ox, cy, 0.0]);
-    vertices.push([ox, cy, bottom]);
-    // End ticks (along X) at each end.
-    vertices.push([ox - tick, cy, 0.0]);
-    vertices.push([ox + tick, cy, 0.0]);
-    vertices.push([ox - tick, cy, bottom]);
-    vertices.push([ox + tick, cy, bottom]);
+    let sub = |a: [f32; 3], b: [f32; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    let add = |a: [f32; 3], b: [f32; 3]| [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+    let mul = |a: [f32; 3], k: f32| [a[0] * k, a[1] * k, a[2] * k];
+    let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let cross = |a: [f32; 3], b: [f32; 3]| {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    };
+    let d = sub(end, start);
+    let length = dot(d, d).sqrt();
+    let axis = if length > 1e-6 { mul(d, 1.0 / length) } else { [0.0, 0.0, 1.0] };
+    // Camera basis from the view matrix's rotation rows: row 0 is the
+    // camera-right direction in world space, row 2 points from the
+    // scene toward the eye. Bars run perpendicular to both the measure
+    // axis and the view (so they face the camera), flipped to point
+    // screen-right — MatterCAD's tick-direction logic.
+    let view = camera.view_matrix();
+    let cam_right = [view[0], view[4], view[8]];
+    let to_eye = [view[2], view[6], view[10]];
+    let mut tick = cross(axis, to_eye);
+    let tick_len = dot(tick, tick).sqrt();
+    tick = if tick_len > 1e-4 { mul(tick, 1.0 / tick_len) } else { cam_right };
+    if dot(tick, cam_right) < 0.0 {
+        tick = mul(tick, -1.0);
+    }
+
+    let upp_s = camera.world_units_per_pixel_at(start, viewport_height);
+    let upp_e = camera.world_units_per_pixel_at(end, viewport_height);
+    let bar = |p: [f32; 3], upp: f32| {
+        (
+            add(p, mul(tick, MEASURE_GAP_PX * upp)),
+            add(p, mul(tick, (MEASURE_GAP_PX + MEASURE_BAR_PX) * upp)),
+        )
+    };
+    let (s0, s1) = bar(start, upp_s);
+    let (e0, e1) = bar(end, upp_e);
+    let mid_s = mul(add(s0, s1), 0.5);
+    let mid_e = mul(add(e0, e1), 0.5);
+
+    let mut vertices = Vec::with_capacity(14);
+    // End bars.
+    vertices.push(s0);
+    vertices.push(s1);
+    vertices.push(e0);
+    vertices.push(e1);
+    // Connecting line between bar midpoints.
+    vertices.push(mid_s);
+    vertices.push(mid_e);
+    // Arrowhead wings at both tips (MatterCAD's startArrow/endArrow):
+    // two short segments per end angling back from the tip.
+    let mut wings = |tip: [f32; 3], back: [f32; 3], upp: f32| {
+        let base = add(tip, mul(back, MEASURE_ARROW_PX * upp));
+        for side in [1.0, -1.0] {
+            vertices.push(tip);
+            vertices.push(add(base, mul(tick, side * MEASURE_ARROW_PX * 0.45 * upp)));
+        }
+    };
+    wings(mid_e, mul(axis, -1.0), upp_e);
+    wings(mid_s, axis, upp_s);
+
     let lines = GizmoLineSet {
         vertices,
         color,
         matrix: None,
         draw_solid: true,
         draw_overlay: true,
-        occluded_alpha: 1.0,
+        // Dim where occluded, like MatterCAD's non-depth-tested pass
+        // (`theme.TextColor.WithAlpha(Constants.LineAlpha)`).
+        occluded_alpha: 0.35,
     };
-    let label = [ox, cy, bottom * 0.5];
-    (lines, label, bottom)
+    let label = mul(add(mid_s, mid_e), 0.5);
+    (lines, label, length)
 }
 
 #[cfg(test)]
@@ -228,94 +242,104 @@ mod tests {
         assert!(center[2] > 4.0, "box sits above the top face (z = 4)");
         assert!(size > 0.0, "box must have a usable size");
         // Cube geometry round-trips through the handle builder.
-        let g = height_control(center, size, RED);
+        let g = height_control(center, size, AXIS_ALIGNED, RED);
         assert_eq!(g.vertices.len(), 36, "cube = 12 triangles");
         assert_eq!(g.color, RED);
     }
 
+    /// The cube must tilt with the basis it's given (field mode aligns
+    /// it to the body's rotated top face). A 45°-about-X basis pushes
+    /// corners out to `half·√2` along Y; the axis-aligned cube never
+    /// exceeds `half`.
     #[test]
-    fn z_measure_spans_bed_to_body_bottom() {
-        let cam = OrbitCamera::default();
-        // Body bottom at z=15.55, beside +X face at x=10.
-        let aabb = ([0.0, 0.0, 15.55], [10.0, 6.0, 25.0]);
-        let (lines, label, value) = z_measure(aabb, &cam, 720.0, RED);
-        assert!((value - 15.55).abs() < 1e-3, "measured height = body bottom Z");
-        // First segment runs from the bed (z=0) to the bottom (z=15.55).
-        assert!((lines.vertices[0][2]).abs() < 1e-4, "witness line starts at the bed");
-        assert!((lines.vertices[1][2] - 15.55).abs() < 1e-3, "witness line ends at the body bottom");
-        // Offset beyond the +X face, and the label rides the line midpoint.
-        assert!(lines.vertices[0][0] > 10.0, "witness line sits past the body's +X side");
-        assert!((label[2] - 15.55 * 0.5).abs() < 1e-3, "label anchored at the line midpoint");
-        // Drawn on top so the dimension never hides behind the body.
-        assert!((lines.occluded_alpha - 1.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn arrow_starts_at_anchor_and_extends_up_by_length() {
-        let (lines, _) = build_z_control([1.0, 2.0, 3.0], 10.0, 1.0, RED);
-        assert_eq!(lines.vertices[0], [1.0, 2.0, 3.0]);
-        assert_eq!(lines.vertices[1], [1.0, 2.0, 13.0]);
-    }
-
-    #[test]
-    fn cone_handle_sits_on_the_arrow_tip_pointing_up() {
-        // handle_size = 2 → cone height 2, base at the tip (z=10), apex
-        // one handle-size above (z=12).
-        let (_, cone) = build_z_control([0.0, 0.0, 0.0], 10.0, 2.0, RED);
-        let mut min_z = f32::INFINITY;
-        let mut max_z = f32::NEG_INFINITY;
-        for v in &cone.vertices {
-            if v[2] < min_z { min_z = v[2]; }
-            if v[2] > max_z { max_z = v[2]; }
-        }
-        assert!((min_z - 10.0).abs() < 1e-3, "cone base expected at tip z=10, got {min_z}");
-        assert!((max_z - 12.0).abs() < 1e-3, "cone apex expected at z=12, got {max_z}");
-    }
-
-    #[test]
-    fn caller_supplied_color_threads_through() {
-        let (lines, cone) = build_z_control([0.0, 0.0, 0.0], 1.0, 0.1, RED);
-        assert_eq!(lines.color, RED);
-        assert_eq!(cone.color, RED);
-    }
-
-    #[test]
-    fn arrow_emits_single_shaft_segment() {
-        let (lines, _) = build_z_control([0.0, 0.0, 0.0], 1.0, 0.1, RED);
-        // Anchor → tip = one segment = 2 vertices. Cube handle
-        // doubles as the arrowhead — no spike geometry needed.
-        assert_eq!(lines.vertices.len(), 2);
-    }
-
-    #[test]
-    fn arrow_length_scales_with_bbox_z_extent() {
-        // Tall body → long arrow; short body → minimum-pixel-sized
-        // arrow.
-        let cam = crate::camera::OrbitCamera::default();
-        let short = ([0.0, 0.0, 0.0], [10.0, 10.0, 2.0]);
-        let tall = ([0.0, 0.0, 0.0], [10.0, 10.0, 200.0]);
-        let ((_, short_len, _), _) =
-            z_control_layout_for_aabb(short, &cam, 720.0);
-        let ((_, tall_len, _), _) =
-            z_control_layout_for_aabb(tall, &cam, 720.0);
+    fn height_control_cube_tilts_with_axes() {
+        let center = [5.0, 3.0, 10.0];
+        let size = 2.0_f32;
+        let half = size * 0.5;
+        let max_dy = |g: &GizmoTriangleSet| {
+            g.vertices
+                .iter()
+                .map(|v| (v[1] - center[1]).abs())
+                .fold(0.0_f32, f32::max)
+        };
+        let aligned = height_control(center, size, AXIS_ALIGNED, RED);
+        assert!(max_dy(&aligned) <= half * 1.01, "axis-aligned cube stays within half");
+        let s = std::f32::consts::FRAC_1_SQRT_2;
+        let rot45_x = [[1.0, 0.0, 0.0], [0.0, s, s], [0.0, -s, s]];
+        let tilted = height_control(center, size, rot45_x, RED);
         assert!(
-            tall_len > short_len,
-            "taller body must produce a taller arrow; tall={tall_len} short={short_len}",
+            max_dy(&tilted) > half * 1.3,
+            "45°-tilted cube corners must exceed the axis-aligned extent, got {}",
+            max_dy(&tilted),
         );
     }
 
+    /// The measure pattern: a bar at each end offset toward
+    /// screen-right, a connecting line between bar midpoints, and
+    /// arrowhead wings at both tips — MatterCAD's
+    /// `DrawMeasurementLines3D`, here spanning bed → body bottom.
     #[test]
-    fn layout_anchors_above_bbox_top_by_pixel_offset() {
+    fn measure_bars_span_between_the_two_points() {
+        let cam = OrbitCamera::default();
+        let start = [5.0, 3.0, 0.0]; // bed
+        let end = [5.0, 3.0, 15.55]; // body bottom
+        let (lines, label, value) = measure_bars(start, end, &cam, 720.0, RED);
+        assert!((value - 15.55).abs() < 1e-3, "measured value = |end - start|");
+        // 2 bars + connecting line + 4 arrow wings = 7 segments.
+        assert_eq!(lines.vertices.len(), 14);
+        // Bars sit at the two measured heights, offset away from the
+        // measured axis (never touching the points themselves).
+        assert!((lines.vertices[0][2]).abs() < 1e-3, "start bar at the bed");
+        assert!((lines.vertices[2][2] - 15.55).abs() < 1e-3, "end bar at the body bottom");
+        let off = |v: [f32; 3]| ((v[0] - 5.0).powi(2) + (v[1] - 3.0).powi(2)).sqrt();
+        assert!(off(lines.vertices[0]) > 0.0, "bar starts a gap away from the axis");
+        assert!(
+            off(lines.vertices[1]) > off(lines.vertices[0]),
+            "bar extends outward from the gap",
+        );
+        // Connecting line spans the two bar midpoints vertically.
+        assert!((lines.vertices[4][2]).abs() < 1e-3);
+        assert!((lines.vertices[5][2] - 15.55).abs() < 1e-3);
+        // Label anchored at the connecting line's midpoint.
+        assert!((label[2] - 15.55 * 0.5).abs() < 1e-3);
+        // Dimmed where occluded (MatterCAD's alpha overlay pass).
+        assert!(lines.occluded_alpha > 0.0 && lines.occluded_alpha < 1.0);
+    }
+
+    /// The Z-translate cone stays close to the AABB top (MatterCAD
+    /// `MoveInZControl.SetPosition` — no long shaft) but its base must
+    /// clear the height box below it by a visible gap; in MatterCAD
+    /// the two controls never touch.
+    #[test]
+    fn z_cone_floats_just_above_the_aabb_top() {
         let cam = crate::camera::OrbitCamera::default();
         let bbox = ([0.0, 0.0, 0.0], [10.0, 10.0, 5.0]);
-        let ((anchor, arrow_len, handle_size), (cube, cube_size)) =
-            z_control_layout_for_aabb(bbox, &cam, 720.0);
-        assert_eq!(anchor[0], 5.0);
-        assert_eq!(anchor[1], 5.0);
-        assert!(anchor[2] > 5.0);
-        assert!(arrow_len > 0.0);
-        assert!(handle_size > 0.0);
-        assert!(cube[2] > anchor[2] + arrow_len);
-        assert_eq!(cube_size, handle_size);
+        let (center, size) = z_control_layout_for_aabb(bbox, &cam, 720.0);
+        assert_eq!(center[0], 5.0);
+        assert_eq!(center[1], 5.0);
+        assert!(size > 0.0);
+        let upp = cam.world_units_per_pixel_at([5.0, 5.0, 5.0], 720.0);
+        let expected_z = 5.0 + (ANCHOR_OFFSET_PX + 6.0) * upp; // gap above box + half cone
+        assert!(
+            (center[2] - expected_z).abs() < 1e-4,
+            "cone must hug the top: expected z {expected_z}, got {}",
+            center[2],
+        );
+        // The cone's base must sit clearly above the height box's top
+        // (box spans 0..HEIGHT_BOX_PX above the top face).
+        let cone_bottom = center[2] - size * 0.5;
+        let box_top = 5.0 + HEIGHT_BOX_PX * upp;
+        assert!(
+            cone_bottom - box_top >= 7.0 * upp,
+            "cone base must clear the height box by a visible gap; \
+             cone bottom {cone_bottom}, box top {box_top}",
+        );
+        // Geometry: apex up, base down, caller colour threads through.
+        let cone = z_control_for_aabb(bbox, &cam, 720.0, RED);
+        assert_eq!(cone.color, RED);
+        let max_z = cone.vertices.iter().map(|v| v[2]).fold(f32::NEG_INFINITY, f32::max);
+        let min_z = cone.vertices.iter().map(|v| v[2]).fold(f32::INFINITY, f32::min);
+        assert!((max_z - (center[2] + size * 0.5)).abs() < 1e-3, "apex half a size above centre");
+        assert!((min_z - (center[2] - size * 0.5)).abs() < 1e-3, "base half a size below centre");
     }
 }

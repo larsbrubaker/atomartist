@@ -40,17 +40,25 @@ impl Viewport3dWidget {
         paint_text_pill(ctx, sx, sy, &rotate_gizmo::format_rotation_degrees(snapped));
     }
 
-    /// While dragging in Z, paint the measurement distance — the body's
-    /// height above the bed — beside the witness line the scene pass
-    /// draws (see [`z_control_gizmo::z_measure`]). Mirrors MatterCAD's
-    /// measure readout during move-in-Z. No-op unless a `DragBodyZ` is
-    /// active.
+    /// While dragging in Z — or hovering the Z control — paint the
+    /// measured distance (the body's bottom above the bed) beside the
+    /// measure bars the scene pass draws (see
+    /// [`z_control_gizmo::measure_bars`]). Mirrors MatterCAD's
+    /// `MoveInZControl` readout, which appears on `MouseIsOver` as
+    /// well as during the drag.
     pub(super) fn paint_z_measure_readout(&self, ctx: &mut dyn DrawCtx, w: f64, h: f64) {
-        let CameraDrag::DragBodyZ { node_id, .. } = self.drag.clone() else {
-            return;
+        let node_id = match self.drag.clone() {
+            CameraDrag::DragBodyZ { node_id, .. } => node_id,
+            CameraDrag::None if self.hovered_z_control => {
+                let Some(id) = *self.inputs.selection.lock().unwrap() else {
+                    return;
+                };
+                id
+            }
+            _ => return,
         };
         let geom = self.current_geometry();
-        let Some(world_aabb) = selected_body_world_aabb(geom.as_deref(), node_id) else {
+        let Some((mn, mx)) = selected_body_world_aabb(geom.as_deref(), node_id) else {
             return;
         };
         let cam = self.cam();
@@ -59,38 +67,92 @@ impl Viewport3dWidget {
             let v = ctx.visuals();
             [v.text_color.r, v.text_color.g, v.text_color.b, 1.0]
         };
-        let (_, label_world, value) = z_control_gizmo::z_measure(world_aabb, &cam, vh, idle);
+        // Same span the scene pass draws: bed → body bottom at the
+        // AABB-centre axis. Value shown signed (a body below the bed
+        // reads negative, like MatterCAD's Z position).
+        let cx = (mn[0] + mx[0]) * 0.5;
+        let cy = (mn[1] + mx[1]) * 0.5;
+        let (_, label_world, _) = z_control_gizmo::measure_bars(
+            [cx, cy, 0.0],
+            [cx, cy, mn[2]],
+            &cam,
+            vh,
+            idle,
+        );
+        let value = mn[2];
         let view = Mat4::from_cols_array(&cam.view_matrix());
         let proj = Mat4::from_cols_array(&cam.projection_matrix((w / h.max(1.0)) as f32));
         let mvp = (proj * view).to_cols_array();
         let Some((sx, sy)) = project(&mvp, label_world, w, h) else {
             return;
         };
-        paint_text_pill(ctx, sx, sy, &format!("{value:.2}"));
+        // MatterCAD parks the value a few px right of the measure line.
+        paint_text_pill(ctx, sx + 10.0, sy, &format!("{value:.2}"));
     }
 
-    /// While dragging the height/scale-Z box, paint the body's current
-    /// world height beside the box — MatterCAD's `ScaleHeightControl`
-    /// height readout. No-op unless a `DragBodyHeight` is active.
+    /// While dragging the height/scale-Z box — or hovering it — paint
+    /// the live height beside the measure bars (MatterCAD's
+    /// `ScaleHeightControl` readout, shown on `MouseIsOver` too).
+    /// During a drag the value and anchors come from the drag state
+    /// (`live_len`, scaled into the height parameter on the field
+    /// path) so the label tracks the cursor without rebuild lag; on
+    /// hover they come from the body's current measure anchors.
     pub(super) fn paint_height_readout(&self, ctx: &mut dyn DrawCtx, w: f64, h: f64) {
-        let CameraDrag::DragBodyHeight { node_id, .. } = self.drag.clone() else {
-            return;
+        let (value, base, top) = match self.drag.clone() {
+            CameraDrag::DragBodyHeight {
+                start_height,
+                start_len,
+                live_len,
+                axis_origin,
+                axis_dir,
+                ..
+            } => {
+                // Field path shows the height *parameter* (what's
+                // being edited); matrix path shows the world height.
+                let value = match start_height {
+                    Some(h0) => h0 * (live_len / start_len) as f64,
+                    None => live_len as f64,
+                };
+                let top = [
+                    axis_origin[0] + axis_dir[0] * live_len,
+                    axis_origin[1] + axis_dir[1] * live_len,
+                    axis_origin[2] + axis_dir[2] * live_len,
+                ];
+                (value, axis_origin, top)
+            }
+            CameraDrag::None if self.hovered_height_control => {
+                let Some(sel_id) = *self.inputs.selection.lock().unwrap() else {
+                    return;
+                };
+                let Some((base, top)) = self.height_measure_anchors(sel_id) else {
+                    return;
+                };
+                let d = sub3(top, base);
+                let len = dot3(d, d).sqrt() as f64;
+                let value = self
+                    .inputs
+                    .read_node_number(sel_id, "height")
+                    .unwrap_or(len);
+                (value, base, top)
+            }
+            _ => return,
         };
-        let geom = self.current_geometry();
-        let Some((mn, mx)) = selected_body_world_aabb(geom.as_deref(), node_id) else {
-            return;
-        };
-        let height = mx[2] - mn[2];
         let cam = self.cam();
         let vh = h.max(1.0) as f32;
-        let (box_center, _) = z_control_gizmo::height_control_layout_for_aabb((mn, mx), &cam, vh);
+        let idle = {
+            let v = ctx.visuals();
+            [v.text_color.r, v.text_color.g, v.text_color.b, 1.0]
+        };
+        // Same span the scene pass draws — label rides the measure
+        // line's midpoint.
+        let (_, label_world, _) = z_control_gizmo::measure_bars(base, top, &cam, vh, idle);
         let view = Mat4::from_cols_array(&cam.view_matrix());
         let proj = Mat4::from_cols_array(&cam.projection_matrix((w / h.max(1.0)) as f32));
         let mvp = (proj * view).to_cols_array();
-        let Some((sx, sy)) = project(&mvp, box_center, w, h) else {
+        let Some((sx, sy)) = project(&mvp, label_world, w, h) else {
             return;
         };
-        // Offset to the right so the pill clears the box + arrow.
-        paint_text_pill(ctx, sx + 34.0, sy, &format!("{height:.2}"));
+        // MatterCAD parks the value a few px right of the measure line.
+        paint_text_pill(ctx, sx + 10.0, sy, &format!("{value:.2}"));
     }
 }

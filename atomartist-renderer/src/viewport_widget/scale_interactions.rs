@@ -5,25 +5,32 @@
 //! Split out of `viewport_widget_interactions.rs` to keep that file
 //! under the line guardrail. The drag *state machine* entry points
 //! (`on_mouse_down` / `on_mouse_move` / `on_mouse_up`) live there and
-//! call into the methods here; the box geometry lives in
-//! `viewport_widget/z_control_gizmo.rs`; the scale matrix math is shared
+//! call into the methods here; the box mesh lives in
+//! `viewport_widget/z_control_gizmo.rs`; the matrix math is shared
 //! from `viewport_widget/body_drag.rs`.
 //!
 //! Two drag paths, picked at drag-start by whether the node exposes an
 //! editable `height` parameter (the "has a Height field" test, via
 //! `ViewportInputs::read_node_number`):
 //!
-//! * **Field path** — edit the `height` property each frame, then
-//!   re-plant the base on the following evaluation. The mesh rebuilds
-//!   asynchronously, so the base is re-anchored a frame later with a
-//!   world-Z translate (which shifts the AABB min-Z by exactly that
-//!   amount, rotation-independent).
-//! * **Matrix path** — no height field, so scale the node matrix in Z
-//!   about the base plane (`scale_z_about_bottom`): exact, synchronous,
-//!   base stays planted.
+//! * **Field path** — the box rides the *object's* top-face centre
+//!   (local bounds top transformed by the body matrix — MatterCAD's
+//!   `GetTopPosition`), the drag measures along the rotated local-Z
+//!   axis, and every frame writes the `height` parameter **together
+//!   with** a predicted matrix translation that keeps the rotated base
+//!   point locked — one atomic graph update, so the async rebuild
+//!   never paints a scaled-but-unanchored frame (no bounce). The
+//!   prediction assumes the mesh's local Z scales proportionally with
+//!   the parameter about local `z = 0` (true for our parametric
+//!   primitives).
+//! * **Matrix path** — no height field: box on the world-AABB top
+//!   centre, scale the node matrix in world Z about the base plane
+//!   (`scale_z_about_bottom`): exact, synchronous, base stays planted.
 
 use super::body_drag;
-use super::viewport_widget_helpers::selected_body_world_aabb;
+use super::viewport_widget_helpers::{
+    mat4_transform_point, selected_body_local_aabb_and_matrix, selected_body_world_aabb,
+};
 use super::z_control_gizmo;
 use super::*;
 use crate::picking::{pick_handle, GizmoHandle};
@@ -33,6 +40,84 @@ use crate::picking::{pick_handle, GizmoHandle};
 const MIN_HEIGHT_WORLD: f32 = 0.01;
 
 impl Viewport3dWidget {
+    /// World pose `(center, size, axes)` of the height box for the
+    /// selected body — mode-aware. Field mode (node has a `height`
+    /// parameter) anchors to the **object's** top-face centre (local
+    /// bounds top through the body matrix, riding the rotated height
+    /// axis) and returns the body's rotation basis so the cube tilts
+    /// with the top face — MatterCAD rotates the `ScaleHeightControl`
+    /// mesh with the selection. Matrix mode anchors to the
+    /// **world-AABB** top centre, axis-aligned
+    /// (`ScaleMatrixTopControl`). Shared by the scene draw, the
+    /// hover/hit-test, and the readout so all three agree.
+    pub(super) fn height_box_layout(
+        &self,
+        sel_id: NodeId,
+        world_aabb: ([f32; 3], [f32; 3]),
+        cam: &crate::camera::OrbitCamera,
+        vh: f32,
+    ) -> ([f32; 3], f32, [[f32; 3]; 3]) {
+        if self.inputs.read_node_number(sel_id, "height").is_some() {
+            let geom = self.current_geometry();
+            if let Some(((mn, mx), m)) =
+                selected_body_local_aabb_and_matrix(geom.as_deref(), sel_id)
+            {
+                let cx = (mn[0] + mx[0]) * 0.5;
+                let cy = (mn[1] + mx[1]) * 0.5;
+                let top = mat4_transform_point(&m, [cx, cy, mx[2]]);
+                let bottom = mat4_transform_point(&m, [cx, cy, mn[2]]);
+                let axis = normalize3(sub3(top, bottom));
+                let axis = if axis[0].is_finite() { axis } else { [0.0, 0.0, 1.0] };
+                // Cube basis = the matrix's normalised rotation columns
+                // (scale stripped — the quaternion-extraction analog),
+                // with Z snapped to the drag axis so box and drag agree.
+                let xa = normalize3([m[0], m[1], m[2]]);
+                let ya = normalize3([m[4], m[5], m[6]]);
+                let axes = [
+                    if xa[0].is_finite() { xa } else { [1.0, 0.0, 0.0] },
+                    if ya[0].is_finite() { ya } else { [0.0, 1.0, 0.0] },
+                    axis,
+                ];
+                let upp = cam.world_units_per_pixel_at(top, vh);
+                let size = z_control_gizmo::HEIGHT_BOX_PX * upp;
+                let half = size * 0.5;
+                let center = [
+                    top[0] + axis[0] * half,
+                    top[1] + axis[1] * half,
+                    top[2] + axis[2] * half,
+                ];
+                return (center, size, axes);
+            }
+        }
+        let (center, size) =
+            z_control_gizmo::height_control_layout_for_aabb(world_aabb, cam, vh);
+        (center, size, z_control_gizmo::AXIS_ALIGNED)
+    }
+
+    /// World-space measure anchors `(base, top)` for the height
+    /// control — the span the measure bars run between. Field mode:
+    /// the object's transformed local bottom/top centres (rotation-
+    /// aware); matrix mode: the world-AABB bottom/top centres. Used by
+    /// the hover-time measure draw + readout (drag-time anchors come
+    /// from the live drag state instead).
+    pub(super) fn height_measure_anchors(&self, sel_id: NodeId) -> Option<([f32; 3], [f32; 3])> {
+        let geom = self.current_geometry();
+        if self.inputs.read_node_number(sel_id, "height").is_some() {
+            let ((mn, mx), m) = selected_body_local_aabb_and_matrix(geom.as_deref(), sel_id)?;
+            let cx = (mn[0] + mx[0]) * 0.5;
+            let cy = (mn[1] + mx[1]) * 0.5;
+            Some((
+                mat4_transform_point(&m, [cx, cy, mn[2]]),
+                mat4_transform_point(&m, [cx, cy, mx[2]]),
+            ))
+        } else {
+            let (wmn, wmx) = selected_body_world_aabb(geom.as_deref(), sel_id)?;
+            let cx = (wmn[0] + wmx[0]) * 0.5;
+            let cy = (wmn[1] + wmx[1]) * 0.5;
+            Some(([cx, cy, wmn[2]], [cx, cy, wmx[2]]))
+        }
+    }
+
     /// The height box's pick handle for the selected body, plus its
     /// `NodeId`. Shared by the hover highlight and the drag-start
     /// hit-test so both target the same box. `None` when nothing is
@@ -43,7 +128,7 @@ impl Viewport3dWidget {
         let world_aabb = selected_body_world_aabb(geom.as_deref(), sel_id)?;
         let cam = self.cam();
         let vh = self.bounds.height.max(1.0) as f32;
-        let (center, size) = z_control_gizmo::height_control_layout_for_aabb(world_aabb, &cam, vh);
+        let (center, size, _) = self.height_box_layout(sel_id, world_aabb, &cam, vh);
         let half = size * 0.5;
         Some((
             sel_id,
@@ -68,9 +153,11 @@ impl Viewport3dWidget {
     }
 
     /// If the click at `pos` lands on the height box, return a pending
-    /// `DragBodyHeight` state. Captures the base Z, start world height,
-    /// the vertical-line anchor, and the node's `height` parameter (if
-    /// any — its presence selects the field vs matrix path).
+    /// `DragBodyHeight`. Captures the drag axis (rotated local Z in
+    /// field mode, world Z in matrix mode), the locked base point, the
+    /// start length along the axis, and — for the field path — the
+    /// local bottom anchor + body matrix that drive the base-lock
+    /// prediction.
     pub(super) fn try_start_height_drag(&self, pos: Point) -> Option<CameraDrag> {
         let (sel_id, handle) = self.height_control_handle()?;
         let w = self.bounds.width.max(1.0);
@@ -78,89 +165,120 @@ impl Viewport3dWidget {
         let (ray_o, ray_d) = self.cam().screen_to_ray((pos.x, h - pos.y), (w, h));
         pick_handle(std::slice::from_ref(&handle), ray_o, ray_d)?;
         let start_matrix = self.read_node_matrix(sel_id)?;
-        let geom = self.current_geometry();
-        let (mn, mx) = selected_body_world_aabb(geom.as_deref(), sel_id)?;
-        let bottom_z = mn[2];
-        let start_height_world = (mx[2] - mn[2]).max(MIN_HEIGHT_WORLD);
-        let anchor_xy = [handle.center[0], handle.center[1]];
-        let anchor_z = body_drag::z_axis_translation(ray_o, ray_d, anchor_xy)?;
         let start_height = self.inputs.read_node_number(sel_id, "height");
+        let geom = self.current_geometry();
+
+        let (axis_origin, axis_dir, start_len, bottom_local, start_body_matrix) =
+            if start_height.is_some() {
+                // Field mode: anchors from the object's local bounds
+                // through the body matrix (rotation-aware).
+                let ((mn, mx), m) =
+                    selected_body_local_aabb_and_matrix(geom.as_deref(), sel_id)?;
+                let cx = (mn[0] + mx[0]) * 0.5;
+                let cy = (mn[1] + mx[1]) * 0.5;
+                let bl = [cx, cy, mn[2]];
+                let bottom = mat4_transform_point(&m, bl);
+                let top = mat4_transform_point(&m, [cx, cy, mx[2]]);
+                let d = sub3(top, bottom);
+                let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                if len < MIN_HEIGHT_WORLD {
+                    return None;
+                }
+                let axis = [d[0] / len, d[1] / len, d[2] / len];
+                (bottom, axis, len, bl, m)
+            } else {
+                // Matrix mode: world AABB, world-Z axis.
+                let (wmn, wmx) = selected_body_world_aabb(geom.as_deref(), sel_id)?;
+                let origin = [(wmn[0] + wmx[0]) * 0.5, (wmn[1] + wmx[1]) * 0.5, wmn[2]];
+                let len = (wmx[2] - wmn[2]).max(MIN_HEIGHT_WORLD);
+                let identity = {
+                    let mut m = [0.0_f32; 16];
+                    m[0] = 1.0;
+                    m[5] = 1.0;
+                    m[10] = 1.0;
+                    m[15] = 1.0;
+                    m
+                };
+                (origin, [0.0, 0.0, 1.0], len, [0.0; 3], identity)
+            };
+
+        let anchor_t = body_drag::axis_param(ray_o, ray_d, axis_origin, axis_dir)?;
         Some(CameraDrag::DragBodyHeight {
             node_id: sel_id,
             start_matrix,
             start_height,
-            bottom_z,
-            start_height_world,
-            anchor_xy,
-            anchor_z,
+            axis_origin,
+            axis_dir,
+            start_len,
+            anchor_t,
+            bottom_local,
+            start_body_matrix,
+            live_len: start_len,
         })
     }
 
     /// Per-frame update of an in-flight `DragBodyHeight`: project the
-    /// cursor onto the vertical line through the box, derive the new
-    /// world height, and apply it via the field or matrix path.
+    /// cursor onto the drag-axis line, derive the new length, and
+    /// apply it via the field or matrix path. The field path writes
+    /// the height parameter and its base-lock matrix compensation as
+    /// ONE atomic graph update — never two visible steps.
     pub(super) fn drag_height(&mut self, pos: Point) {
-        if let CameraDrag::DragBodyHeight {
+        let CameraDrag::DragBodyHeight {
             node_id,
             start_matrix,
             start_height,
-            bottom_z,
-            start_height_world,
-            anchor_xy,
-            anchor_z,
+            axis_origin,
+            axis_dir,
+            start_len,
+            anchor_t,
+            bottom_local,
+            start_body_matrix,
+            ..
         } = self.drag.clone()
-        {
-            let w = self.bounds.width.max(1.0);
-            let h = self.bounds.height.max(1.0);
-            let (ray_o, ray_d) = {
-                let cam = self.cam();
-                cam.screen_to_ray((pos.x, h - pos.y), (w, h))
-            };
-            let Some(cur_z) = body_drag::z_axis_translation(ray_o, ray_d, anchor_xy) else {
-                return;
-            };
-            let new_height_world = (start_height_world + (cur_z - anchor_z)).max(MIN_HEIGHT_WORLD);
-            let scale = new_height_world / start_height_world;
-
-            match start_height {
-                Some(h0) => {
-                    // Field path: re-plant the base (the prior frame's
-                    // regenerated mesh arrives async and may have shifted
-                    // it), then edit the `height` parameter. Assumes the
-                    // parameter maps ~linearly to world height (true when
-                    // the matrix carries no extra Z scale, the common
-                    // case for parametric primitives).
-                    self.reanchor_height_base(node_id, bottom_z, start_matrix);
-                    self.inputs
-                        .push_node_number(node_id, "height", h0 * scale as f64);
-                }
-                None => {
-                    // Matrix path: scale Z about the base plane — exact
-                    // and synchronous, base stays planted.
-                    let m = body_drag::scale_z_about_bottom(start_matrix, scale, bottom_z);
-                    self.inputs.push_node_matrix(node_id, m);
-                }
-            }
-        }
-    }
-
-    /// Nudge the node's matrix in world Z so the live body's base
-    /// returns to `target_bottom_z`. The height-field path uses this to
-    /// keep the base planted after the async mesh rebuild: a world-Z
-    /// translate moves the AABB min-Z by exactly that amount regardless
-    /// of rotation, so it re-anchors precisely (one frame behind the
-    /// height change).
-    fn reanchor_height_base(&self, node_id: NodeId, target_bottom_z: f32, fallback: [f32; 16]) {
-        let geom = self.current_geometry();
-        let Some((mn, _)) = selected_body_world_aabb(geom.as_deref(), node_id) else {
+        else {
             return;
         };
-        let fix = target_bottom_z - mn[2];
-        if fix.abs() < 1e-4 {
+        let w = self.bounds.width.max(1.0);
+        let h = self.bounds.height.max(1.0);
+        let (ray_o, ray_d) = {
+            let cam = self.cam();
+            cam.screen_to_ray((pos.x, h - pos.y), (w, h))
+        };
+        let Some(t) = body_drag::axis_param(ray_o, ray_d, axis_origin, axis_dir) else {
             return;
+        };
+        let new_len = (start_len + (t - anchor_t)).max(MIN_HEIGHT_WORLD);
+        let scale = new_len / start_len;
+        if let CameraDrag::DragBodyHeight { live_len, .. } = &mut self.drag {
+            *live_len = new_len;
         }
-        let mut m = self.read_node_matrix(node_id).unwrap_or(fallback);
-        m[14] += fix;
-        self.inputs.push_node_matrix(node_id, m);
+
+        match start_height {
+            Some(h0) => {
+                // Field path. Predict where the rebuilt mesh's base
+                // lands: local Z scales about local 0 with the height
+                // parameter, so the new local bottom is
+                // `(bl.x, bl.y, bl.z · s)`. Translate the matrix so
+                // that point maps back onto the locked world base, and
+                // send parameter + matrix atomically.
+                let predicted = mat4_transform_point(
+                    &start_body_matrix,
+                    [bottom_local[0], bottom_local[1], bottom_local[2] * scale],
+                );
+                let fix = sub3(axis_origin, predicted);
+                let mut m = start_matrix;
+                m[12] += fix[0];
+                m[13] += fix[1];
+                m[14] += fix[2];
+                self.inputs
+                    .push_node_number_and_matrix(node_id, "height", h0 * scale as f64, m);
+            }
+            None => {
+                // Matrix path: scale Z about the base plane — exact
+                // and synchronous, base stays planted.
+                let m = body_drag::scale_z_about_bottom(start_matrix, scale, axis_origin[2]);
+                self.inputs.push_node_matrix(node_id, m);
+            }
+        }
     }
 }

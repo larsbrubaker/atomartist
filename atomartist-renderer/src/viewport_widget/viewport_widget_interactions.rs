@@ -392,7 +392,7 @@ impl Viewport3dWidget {
         }
     }
 
-    pub(super) fn on_mouse_up(&mut self, pos: Point, _button: MouseButton) -> EventResult {
+    pub(super) fn on_mouse_up(&mut self, _pos: Point, _button: MouseButton) -> EventResult {
         let prev = std::mem::replace(&mut self.drag, CameraDrag::None);
         match prev {
             CameraDrag::None => EventResult::Ignored,
@@ -483,11 +483,18 @@ impl Viewport3dWidget {
                 self.inputs.push_node_matrix(node_id, start_matrix);
             }
             CameraDrag::DragBodyHeight { node_id, start_matrix, start_height, .. } => {
-                // Restore both the matrix (re-anchor translates) and the
-                // height parameter if this was the field-editing path.
-                self.inputs.push_node_matrix(node_id, start_matrix);
-                if let Some(h0) = start_height {
-                    self.inputs.push_node_number(node_id, "height", h0);
+                // Field path restores through the same atomic pair
+                // write the drag used, so the revert coalesces into the
+                // stroke's single ChangePropsCmd (one no-op undo entry);
+                // matrix path restores the matrix alone.
+                match start_height {
+                    Some(h0) => self.inputs.push_node_number_and_matrix(
+                        node_id,
+                        "height",
+                        h0,
+                        start_matrix,
+                    ),
+                    None => self.inputs.push_node_matrix(node_id, start_matrix),
                 }
             }
             _ => return false,
@@ -513,7 +520,7 @@ impl Viewport3dWidget {
         let world_aabb = selected_body_world_aabb(geom.as_deref(), sel_id)?;
         let cam = self.cam();
         let vh = self.bounds.height.max(1.0) as f32;
-        let (_, (cube_center, cube_size)) =
+        let (cube_center, cube_size) =
             z_control_gizmo::z_control_layout_for_aabb(world_aabb, &cam, vh);
         let half = cube_size * 0.5;
         Some((
