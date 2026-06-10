@@ -733,6 +733,9 @@ mod rotate_interactions;
 #[path = "viewport_widget/scale_interactions.rs"]
 mod scale_interactions;
 
+#[path = "viewport_widget/z_interactions.rs"]
+mod z_interactions;
+
 #[path = "viewport_widget/overlays.rs"]
 mod overlays;
 

@@ -71,15 +71,32 @@ pub fn z_control_layout_for_aabb(
     let (mn, mx) = world_aabb;
     let cx = (mn[0] + mx[0]) * 0.5;
     let cy = (mn[1] + mx[1]) * 0.5;
-    let top_z = mx[2];
-    let upp = camera.world_units_per_pixel_at([cx, cy, top_z], viewport_height);
+    z_control_layout_at([cx, cy, mx[2]], camera, viewport_height)
+}
+
+/// [`z_control_layout_for_aabb`] from an explicit top-face-centre
+/// point. The drag-time draw anchors the cone to the drag state
+/// (`start_top_z + live_dz`) instead of the async-rebuilt geometry,
+/// so the control tracks the cursor without rebuild lag.
+pub fn z_control_layout_at(
+    top_center: [f32; 3],
+    camera: &OrbitCamera,
+    viewport_height: f32,
+) -> ([f32; 3], f32) {
+    let upp = camera.world_units_per_pixel_at(top_center, viewport_height);
     let size = HANDLE_SIZE_PX * upp;
     let center = [
-        cx,
-        cy,
-        top_z + (ANCHOR_OFFSET_PX + HANDLE_SIZE_PX * 0.5) * upp,
+        top_center[0],
+        top_center[1],
+        top_center[2] + (ANCHOR_OFFSET_PX + HANDLE_SIZE_PX * 0.5) * upp,
     ];
     (center, size)
+}
+
+/// Build the Z-translate cone at an explicit pose (see
+/// [`z_control_layout_at`]).
+pub fn z_cone(center: [f32; 3], size: f32, color: [f32; 4]) -> GizmoTriangleSet {
+    cone_handle(center, (size * 0.5) as f64, size as f64, color)
 }
 
 /// World pose of the height / scale-Z box — a small cube centred on the

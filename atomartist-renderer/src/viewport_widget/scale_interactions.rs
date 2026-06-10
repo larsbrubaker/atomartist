@@ -247,7 +247,14 @@ impl Viewport3dWidget {
         let Some(t) = body_drag::axis_param(ray_o, ray_d, axis_origin, axis_dir) else {
             return;
         };
-        let new_len = (start_len + (t - anchor_t)).max(MIN_HEIGHT_WORLD);
+        let mut new_len = (start_len + (t - anchor_t)).max(MIN_HEIGHT_WORLD);
+        // Grid snap rounds the *size* to the grid with a one-step floor
+        // (MatterCAD `ScaleHeightControl`: `newSize = max(newSize,
+        // snapGridDistance)` then round to grid).
+        let snap = self.inputs.snap();
+        if snap > 0.0 {
+            new_len = (new_len.max(snap) / snap).round() * snap;
+        }
         let scale = new_len / start_len;
         if let CameraDrag::DragBodyHeight { live_len, .. } = &mut self.drag {
             *live_len = new_len;

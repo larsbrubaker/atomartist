@@ -105,6 +105,12 @@ pub struct ViewportInputs {
     /// carries the base-lock compensation for the height change, and a
     /// gap between them paints a one-frame bounce.
     pub write_node_number_and_matrix: Option<Arc<dyn Fn(NodeId, &str, f64, [f32; 16])>>,
+    /// Snap-grid distance in world units; `0` = snapping off. Shared
+    /// with the toolbar's snap dropdown (`AppState::snap_amount`).
+    /// MatterCAD's `SnapGridDistance`: XY drags snap the grabbed AABB
+    /// edge, Z drags snap the body's bottom position, height drags
+    /// snap the size.
+    pub snap_amount: Arc<Mutex<f64>>,
 }
 
 impl ViewportInputs {
@@ -128,6 +134,7 @@ impl ViewportInputs {
             read_node_number: None,
             write_node_number: None,
             write_node_number_and_matrix: None,
+            snap_amount: Arc::new(Mutex::new(0.0)),
         }
     }
 
@@ -160,6 +167,11 @@ impl ViewportInputs {
         if let Some(f) = &self.write_node_number {
             f(id, name, value);
         }
+    }
+
+    /// Current snap-grid distance (`0` = off).
+    pub(crate) fn snap(&self) -> f32 {
+        *self.snap_amount.lock().unwrap() as f32
     }
 
     /// Push a numeric property and the matrix as ONE atomic graph

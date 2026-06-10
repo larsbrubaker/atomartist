@@ -47,19 +47,28 @@ impl Viewport3dWidget {
     /// `MoveInZControl` readout, which appears on `MouseIsOver` as
     /// well as during the drag.
     pub(super) fn paint_z_measure_readout(&self, ctx: &mut dyn DrawCtx, w: f64, h: f64) {
-        let node_id = match self.drag.clone() {
-            CameraDrag::DragBodyZ { node_id, .. } => node_id,
+        // During the drag the span comes from the drag state (so the
+        // label tracks the cursor, not the lagging rebuild); on hover
+        // it comes from the body's current AABB. Value shown signed (a
+        // body below the bed reads negative, like MatterCAD).
+        let (cx, cy, bottom_z) = match self.drag.clone() {
+            CameraDrag::DragBodyZ {
+                anchor_xy,
+                start_bottom_z,
+                live_dz,
+                ..
+            } => (anchor_xy[0], anchor_xy[1], start_bottom_z + live_dz),
             CameraDrag::None if self.hovered_z_control => {
                 let Some(id) = *self.inputs.selection.lock().unwrap() else {
                     return;
                 };
-                id
+                let geom = self.current_geometry();
+                let Some((mn, mx)) = selected_body_world_aabb(geom.as_deref(), id) else {
+                    return;
+                };
+                ((mn[0] + mx[0]) * 0.5, (mn[1] + mx[1]) * 0.5, mn[2])
             }
             _ => return,
-        };
-        let geom = self.current_geometry();
-        let Some((mn, mx)) = selected_body_world_aabb(geom.as_deref(), node_id) else {
-            return;
         };
         let cam = self.cam();
         let vh = h.max(1.0) as f32;
@@ -67,19 +76,14 @@ impl Viewport3dWidget {
             let v = ctx.visuals();
             [v.text_color.r, v.text_color.g, v.text_color.b, 1.0]
         };
-        // Same span the scene pass draws: bed → body bottom at the
-        // AABB-centre axis. Value shown signed (a body below the bed
-        // reads negative, like MatterCAD's Z position).
-        let cx = (mn[0] + mx[0]) * 0.5;
-        let cy = (mn[1] + mx[1]) * 0.5;
         let (_, label_world, _) = z_control_gizmo::measure_bars(
             [cx, cy, 0.0],
-            [cx, cy, mn[2]],
+            [cx, cy, bottom_z],
             &cam,
             vh,
             idle,
         );
-        let value = mn[2];
+        let value = bottom_z;
         let view = Mat4::from_cols_array(&cam.view_matrix());
         let proj = Mat4::from_cols_array(&cam.projection_matrix((w / h.max(1.0)) as f32));
         let mvp = (proj * view).to_cols_array();

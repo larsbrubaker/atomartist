@@ -76,6 +76,12 @@ pub(super) enum CameraDrag {
         /// Matrix snapshot at drag start — translation deltas land on
         /// this baseline so a coalesced drag undoes back to here.
         start_matrix: [f32; 16],
+        /// World X/Y of the AABB edge nearest the grab point at drag
+        /// start — the coordinate grid-snapping aligns. MatterCAD's
+        /// `DragSelectedObject` snaps the grabbed *side* of the body
+        /// (min edge when grabbed on the min half, max edge on the max
+        /// half), not its centre.
+        snap_edge_xy: [f32; 2],
     },
     /// Left-button down landed on the Z-control sphere handle. Each
     /// `MouseMove` projects the cursor ray onto the world vertical
@@ -96,6 +102,17 @@ pub(super) enum CameraDrag {
         /// is shallow.
         anchor_z: f32,
         start_matrix: [f32; 16],
+        /// World Z of the body's AABB bottom / top at drag start. The
+        /// grid snap aligns `bottom + live_dz` (MatterCAD snaps the
+        /// body's bottom *position*), and the cone + measure bars are
+        /// drawn from these + `live_dz` during the drag so they track
+        /// the cursor instead of the async-rebuilt geometry (which
+        /// lags and made the controls bounce against the body).
+        start_bottom_z: f32,
+        start_top_z: f32,
+        /// The (snapped) Z delta applied this frame — drives the
+        /// drag-time cone / measure-bar placement and the readout.
+        live_dz: f32,
     },
     /// Left-button down landed on one of the rotate gizmo's three
     /// per-axis corner handles (MatterCAD's `RotateCornerControl`).

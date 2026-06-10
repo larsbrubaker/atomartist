@@ -155,6 +155,11 @@ impl<T: Clone + Send + PartialEq + 'static> CircularDropdown<T> {
 
     fn close(&self) {
         *self.open.borrow_mut() = false;
+        // agg-gui's reactive paint loop does not poll widget state —
+        // without an explicit request the popup (and the trigger's new
+        // value) stay on screen until some unrelated event causes a
+        // draw.
+        agg_gui::animation::request_draw();
     }
 
     /// Compute the popup geometry in **widget-local** coordinates.
@@ -459,6 +464,49 @@ mod tests {
         });
         assert!(!d.is_open(), "selecting a row should close the popup");
         assert_eq!(*v.lock().unwrap(), 20);
+    }
+
+    /// Selecting a row must request a redraw — agg-gui's paint loop
+    /// doesn't poll widget state, so without it the popup (and the
+    /// trigger's new value) lingered until some unrelated event
+    /// caused a draw.
+    #[test]
+    fn clicking_row_requests_redraw() {
+        let v = Arc::new(Mutex::new(0i32));
+        let mut d = CircularDropdown::new(
+            IconKind::Snap,
+            vec![
+                DropdownItem { label: "A".into(), value: 10 },
+                DropdownItem { label: "B".into(), value: 20 },
+            ],
+            v.clone(),
+            dummy_font(),
+        );
+        d.layout(Size::new(30.0, 30.0));
+        let bp = Point::new(15.0, 15.0);
+        d.on_event(&Event::MouseDown {
+            pos: bp,
+            button: MouseButton::Left,
+            modifiers: agg_gui::Modifiers::default(),
+        });
+        d.on_event(&Event::MouseUp {
+            pos: bp,
+            button: MouseButton::Left,
+            modifiers: agg_gui::Modifiers::default(),
+        });
+        assert!(d.is_open());
+        agg_gui::animation::clear_draw_request();
+        let row1 = d.row_rect_in_popup(1);
+        let rp = Point::new(row1.x + row1.width * 0.5, row1.y + row1.height * 0.5);
+        d.on_event(&Event::MouseDown {
+            pos: rp,
+            button: MouseButton::Left,
+            modifiers: agg_gui::Modifiers::default(),
+        });
+        assert!(
+            agg_gui::animation::wants_draw(),
+            "row selection must invalidate so the new value paints immediately",
+        );
     }
 
     #[test]

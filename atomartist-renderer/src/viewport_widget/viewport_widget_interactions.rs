@@ -291,12 +291,36 @@ impl Viewport3dWidget {
                         if let Some(start_matrix) =
                             self.inputs.read_node_matrix(node_id)
                         {
+                            // Grid snap aligns the AABB side nearest
+                            // the grab point (MatterCAD's HitQuadrant
+                            // logic): grab the right half → the right
+                            // edge snaps, etc. (Field access instead of
+                            // `current_geometry()` — the enclosing
+                            // match still mutably borrows `self.drag`.)
+                            let geom = self
+                                .inputs
+                                .last_mesh_output
+                                .lock()
+                                .ok()
+                                .and_then(|g| g.clone());
+                            let snap_edge_xy =
+                                selected_body_world_aabb(geom.as_deref(), node_id)
+                                    .map(|(mn, mx)| {
+                                        let cx = (mn[0] + mx[0]) * 0.5;
+                                        let cy = (mn[1] + mx[1]) * 0.5;
+                                        [
+                                            if anchor[0] > cx { mx[0] } else { mn[0] },
+                                            if anchor[1] > cy { mx[1] } else { mn[1] },
+                                        ]
+                                    })
+                                    .unwrap_or([0.0, 0.0]);
                             self.drag = CameraDrag::DragBodyXY {
                                 node_id,
                                 start_local: *start_local,
                                 moved: true,
                                 anchor_bed_pt: anchor,
                                 start_matrix,
+                                snap_edge_xy,
                             };
                             return EventResult::Consumed;
                         }
@@ -308,10 +332,11 @@ impl Viewport3dWidget {
             CameraDrag::DragBodyZ { .. } => {
                 if let CameraDrag::DragBodyZ {
                     node_id,
-                    start_local: _,
                     anchor_xy,
                     anchor_z,
                     start_matrix,
+                    start_bottom_z,
+                    ..
                 } = self.drag.clone()
                 {
                     let w = self.bounds.width.max(1.0);
@@ -324,9 +349,22 @@ impl Viewport3dWidget {
                     if let Some(cur_z) =
                         body_drag::z_axis_translation(ray_o, ray_d, anchor_xy)
                     {
+                        let mut dz = cur_z - anchor_z;
+                        // Grid snap aligns the body's *bottom position*
+                        // (MatterCAD `MoveInZControl`: `newZPosition`
+                        // rounds to the grid).
+                        let snap = self.inputs.snap();
+                        if snap > 0.0 {
+                            let bottom =
+                                ((start_bottom_z + dz) / snap).round() * snap;
+                            dz = bottom - start_bottom_z;
+                        }
                         let new_matrix =
-                            body_drag::z_translation(start_matrix, anchor_z, cur_z);
+                            body_drag::z_translation(start_matrix, 0.0, dz);
                         self.inputs.push_node_matrix(node_id, new_matrix);
+                        if let CameraDrag::DragBodyZ { live_dz, .. } = &mut self.drag {
+                            *live_dz = dz;
+                        }
                     }
                 }
                 EventResult::Consumed
@@ -351,6 +389,7 @@ impl Viewport3dWidget {
                     moved,
                     anchor_bed_pt,
                     start_matrix,
+                    snap_edge_xy,
                 } = self.drag.clone()
                 {
                     let dx = (pos.x - start_local.x).abs();
@@ -370,7 +409,20 @@ impl Viewport3dWidget {
                         point: [0.0, 0.0, anchor_bed_pt[2]],
                         normal: [0.0, 0.0, 1.0],
                     };
-                    if let Some(cur) = plane.ray_intersect(ray_o, ray_d) {
+                    if let Some(mut cur) = plane.ray_intersect(ray_o, ray_d) {
+                        // Grid snap aligns the grabbed AABB side
+                        // (MatterCAD `DragSelectedObject`): the edge's
+                        // landing position rounds to the grid, and the
+                        // delta is adjusted to put it there.
+                        let snap = self.inputs.snap();
+                        if snap > 0.0 {
+                            for k in 0..2 {
+                                let delta = cur[k] - anchor_bed_pt[k];
+                                let landed = snap_edge_xy[k] + delta;
+                                let snapped = (landed / snap).round() * snap;
+                                cur[k] = anchor_bed_pt[k] + (snapped - snap_edge_xy[k]);
+                            }
+                        }
                         let new_matrix = body_drag::bed_plane_translation(
                             start_matrix,
                             anchor_bed_pt,
@@ -385,6 +437,7 @@ impl Viewport3dWidget {
                         moved: new_moved,
                         anchor_bed_pt,
                         start_matrix,
+                        snap_edge_xy,
                     };
                 }
                 EventResult::Consumed
@@ -506,74 +559,6 @@ impl Viewport3dWidget {
 
     pub(super) fn read_node_matrix(&self, id: NodeId) -> Option<[f32; 16]> {
         self.inputs.read_node_matrix(id)
-    }
-
-    /// The Z-control's pick handle (the cube AABB around the cone) for
-    /// the currently-selected body, plus that body's `NodeId`. Shared by
-    /// the hover highlight ([`Self::pick_z_hover`]) and the drag-start
-    /// hit-test ([`Self::try_start_z_drag`]) so both target exactly the
-    /// same target. `None` when nothing is selected or the selection has
-    /// no world AABB.
-    fn z_control_handle(&self) -> Option<(NodeId, GizmoHandle)> {
-        let sel_id = (*self.inputs.selection.lock().unwrap())?;
-        let geom = self.current_geometry();
-        let world_aabb = selected_body_world_aabb(geom.as_deref(), sel_id)?;
-        let cam = self.cam();
-        let vh = self.bounds.height.max(1.0) as f32;
-        let (cube_center, cube_size) =
-            z_control_gizmo::z_control_layout_for_aabb(world_aabb, &cam, vh);
-        let half = cube_size * 0.5;
-        Some((
-            sel_id,
-            GizmoHandle {
-                id: z_control_gizmo::Z_TRANSLATE_HANDLE_ID,
-                center: cube_center,
-                half_extent: [half, half, half],
-            },
-        ))
-    }
-
-    /// Whether the cursor at `pos` is over the Z-control handle. Drives
-    /// the hover highlight, mirroring [`Self::pick_rotate_hover`] for the
-    /// rotate handles. `false` when nothing is selected.
-    pub(super) fn pick_z_hover(&self, pos: Point) -> bool {
-        let Some((_, handle)) = self.z_control_handle() else {
-            return false;
-        };
-        let w = self.bounds.width.max(1.0);
-        let h = self.bounds.height.max(1.0);
-        let cursor_td = (pos.x, h - pos.y);
-        let (ray_o, ray_d) = self.cam().screen_to_ray(cursor_td, (w, h));
-        pick_handle(std::slice::from_ref(&handle), ray_o, ray_d).is_some()
-    }
-
-    /// If the click at `pos` lands on the Z-control handle of the
-    /// currently-selected body, return a pending `DragBodyZ` state.
-    /// `None` otherwise.
-    pub(super) fn try_start_z_drag(&self, pos: Point) -> Option<CameraDrag> {
-        let (sel_id, handle) = self.z_control_handle()?;
-        let cube_center = handle.center;
-        let w = self.bounds.width.max(1.0);
-        let h = self.bounds.height.max(1.0);
-        let cursor_td = (pos.x, h - pos.y);
-        let (ray_o, ray_d) = self.cam().screen_to_ray(cursor_td, (w, h));
-        pick_handle(std::slice::from_ref(&handle), ray_o, ray_d)?;
-        let start_matrix = self.read_node_matrix(sel_id)?;
-        // Anchor Z = projection of the drag-start ray onto the
-        // vertical line through (cube_center.xy). The drag math
-        // subtracts this to get the per-frame delta.
-        let anchor_z = body_drag::z_axis_translation(
-            ray_o,
-            ray_d,
-            [cube_center[0], cube_center[1]],
-        )?;
-        Some(CameraDrag::DragBodyZ {
-            node_id: sel_id,
-            start_local: pos,
-            anchor_xy: [cube_center[0], cube_center[1]],
-            anchor_z,
-            start_matrix,
-        })
     }
 
     /// Mouse-down body pick + bed-plane anchor. Captures both pieces

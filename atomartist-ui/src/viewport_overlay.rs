@@ -128,6 +128,9 @@ pub fn build_viewport_overlay(state: AppState, font: Arc<Font>) -> Box<dyn Widge
                 write_pair_state.set_node_number_and_matrix_with_undo(id, name, value, matrix);
             },
         )),
+        // Same cell the toolbar's snap dropdown edits — the drag
+        // handlers read it live, so a snap change applies immediately.
+        snap_amount: state.snap_amount.clone(),
     };
     let cube_inputs = TumbleCubeInputs {
         camera: state.camera.clone(),

@@ -550,6 +550,135 @@ fn hovering_controls_previews_measure_bars() {
     assert_eq!(measure_count(&w), 0, "moving off the controls clears the preview");
 }
 
+/// Screen position of the Z-translate cone for the selected body.
+fn z_cone_screen_pos(w: &Viewport3dWidget, node_id: atomartist_lib::graph::node::NodeId) -> Point {
+    let aabb = selected_body_world_aabb(w.current_geometry().as_deref(), node_id)
+        .expect("selected body has a world AABB");
+    let cam = w.cam();
+    let (center, _) = z_control_gizmo::z_control_layout_for_aabb(aabb, &cam, 300.0);
+    let m = mvp(&cam, 400.0_f32 / 300.0);
+    let (sx, sy) = project(&m, center, 400.0, 300.0).expect("Z cone projects on screen");
+    Point { x: sx, y: sy }
+}
+
+/// Grid snap during a Z drag must land the body's *bottom position*
+/// on a grid multiple (MatterCAD `MoveInZControl`), and `live_dz`
+/// must mirror the snapped delta (it drives the drag-time control
+/// placement + readout).
+#[test]
+fn z_drag_snaps_bottom_position_to_grid() {
+    use agg_gui::Modifiers;
+    let node_id = atomartist_lib::graph::node::NodeId(70);
+    let (mut w, matrix, _h) = viewport_with_height_body(node_id, None);
+    *w.inputs.snap_amount.lock().unwrap() = 5.0;
+    let on_cone = z_cone_screen_pos(&w, node_id);
+    fire(&mut w, Event::MouseDown { pos: on_cone, button: MouseButton::Left, modifiers: Modifiers::default() });
+    assert!(matches!(w.drag, CameraDrag::DragBodyZ { .. }), "got {:?}", w.drag);
+    fire(&mut w, Event::MouseMove { pos: Point { x: on_cone.x, y: on_cone.y + 60.0 } });
+    let m = *matrix.lock().unwrap();
+    assert!(m[14].abs() > 1e-3, "drag should have moved the body in Z");
+    // Centered 20³ box: start bottom = -10. New bottom must sit on the
+    // 5-unit grid.
+    let bottom = -10.0 + m[14];
+    let snapped = (bottom / 5.0_f32).round() * 5.0;
+    assert!(
+        (bottom - snapped).abs() < 1e-3,
+        "bottom must land on the grid, got {bottom}",
+    );
+    let CameraDrag::DragBodyZ { live_dz, .. } = w.drag.clone() else {
+        panic!("drag must still be active");
+    };
+    assert!((live_dz - m[14]).abs() < 1e-4, "live_dz mirrors the applied delta");
+}
+
+/// Grid snap during a height drag must round the *size* to the grid
+/// with a one-step floor (MatterCAD `ScaleHeightControl`).
+#[test]
+fn height_drag_snaps_size_to_grid() {
+    use agg_gui::Modifiers;
+    let node_id = atomartist_lib::graph::node::NodeId(71);
+    let (mut w, _m, height_cell) = viewport_with_height_body(node_id, Some(20.0));
+    *w.inputs.snap_amount.lock().unwrap() = 5.0;
+    let on_box = height_box_screen_pos(&w, node_id);
+    fire(&mut w, Event::MouseDown { pos: on_box, button: MouseButton::Left, modifiers: Modifiers::default() });
+    fire(&mut w, Event::MouseMove { pos: Point { x: on_box.x, y: on_box.y + 80.0 } });
+    let h = *height_cell.lock().unwrap();
+    let snapped = (h / 5.0).round() * 5.0;
+    assert!((h - snapped).abs() < 1e-3, "height must land on the grid, got {h}");
+    assert!(h >= 5.0 - 1e-3, "height never collapses below one grid step");
+}
+
+/// Grid snap during an XY bed drag must land the grabbed AABB *edge*
+/// on a grid multiple (MatterCAD `DragSelectedObject`).
+#[test]
+fn xy_drag_snaps_grabbed_edge_to_grid() {
+    use agg_gui::Modifiers;
+    let node_id = atomartist_lib::graph::node::NodeId(72);
+    let (mut w, matrix, _h) = viewport_with_height_body(node_id, None);
+    *w.inputs.snap_amount.lock().unwrap() = 5.0;
+    // Grab the body at its projected centre, then drag right.
+    let cam = w.cam();
+    let m = mvp(&cam, 400.0_f32 / 300.0);
+    let (sx, sy) = project(&m, [0.0, 0.0, 0.0], 400.0, 300.0).expect("body projects");
+    let down = Point { x: sx, y: sy };
+    fire(&mut w, Event::MouseDown { pos: down, button: MouseButton::Left, modifiers: Modifiers::default() });
+    fire(&mut w, Event::MouseMove { pos: Point { x: down.x + 30.0, y: down.y } });
+    fire(&mut w, Event::MouseMove { pos: Point { x: down.x + 60.0, y: down.y } });
+    let CameraDrag::DragBodyXY { snap_edge_xy, .. } = w.drag.clone() else {
+        panic!("expected an XY drag, got {:?}", w.drag);
+    };
+    let mm = *matrix.lock().unwrap();
+    assert!(mm[12].abs() > 1e-3 || mm[13].abs() > 1e-3, "drag should have moved the body");
+    for k in 0..2 {
+        let landed = snap_edge_xy[k] + mm[12 + k];
+        let snapped = (landed / 5.0_f32).round() * 5.0;
+        assert!(
+            (landed - snapped).abs() < 1e-3,
+            "axis {k}: grabbed edge must land on the grid, got {landed}",
+        );
+    }
+}
+
+/// While one control is engaged, all the others hide — universally,
+/// not just for rotation. Z drag shows only the cone, height drag only
+/// the box, a bed XY drag hides everything.
+#[test]
+fn active_drag_hides_inactive_controls() {
+    use agg_gui::Modifiers;
+    let node_id = atomartist_lib::graph::node::NodeId(73);
+    let (mut w, _m, _h) = viewport_with_height_body(node_id, Some(20.0));
+    let tri_sets = |w: &Viewport3dWidget| {
+        w.populate_scene_state(vec![], None, true, 1.0, [0.0, 0.0, 0.0, 1.0]);
+        w.scene.borrow().gizmo_triangles.len()
+    };
+    let idle_sets = tri_sets(&w);
+    assert!(idle_sets >= 3, "idle draws cone + box + rotate handles, got {idle_sets}");
+
+    // Z drag → only the cone (1 triangle set).
+    let on_cone = z_cone_screen_pos(&w, node_id);
+    fire(&mut w, Event::MouseDown { pos: on_cone, button: MouseButton::Left, modifiers: Modifiers::default() });
+    assert!(matches!(w.drag, CameraDrag::DragBodyZ { .. }));
+    assert_eq!(tri_sets(&w), 1, "Z drag shows only the active cone");
+    fire(&mut w, Event::MouseUp { pos: on_cone, button: MouseButton::Left, modifiers: Modifiers::default() });
+
+    // Height drag → only the box.
+    let on_box = height_box_screen_pos(&w, node_id);
+    fire(&mut w, Event::MouseDown { pos: on_box, button: MouseButton::Left, modifiers: Modifiers::default() });
+    assert!(matches!(w.drag, CameraDrag::DragBodyHeight { .. }));
+    assert_eq!(tri_sets(&w), 1, "height drag shows only the active box");
+    fire(&mut w, Event::MouseUp { pos: on_box, button: MouseButton::Left, modifiers: Modifiers::default() });
+
+    // Bed XY drag → nothing.
+    let cam = w.cam();
+    let m = mvp(&cam, 400.0_f32 / 300.0);
+    let (sx, sy) = project(&m, [0.0, 0.0, 0.0], 400.0, 300.0).expect("body projects");
+    let down = Point { x: sx, y: sy };
+    fire(&mut w, Event::MouseDown { pos: down, button: MouseButton::Left, modifiers: Modifiers::default() });
+    fire(&mut w, Event::MouseMove { pos: Point { x: down.x + 30.0, y: down.y } });
+    assert!(matches!(w.drag, CameraDrag::DragBodyXY { .. }));
+    assert_eq!(tri_sets(&w), 0, "bed drag hides every control");
+}
+
 /// Hovering the height box highlights it (accent), like the rotate /
 /// Z controls.
 #[test]

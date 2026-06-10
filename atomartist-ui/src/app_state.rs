@@ -45,6 +45,16 @@ pub struct AppState {
     /// Set whenever the graph or its outputs change so the viewport knows
     /// to repaint.
     pub viewport_dirty: Arc<AtomicBool>,
+    /// Monotonic ticket counter for evaluation requests, paired with
+    /// `eval_published` so out-of-order evaluation threads can't
+    /// publish an older mesh over a newer one (each `schedule_evaluate`
+    /// spawns a thread; during a drag several are in flight at once
+    /// and finish in arbitrary order — without the guard the viewport
+    /// snaps backward a frame, visible as bounce).
+    pub eval_ticket: Arc<std::sync::atomic::AtomicU64>,
+    /// Highest ticket whose result has been stored into
+    /// `last_mesh_output`.
+    pub eval_published: Arc<std::sync::atomic::AtomicU64>,
     /// The node id whose output should be displayed in the viewport. When
     /// `None`, the viewport shows nothing (empty grid). Phase 4+ wires this
     /// up to user selection.
@@ -118,6 +128,8 @@ impl AppState {
             undo: Arc::new(Mutex::new(UndoBuffer::new())),
             last_mesh_output: Arc::new(Mutex::new(None)),
             viewport_dirty: Arc::new(AtomicBool::new(false)),
+            eval_ticket: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            eval_published: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             display_node: Arc::new(Mutex::new(None)),
             selection: Arc::new(Mutex::new(None)),
             current_file: Arc::new(Mutex::new(None)),
@@ -175,15 +187,7 @@ impl AppState {
     ///
     /// The dirty flag is set on completion so the viewport repaints.
     pub fn schedule_evaluate(&self) {
-        // Only the Send parts of AppState — UndoBuffer is !Send because
-        // its `Box<dyn UndoRedoCommand>` trait objects don't carry Send.
-        let task = EvalTask {
-            graph: self.graph.clone(),
-            registry: self.registry.clone(),
-            last_mesh_output: self.last_mesh_output.clone(),
-            viewport_dirty: self.viewport_dirty.clone(),
-            display_node: self.display_node.clone(),
-        };
+        let task = self.make_eval_task();
         #[cfg(not(target_arch = "wasm32"))]
         {
             std::thread::spawn(move || {
@@ -199,14 +203,23 @@ impl AppState {
     /// Synchronous alternative — used by tests and tight code paths that
     /// need the result immediately.
     pub fn evaluate_now(&self) {
-        let task = EvalTask {
+        self.make_eval_task().run();
+    }
+
+    /// Only the Send parts of AppState — UndoBuffer is !Send because
+    /// its `Box<dyn UndoRedoCommand>` trait objects don't carry Send.
+    /// Each task takes a fresh monotonic ticket so stale evaluation
+    /// threads can't publish over a newer result.
+    fn make_eval_task(&self) -> EvalTask {
+        EvalTask {
             graph: self.graph.clone(),
             registry: self.registry.clone(),
             last_mesh_output: self.last_mesh_output.clone(),
             viewport_dirty: self.viewport_dirty.clone(),
             display_node: self.display_node.clone(),
-        };
-        task.run();
+            ticket: 1 + self.eval_ticket.fetch_add(1, Ordering::Relaxed),
+            published: self.eval_published.clone(),
+        }
     }
 
     /// Set the display target — the canvas calls this when the user
@@ -317,6 +330,10 @@ struct EvalTask {
     last_mesh_output: Arc<Mutex<Option<Arc<Geometry3d>>>>,
     viewport_dirty: Arc<AtomicBool>,
     display_node: Arc<Mutex<Option<NodeId>>>,
+    /// Monotonic schedule ticket (see `AppState::eval_ticket`).
+    ticket: u64,
+    /// Highest ticket already published — guards the result store.
+    published: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl EvalTask {
@@ -326,7 +343,19 @@ impl EvalTask {
             let _ = evaluate_dirty(&mut g, &self.registry);
             self.pick_display_mesh(&g)
         };
-        *self.last_mesh_output.lock().unwrap() = mesh;
+        {
+            // Publish only if no newer evaluation already has —
+            // spawned threads finish in arbitrary order, and an older
+            // result landing after a newer one snaps the viewport
+            // backward a frame (visible bounce during drags). The
+            // check + store happen under the output lock so two
+            // threads can't interleave between them.
+            let mut out = self.last_mesh_output.lock().unwrap();
+            if self.published.load(Ordering::Acquire) < self.ticket {
+                *out = mesh;
+                self.published.store(self.ticket, Ordering::Release);
+            }
+        }
         self.viewport_dirty.store(true, Ordering::Relaxed);
     }
 
@@ -397,6 +426,8 @@ impl Clone for AppState {
             undo: self.undo.clone(),
             last_mesh_output: self.last_mesh_output.clone(),
             viewport_dirty: self.viewport_dirty.clone(),
+            eval_ticket: self.eval_ticket.clone(),
+            eval_published: self.eval_published.clone(),
             display_node: self.display_node.clone(),
             selection: self.selection.clone(),
             current_file: self.current_file.clone(),

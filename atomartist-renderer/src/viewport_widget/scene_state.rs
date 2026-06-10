@@ -64,28 +64,94 @@ impl Viewport3dWidget {
                 ];
                 let cam = self.cam();
                 let vh = self.bounds.height.max(1.0) as f32;
-                // Highlight the Z control accent on hover (MatterCAD's
-                // `MoveInZControl` `MouseIsOver`), matching the rotate
-                // handles.
-                let z_color = if self.hovered_z_control { accent } else { idle };
-                s.gizmo_triangles
-                    .push(z_control_gizmo::z_control_for_aabb(world_aabb, &cam, vh, z_color));
+                // Universal "hide the others while a control is
+                // engaged" (MatterCAD turns off the selection
+                // indicators during a drag): each control draws only
+                // while idle — or while ITS drag is active, anchored
+                // to the drag state so it rides the cursor instead of
+                // the async-rebuilt geometry (which lags and made the
+                // controls bounce against the body).
+                let drag_idle = matches!(
+                    self.drag,
+                    CameraDrag::None | CameraDrag::Selecting { .. }
+                );
+                // Z-translate cone (MatterCAD `MoveInZControl`):
+                // hover-accented while idle, accent + drag-anchored
+                // while moving in Z, hidden during any other control's
+                // drag.
+                match &self.drag {
+                    _ if drag_idle => {
+                        let z_color = if self.hovered_z_control { accent } else { idle };
+                        s.gizmo_triangles.push(z_control_gizmo::z_control_for_aabb(
+                            world_aabb, &cam, vh, z_color,
+                        ));
+                    }
+                    CameraDrag::DragBodyZ {
+                        anchor_xy,
+                        start_top_z,
+                        live_dz,
+                        ..
+                    } => {
+                        let top = [anchor_xy[0], anchor_xy[1], start_top_z + live_dz];
+                        let (center, size) =
+                            z_control_gizmo::z_control_layout_at(top, &cam, vh);
+                        s.gizmo_triangles
+                            .push(z_control_gizmo::z_cone(center, size, accent));
+                    }
+                    _ => {}
+                }
                 // Height / scale-Z box (MatterCAD `ScaleHeightControl`).
-                // Mode-aware placement: rides the object's rotated
-                // top-face centre when the node has a height parameter,
-                // else the world-AABB top. Accent while hovered or
-                // while a height drag is in flight.
-                let hbox_active = self.hovered_height_control
-                    || matches!(self.drag, CameraDrag::DragBodyHeight { .. });
-                let hbox_color = if hbox_active { accent } else { idle };
-                let (hbox_center, hbox_size, hbox_axes) =
-                    self.height_box_layout(sel_id, world_aabb, &cam, vh);
-                s.gizmo_triangles.push(z_control_gizmo::height_control(
-                    hbox_center,
-                    hbox_size,
-                    hbox_axes,
-                    hbox_color,
-                ));
+                // Idle: mode-aware placement (object top when a height
+                // parameter exists, else AABB top), hover-accented.
+                // While ITS drag is in flight: anchored to the drag
+                // axis + live length. Hidden during other drags.
+                match &self.drag {
+                    _ if drag_idle => {
+                        let hbox_color =
+                            if self.hovered_height_control { accent } else { idle };
+                        let (hbox_center, hbox_size, hbox_axes) =
+                            self.height_box_layout(sel_id, world_aabb, &cam, vh);
+                        s.gizmo_triangles.push(z_control_gizmo::height_control(
+                            hbox_center,
+                            hbox_size,
+                            hbox_axes,
+                            hbox_color,
+                        ));
+                    }
+                    CameraDrag::DragBodyHeight {
+                        axis_origin,
+                        axis_dir,
+                        live_len,
+                        start_body_matrix,
+                        ..
+                    } => {
+                        let top = [
+                            axis_origin[0] + axis_dir[0] * live_len,
+                            axis_origin[1] + axis_dir[1] * live_len,
+                            axis_origin[2] + axis_dir[2] * live_len,
+                        ];
+                        let upp = cam.world_units_per_pixel_at(top, vh);
+                        let size = z_control_gizmo::HEIGHT_BOX_PX * upp;
+                        let half = size * 0.5;
+                        let center = [
+                            top[0] + axis_dir[0] * half,
+                            top[1] + axis_dir[1] * half,
+                            top[2] + axis_dir[2] * half,
+                        ];
+                        let m = start_body_matrix;
+                        let xa = normalize3([m[0], m[1], m[2]]);
+                        let ya = normalize3([m[4], m[5], m[6]]);
+                        let axes = [
+                            if xa[0].is_finite() { xa } else { [1.0, 0.0, 0.0] },
+                            if ya[0].is_finite() { ya } else { [0.0, 1.0, 0.0] },
+                            *axis_dir,
+                        ];
+                        s.gizmo_triangles.push(z_control_gizmo::height_control(
+                            center, size, axes, accent,
+                        ));
+                    }
+                    _ => {}
+                }
                 // Rotate gizmo — three per-axis corner handles (MatterCAD
                 // RotateCornerControl). Two display modes:
                 //
@@ -128,19 +194,21 @@ impl Viewport3dWidget {
                             s.gizmo_lines.push(l);
                         }
                     }
-                    CameraDrag::DragBodyZ { .. } => {
+                    CameraDrag::DragBodyZ {
+                        anchor_xy,
+                        start_bottom_z,
+                        live_dz,
+                        ..
+                    } => {
                         // Moving in Z: hide the rotate handles and show
                         // measure bars from the bed up to the body's
-                        // bottom at the AABB-centre axis (the 2-D value
-                        // label is drawn by the viewport's overlay
-                        // pass). MatterCAD's `MoveInZControl`
-                        // measurement.
-                        let (mn, mx) = world_aabb;
-                        let cx = (mn[0] + mx[0]) * 0.5;
-                        let cyc = (mn[1] + mx[1]) * 0.5;
+                        // bottom (the 2-D value label is drawn by the
+                        // viewport's overlay pass). Anchored to the
+                        // drag state so the bars track the cursor.
+                        // MatterCAD's `MoveInZControl` measurement.
                         let (bars, _, _) = z_control_gizmo::measure_bars(
-                            [cx, cyc, 0.0],
-                            [cx, cyc, mn[2]],
+                            [anchor_xy[0], anchor_xy[1], 0.0],
+                            [anchor_xy[0], anchor_xy[1], start_bottom_z + live_dz],
                             &cam,
                             vh,
                             idle,
@@ -172,6 +240,11 @@ impl Viewport3dWidget {
                             idle,
                         );
                         s.gizmo_lines.push(bars);
+                    }
+                    _ if !drag_idle => {
+                        // Some other drag (e.g. bed-plane XY) is in
+                        // flight — hide the rotate handles too; only
+                        // the active control may draw.
                     }
                     _ => {
                         // Idle: hovering a Z/height control previews its
