@@ -47,12 +47,6 @@ pub struct InitUniforms {
 /// breakdown.
 pub use crate::scene_renderer::opaque_pass::Uniforms as PeelUniforms;
 
-// Match `super::DUAL_DEPTH_FORMAT`. Half-float is the largest format
-// `wgpu` guarantees `Max`-blend support on without a backend-specific
-// feature flag.
-const DUAL_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
-const ACCUM_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
-
 /// Clear colours per MatterCAD: dual-depth slots reset to
 /// `(-1, -1, 0, 0)` so the first `Max` blend picks any incoming depth;
 /// front accumulator starts at `(0, 0, 0, 1)` so the premultiplied
@@ -77,11 +71,12 @@ const BACK_ACCUM_CLEAR: wgpu::Color = wgpu::Color {
 };
 
 pub struct DualPeelPipelines {
-    /// Output format the resolve pipeline writes to. Equals the
-    /// accumulation chain's [`super::super::accumulation::SAMPLE_FORMAT`]
-    /// (`Rgba16Float`) rather than the surface format — the resolve
-    /// feeds the per-sample HDR accumulator, NOT the surface
-    /// directly. Stored so callers can sanity-check the wiring.
+    /// Output format the resolve pipeline writes to. Equals
+    /// [`super::super::SAMPLE_FORMAT`] (`Rgba16Float`) rather than the
+    /// surface format — the resolve feeds the HDR scene composite
+    /// (`scene_fb`), NOT the surface directly, so the 3×3 box
+    /// downsample averages linear colour. Stored so callers can
+    /// sanity-check the wiring.
     resolve_output_format: wgpu::TextureFormat,
 
     init_pipeline: wgpu::RenderPipeline,
@@ -113,8 +108,8 @@ impl DualPeelPipelines {
     /// `resolve_output_format` is the format of the texture the
     /// resolve pass writes to — must match the texture passed as
     /// `output_view` in [`Self::execute_chain`]. For the AtomArtist
-    /// viewport this is the accumulation chain's HDR sample target
-    /// (`Rgba16Float`), not the surface format.
+    /// viewport this is the HDR scene composite (`Rgba16Float`), not
+    /// the surface format.
     pub fn new(device: &wgpu::Device, resolve_output_format: wgpu::TextureFormat) -> Self {
         let body_bgl = build_body_bgl(device);
         let (init_pipeline, init_bgl) = build_init_pipeline(device, &body_bgl);

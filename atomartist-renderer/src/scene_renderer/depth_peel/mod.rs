@@ -18,8 +18,9 @@
 //!
 //! Stencil is **not** used — discards are driven entirely by sampling
 //! the opaque-pass depth texture and the previous-iteration dual-depth
-//! texture in the shader. The crate-root anti-aliasing note explains
-//! why MSAA can't coexist with this scheme.
+//! texture in the shader. This in-shader depth sampling is also why the
+//! scene targets stay single-sample (see the crate-root anti-aliasing
+//! note).
 //!
 //! ## Resource ownership
 //!
@@ -100,12 +101,6 @@ pub struct DualPeelTargets {
     pub back_accum: wgpu::Texture,
     pub back_accum_view: wgpu::TextureView,
 
-    /// Single-sample target in the surface format. The resolve pass
-    /// writes the composited (opaque + front + back) result here; the
-    /// accumulation chain samples it on each jitter sample.
-    pub resolved: wgpu::Texture,
-    pub resolved_view: wgpu::TextureView,
-
     /// Point sampler used by the dual-peel shader for the source
     /// dual-depth texture and by the resolve shader for the front /
     /// back accumulators. Mirrors MatterCAD's `pointClampSampler`.
@@ -128,8 +123,6 @@ impl DualPeelTargets {
         let front_accum_view = front_accum.create_view(&wgpu::TextureViewDescriptor::default());
         let back_accum = alloc_accum(device, w, h, "atomartist back_accum");
         let back_accum_view = back_accum.create_view(&wgpu::TextureViewDescriptor::default());
-        let resolved = alloc_resolved(device, w, h, surface_format);
-        let resolved_view = resolved.create_view(&wgpu::TextureViewDescriptor::default());
         let point_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("atomartist dual-peel point sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -150,8 +143,6 @@ impl DualPeelTargets {
             front_accum_view,
             back_accum,
             back_accum_view,
-            resolved,
-            resolved_view,
             point_sampler,
         }
     }
@@ -183,10 +174,6 @@ impl DualPeelTargets {
         self.back_accum = alloc_accum(device, w, h, "atomartist back_accum");
         self.back_accum_view = self
             .back_accum
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        self.resolved = alloc_resolved(device, w, h, self.surface_format);
-        self.resolved_view = self
-            .resolved
             .create_view(&wgpu::TextureViewDescriptor::default());
     }
 
@@ -251,30 +238,6 @@ fn alloc_accum(device: &wgpu::Device, w: u32, h: u32, label: &'static str) -> wg
     })
 }
 
-fn alloc_resolved(
-    device: &wgpu::Device,
-    w: u32,
-    h: u32,
-    surface_format: wgpu::TextureFormat,
-) -> wgpu::Texture {
-    device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("atomartist scene resolved"),
-        size: wgpu::Extent3d {
-            width: w,
-            height: h,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: surface_format,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-            | wgpu::TextureUsages::TEXTURE_BINDING
-            | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,8 +298,8 @@ mod tests {
             return;
         };
         // `Rgba16Float` is the production resolve-output format (matches
-        // the accumulation chain's `SAMPLE_FORMAT`). If you change this,
-        // also change `WgpuSceneRenderer::ensure_state`.
+        // `scene_renderer::SAMPLE_FORMAT`, the HDR scene composite). If
+        // you change this, also change `WgpuSceneRenderer::ensure_state`.
         let _pipes = super::pipelines::DualPeelPipelines::new(
             &device,
             wgpu::TextureFormat::Rgba16Float,
@@ -441,13 +404,13 @@ mod tests {
         };
         let mut targets =
             DualPeelTargets::new(&device, 256, 128, wgpu::TextureFormat::Rgba8UnormSrgb);
-        let resolved_ptr_before = &targets.resolved as *const _;
+        let accum_ptr_before = &targets.front_accum as *const _;
         targets.ensure_size(&device, 256, 128);
-        let resolved_ptr_after = &targets.resolved as *const _;
+        let accum_ptr_after = &targets.front_accum as *const _;
         // `Texture` itself is a wrapper, but the inner identity is what
         // we care about — same field address means the wrapper wasn't
         // replaced, so no reallocation happened.
-        assert_eq!(resolved_ptr_before, resolved_ptr_after);
+        assert_eq!(accum_ptr_before, accum_ptr_after);
     }
 
     fn headless_device() -> Option<(wgpu::Device, wgpu::Queue)> {

@@ -139,14 +139,14 @@ impl GizmoLinePipelines {
         })
     }
 
-    /// Draw one [`super::GizmoLineSet`] into the per-sample HDR
-    /// target. Solid variant depth-tests against `scene_depth_view`;
-    /// overlay variant runs without a depth attachment. Per-gizmo
-    /// scratch buffers are created here and dropped at end-of-call —
-    /// cheap because gizmo geometry is tiny (≤ a few hundred verts).
+    /// Draw one [`super::GizmoLineSet`] into the HDR scene composite.
+    /// Solid variant depth-tests against `scene_depth_view`; overlay
+    /// variant runs without a depth attachment. Per-gizmo scratch
+    /// buffers are created here and dropped at end-of-call — cheap
+    /// because gizmo geometry is tiny (≤ a few hundred verts).
     ///
-    /// `mvp` is the renderer's jittered projection × view, already
-    /// composed with the gizmo's optional model matrix.
+    /// `mvp` is the renderer's projection × view, already composed with
+    /// the gizmo's optional model matrix.
     #[allow(clippy::too_many_arguments)]
     pub fn execute(
         &self,

@@ -3,8 +3,8 @@
 //! Owns the wgpu resources that draw the solid mesh surface (Blinn-Phong
 //! shaded) and the depth-only twin used to populate the opaque-pass
 //! depth attachment without writing colour. Knows nothing about depth
-//! peeling or accumulation — those run after the opaque pass against
-//! the populated scene-depth attachment.
+//! peeling — that runs after the opaque pass against the populated
+//! scene-depth attachment.
 //!
 //! Public surface:
 //!
@@ -116,24 +116,16 @@ pub struct OpaquePipelines {
 }
 
 impl OpaquePipelines {
-    /// Build both pipelines for the given offscreen target format and
-    /// sample count. Depth attachment format is always
-    /// `Depth32Float` — depth peeling samples the per-pixel depth value
-    /// from this texture via shader, which would be incoherent against
-    /// an MSAA per-sample depth, so the caller is expected to keep
-    /// `sample_count == 1`.
-    pub fn new(
-        device: &wgpu::Device,
-        surface_format: wgpu::TextureFormat,
-        sample_count: u32,
-    ) -> Self {
+    /// Build both pipelines for the given offscreen target format.
+    /// Depth attachment format is always `Depth32Float`.
+    pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
         let body_bgl = build_body_bgl(device);
         let (scene_pipeline, scene_bgl) =
-            build_scene_pipeline(device, surface_format, sample_count, &body_bgl);
+            build_scene_pipeline(device, surface_format, &body_bgl);
         let (scene_ub, scene_bg) = build_scene_uniforms(device, &scene_bgl);
 
         let depth_only_pipeline =
-            build_depth_only_pipeline(device, &scene_bgl, surface_format, sample_count, &body_bgl);
+            build_depth_only_pipeline(device, &scene_bgl, surface_format, &body_bgl);
 
         Self {
             scene_pipeline,
@@ -262,28 +254,6 @@ pub fn vertex_layouts() -> [wgpu::VertexBufferLayout<'static>; 2] {
     ]
 }
 
-fn vertex_layout() -> wgpu::VertexBufferLayout<'static> {
-    // Legacy single-slot layout retained for any callers that still
-    // need it. New per-body pipelines use [`vertex_layouts`] above.
-    static ATTRS: [wgpu::VertexAttribute; 2] = [
-        wgpu::VertexAttribute {
-            offset: 0,
-            shader_location: 0,
-            format: wgpu::VertexFormat::Float32x3,
-        },
-        wgpu::VertexAttribute {
-            offset: 12,
-            shader_location: 1,
-            format: wgpu::VertexFormat::Float32x3,
-        },
-    ];
-    wgpu::VertexBufferLayout {
-        array_stride: std::mem::size_of::<Vertex>() as u64,
-        step_mode: wgpu::VertexStepMode::Vertex,
-        attributes: &ATTRS,
-    }
-}
-
 fn shared_bgl(device: &wgpu::Device, label: &'static str) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some(label),
@@ -325,7 +295,6 @@ pub fn build_body_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
 fn build_scene_pipeline(
     device: &wgpu::Device,
     surface_format: wgpu::TextureFormat,
-    sample_count: u32,
     body_bgl: &wgpu::BindGroupLayout,
 ) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout) {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -360,11 +329,7 @@ fn build_scene_pipeline(
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
-        multisample: wgpu::MultisampleState {
-            count: sample_count,
-            mask: !0,
-            alpha_to_coverage_enabled: false,
-        },
+        multisample: wgpu::MultisampleState::default(),
         fragment: Some(wgpu::FragmentState {
             module: &shader,
             entry_point: Some("fs"),
@@ -422,7 +387,6 @@ fn build_depth_only_pipeline(
     device: &wgpu::Device,
     scene_bgl: &wgpu::BindGroupLayout,
     surface_format: wgpu::TextureFormat,
-    sample_count: u32,
     body_bgl: &wgpu::BindGroupLayout,
 ) -> wgpu::RenderPipeline {
     // Reuse the scene shader's vertex + fragment stages; the fragment
@@ -464,11 +428,7 @@ fn build_depth_only_pipeline(
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
-        multisample: wgpu::MultisampleState {
-            count: sample_count,
-            mask: !0,
-            alpha_to_coverage_enabled: false,
-        },
+        multisample: wgpu::MultisampleState::default(),
         fragment: Some(wgpu::FragmentState {
             module: &shader,
             entry_point: Some("fs"),

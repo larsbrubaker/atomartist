@@ -18,41 +18,32 @@
 //!    widget rect shows through transparent pixels and 2-D content drawn
 //!    on top of the widget composites cleanly.
 //!
-//! ## Why single-sample
+//! ## Anti-aliasing — spatial 3×3 supersampling
 //!
-//! Dual depth peeling samples the per-pixel scene-depth via shader
-//! ([`crate::scene_renderer::depth_peel`]). MSAA stores a per-sample
-//! depth value, which makes that lookup incoherent — a fragment shader
-//! that asks "what is the opaque-pass depth at this pixel?" cannot
-//! reliably answer when each sample slot in the MSAA target has a
-//! different depth. Both reference implementations (MatterCAD's dual
-//! depth peeling and NodeDesigner's single-direction peeling) keep their
-//! offscreen 3-D targets at `sample_count = 1` for the same reason.
-//! Anti-aliasing for the viewport instead comes from the 16-tap Halton
-//! jitter accumulator in [`crate::scene_renderer::accumulation`] — only
-//! the main viewport gets jittered; the tumble cube + bed render
-//! single-shot.
+//! Every offscreen scene target is single-sample and allocated at
+//! [`SSAA_SCALE`]× the on-screen pixel size; the whole scene renders
+//! once into that oversized buffer, then the final composite uses
+//! [`SsaaFramebuffer::blit_downsample_3x_to`] (a 9-tap box filter) to
+//! resolve it down to the widget rect — one pass, fully AA'd.
+//!
+//! The targets must stay single-sample: dual depth peeling
+//! ([`crate::scene_renderer::depth_peel`]) samples the per-pixel
+//! scene-depth in-shader, and a per-sample depth attachment would make
+//! that "what is the opaque-pass depth here?" lookup ambiguous.
 //!
 //! The shader stack is single Blinn-Phong-ish: vertex carries position +
 //! normal; fragment shades against a fixed key + fill light plus ambient.
 
-use std::sync::Arc;
-
 use bytemuck::cast_slice;
-use demo_wgpu::{SsaaFramebuffer, WgpuCustomRender, WgpuCustomRenderCtx};
-use manifold_rust::types::MeshGL;
+use demo_wgpu::SsaaFramebuffer;
 use wgpu::util::DeviceExt;
-
-use glam::Mat4;
 
 use atomartist_lib::geometry::{is_inherit_color, Body, DEFAULT_GEOMETRY_COLOR};
 
 use crate::bed::BedRenderer;
 use crate::camera::OrbitCamera;
 
-pub mod accumulation;
 pub mod body_uniform;
-pub mod cache;
 pub mod depth_peel;
 pub mod gizmo_pass;
 pub mod opaque_pass;
@@ -62,20 +53,14 @@ mod render_impl;
 mod timings;
 mod util;
 
-use timings::{elapsed_ms, log_scene_timings, SceneTimings};
-use util::{ensure_scene_depth, ensure_scene_depth_color, normalize3};
+use util::{ensure_scene_depth, ensure_scene_depth_color};
 
-use accumulation::{
-    apply_jitter_to_proj, jitter_offset, AccumulationPipelines, AccumulationTargets, MAX_SAMPLES,
-    SAMPLE_FORMAT,
-};
-use cache::{handle_cache_hit, CacheOutcome, SceneFingerprint};
-use depth_peel::pipelines::{DualPeelPipelines, MeshHandles, PeelUniforms};
-use depth_peel::{iteration_count, DualPeelTargets, DEFAULT_LAYERS};
-use gizmo_pass::{GizmoLinePipelines, GizmoLineUniforms};
+use depth_peel::pipelines::DualPeelPipelines;
+use depth_peel::DualPeelTargets;
+use gizmo_pass::GizmoLinePipelines;
 pub use gizmo_pass::{GizmoLineSet, GizmoTriangleSet};
-use opaque_pass::{OpaquePipelines, Uniforms, Vertex};
-use post_outline::{OutlinePipelines, OutlineTargets, OutlineUniforms};
+use opaque_pass::{OpaquePipelines, Vertex};
+use post_outline::{OutlinePipelines, OutlineTargets};
 
 /// Render-style picker beneath the tumble cube.  Drives the surface
 /// pipeline used by [`WgpuSceneRenderer`] so the user can compare a
@@ -152,12 +137,20 @@ pub struct BodyGpu {
     pub vert_count: u32,
 }
 
-/// Sample count for the offscreen 3-D framebuffer.
-///
-/// Must stay at 1 — see the "Why single-sample" note at the top of this
-/// module. Dual depth peeling cannot tolerate MSAA's per-sample depth
-/// values.
-pub const SAMPLE_COUNT: u32 = 1;
+/// Linear SSAA scale: every offscreen scene target is allocated at
+/// `SSAA_SCALE × {on-screen w, h}` and box-downsampled on the final
+/// composite. `3` → a 3×3 (9×) supersample, matching agg-gui's
+/// [`SsaaFramebuffer::blit_downsample_3x_to`] kernel — all 9 source
+/// texels under each output pixel contribute equally.
+pub const SSAA_SCALE: u32 = 3;
+
+/// Linear HDR format for the offscreen scene composite target.
+/// `Rgba16Float` keeps the dual-peel resolve, outline, and gizmo
+/// passes shading in linear space so the final 3×3 box downsample
+/// averages linear colour (correct) and the hardware encodes
+/// linear→sRGB once on the write to the surface. The peel / outline /
+/// gizmo pipelines are all built for this format.
+pub const SAMPLE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 /// GPU resources that survive across frames once `ensure_state` runs.
 /// Held inside an `Option` on the renderer so it can be lazily built on
@@ -171,10 +164,6 @@ struct GpuState {
     /// during `ensure_state`; the per-frame chain orchestration walks
     /// these by reference.
     dual_peel: DualPeelPipelines,
-
-    /// Progressive-accumulation pipelines — blend (sample into accum)
-    /// and copy (accum → surface). Built once during `ensure_state`.
-    accum_pipes: AccumulationPipelines,
 
     /// Bed renderer — owns the baked grid texture and the contact-shadow
     /// chain. See [`crate::bed`] for the off-screen silhouette → blur →
@@ -190,10 +179,11 @@ struct GpuState {
     /// per body. Sized via [`BodyUniformBuffer::ensure_capacity`].
     body_uniforms: body_uniform::BodyUniformBuffer,
 
-    /// Offscreen framebuffer (color only) for the opaque pass — bed,
-    /// mesh depth-only, and outline render into this. The resolve pass
-    /// samples this texture as `scene_color`. We allocate the depth
-    /// attachment separately so it can be made `TEXTURE_BINDING`
+    /// Offscreen background framebuffer for the opaque pass — bed +
+    /// mesh depth-only render into this. The dual-peel resolve samples
+    /// this texture as `scene_color`. Sized at `SSAA_SCALE ×` the
+    /// on-screen rect (the whole scene supersamples). We allocate the
+    /// depth attachment separately so it can be made `TEXTURE_BINDING`
     /// sample-able by the dual-peel shaders.
     framebuffer: Option<SsaaFramebuffer>,
 
@@ -216,22 +206,18 @@ struct GpuState {
     /// [`DualPeelTargets::ensure_size`].
     peel_targets: Option<DualPeelTargets>,
 
-    /// Progressive-accumulation textures: per-sample resolve target +
-    /// 2-slot ping-pong HDR accumulator. The dual-peel resolve writes
-    /// to `accum_targets.sample_view`, the blend pass folds it into
-    /// the accumulator, and the copy pass downsamples the accumulator
-    /// into `output_fb` for the final surface blit.
-    accum_targets: Option<AccumulationTargets>,
-
-    /// Final composited output — the accumulation copy pass writes
-    /// here. Held as an `SsaaFramebuffer` (with `sample_count = 1`,
-    /// no depth) so the existing `SsaaFramebuffer::blit_to` path
-    /// keeps working for the final surface composite.
-    output_fb: Option<SsaaFramebuffer>,
+    /// Offscreen scene composite target, held as an [`SsaaFramebuffer`]
+    /// in [`SAMPLE_FORMAT`] (HDR, no depth) sized at `SSAA_SCALE ×` the
+    /// on-screen rect. The dual-peel resolve, the selection outline,
+    /// and the gizmo passes all render into `scene_fb.render_view()`;
+    /// the final composite calls
+    /// [`SsaaFramebuffer::blit_downsample_3x_to`] to box-filter it down
+    /// onto the active 2-D target.
+    scene_fb: Option<SsaaFramebuffer>,
 
     /// Pipelines + uniforms for the Blender-style post-process
-    /// selection outline. Built once during `ensure_state`; runs
-    /// against `output_fb` after the accumulation copy. See
+    /// selection outline. Built once during `ensure_state`; renders
+    /// into `scene_fb` after the dual-peel resolve. See
     /// [`crate::scene_renderer::post_outline`] for the per-pass
     /// rationale.
     post_outline: OutlinePipelines,
@@ -258,8 +244,8 @@ pub struct WgpuSceneRenderer {
     /// MatterCAD: each peel iteration draws every body).
     ///
     /// Empty = "nothing to draw" — the chain still runs (the bed
-    /// composite + accumulation), but every per-body pipeline is
-    /// skipped.
+    /// composite + the SSAA downsample), but every per-body pipeline
+    /// is skipped.
     pub bodies: Vec<Body>,
     pub viewport_size: (u32, u32),
     /// Fallback tint used when `bodies` is empty (so the bed pass
@@ -347,21 +333,6 @@ pub struct WgpuSceneRenderer {
     /// each frame in response to selection / drag state, the renderer
     /// re-uploads the vertex buffer on every draw.
     pub gizmo_triangles: Vec<GizmoTriangleSet>,
-
-    /// Progressive-AA sample index. Bumped each frame that the chain
-    /// runs and clamped at [`MAX_SAMPLES`]; reset to 0 on a scene
-    /// fingerprint mismatch (see [`crate::scene_renderer::cache`]).
-    sample_count: u32,
-
-    /// Which accumulator slot holds the latest blended result. The
-    /// blend pass writes into `1 - accum_read`, then we swap.
-    accum_read: u8,
-
-    /// Last accepted scene fingerprint. `None` on the very first
-    /// frame, then `Some(prev)` while the cache is being maintained.
-    /// See [`cache::SceneFingerprint`] for the field-by-field
-    /// composition and why each input is included.
-    last_fingerprint: Option<SceneFingerprint>,
 }
 
 impl WgpuSceneRenderer {
@@ -395,9 +366,6 @@ impl WgpuSceneRenderer {
             render_style: RenderStyle::Shaded,
             gizmo_lines: Vec::new(),
             gizmo_triangles: Vec::new(),
-            sample_count: 0,
-            accum_read: 0,
-            last_fingerprint: None,
         }
     }
 
@@ -413,35 +381,33 @@ impl WgpuSceneRenderer {
             }
         }
 
-        let opaque = OpaquePipelines::new(device, surface_format, SAMPLE_COUNT);
-        // The dual-peel resolve writes into the HDR per-sample target
-        // owned by the accumulation chain — NOT the surface — so its
-        // colour attachment must use `SAMPLE_FORMAT` (`Rgba16Float`).
+        let opaque = OpaquePipelines::new(device, surface_format);
+        // The dual-peel resolve writes into the HDR scene composite
+        // target (`scene_fb`) — NOT the surface — so its colour
+        // attachment must use `SAMPLE_FORMAT` (`Rgba16Float`).
         // Mismatching the pipeline format vs the bound attachment
         // panics at draw time inside wgpu's validation layer.
         let dual_peel = DualPeelPipelines::new(device, SAMPLE_FORMAT);
-        let accum_pipes = AccumulationPipelines::new(device, surface_format);
 
         let mut bed = BedRenderer::new(
             device,
             queue,
             surface_format,
-            SAMPLE_COUNT,
             self.grid_line_color,
         );
         bed.set_dark_mode(self.grid_dark_mode);
 
-        // Post-process outline writes into the per-sample HDR target
-        // (`accum_targets.sample_view`) so it lives inside the
-        // jittered sample stream and gets averaged across 16 Halton
-        // offsets. That target's format is `SAMPLE_FORMAT`
-        // (Rgba16Float), not the surface format.
+        // Post-process outline writes into the HDR scene composite
+        // (`scene_fb`) so it supersamples with the rest of the scene
+        // and resolves through the same 3×3 box downsample. That
+        // target's format is `SAMPLE_FORMAT` (Rgba16Float), not the
+        // surface format.
         let post_outline = OutlinePipelines::new(device, SAMPLE_FORMAT);
 
-        // Gizmo line pipelines target the same per-sample HDR view
-        // (so gizmos AA-smooth with the rest of the scene) and depth-
-        // test the solid variant against `scene_depth` (the opaque
-        // pass's depth attachment).
+        // Gizmo line pipelines target the same HDR scene view (so
+        // gizmos AA-smooth with the rest of the scene) and depth-test
+        // the solid variant against `scene_depth` (the opaque pass's
+        // depth attachment).
         let gizmo_pipelines = GizmoLinePipelines::new(
             device,
             SAMPLE_FORMAT,
@@ -452,7 +418,6 @@ impl WgpuSceneRenderer {
             surface_format,
             opaque,
             dual_peel,
-            accum_pipes,
             bed,
             bodies_gpu: Vec::new(),
             body_uniforms: body_uniform::BodyUniformBuffer::new(),
@@ -460,33 +425,33 @@ impl WgpuSceneRenderer {
             scene_depth: None,
             scene_depth_color: None,
             peel_targets: None,
-            accum_targets: None,
-            output_fb: None,
+            scene_fb: None,
             post_outline,
             outline_targets: None,
             gizmo_pipelines,
         });
     }
 
-    /// Lazily allocate (or resize) the offscreen framebuffer, the
-    /// sample-able scene-depth texture, the dual-peel targets, and the
-    /// final output framebuffer. Cheap when the size is stable.
+    /// Lazily allocate (or resize) every offscreen scene target at
+    /// `SSAA_SCALE × {w, h}` — the background framebuffer, the
+    /// sample-able scene-depth texture, the dual-peel targets, the HDR
+    /// scene composite (`scene_fb`), and the outline targets. `(w, h)`
+    /// is the **on-screen** widget size; this multiplies by
+    /// [`SSAA_SCALE`] so the whole scene supersamples. Cheap when the
+    /// size is stable.
     fn ensure_framebuffer(&mut self, device: &wgpu::Device, w: u32, h: u32) {
         let s = match &mut self.state {
             Some(s) => s,
             None => return,
         };
         let format = s.surface_format;
-        let w = w.max(1);
-        let h = h.max(1);
+        // Supersample dimensions — every scene target renders at this
+        // size; the final composite box-downsamples it to `(w, h)`.
+        let w = (w.max(1)) * SSAA_SCALE;
+        let h = (h.max(1)) * SSAA_SCALE;
         match &mut s.framebuffer {
             Some(fb) => fb.ensure_size(device, w, h),
             None => {
-                // SSAA has no MSAA sample-count — the upstream
-                // `demo_wgpu` API renamed `MsaaFramebuffer` to
-                // `SsaaFramebuffer` and dropped the sample-count
-                // arg. The downsample that used to happen via MSAA
-                // resolve now runs as an explicit blit later.
                 s.framebuffer = Some(SsaaFramebuffer::new(
                     device,
                     w,
@@ -504,18 +469,17 @@ impl WgpuSceneRenderer {
             Some(t) => t.ensure_size(device, w, h),
             None => s.peel_targets = Some(DualPeelTargets::new(device, w, h, format)),
         }
-        match &mut s.accum_targets {
-            Some(t) => t.ensure_size(device, w, h),
-            None => s.accum_targets = Some(AccumulationTargets::new(device, w, h)),
-        }
-        match &mut s.output_fb {
+        match &mut s.scene_fb {
             Some(fb) => fb.ensure_size(device, w, h),
             None => {
-                s.output_fb = Some(SsaaFramebuffer::new(
+                // HDR (SAMPLE_FORMAT) so the dual-peel / outline / gizmo
+                // passes — all built for SAMPLE_FORMAT — render into it
+                // and the 3×3 box downsample averages linear colour.
+                s.scene_fb = Some(SsaaFramebuffer::new(
                     device,
                     w,
                     h,
-                    format,
+                    SAMPLE_FORMAT,
                     /* with_depth */ false,
                 ));
             }
@@ -708,8 +672,8 @@ impl WgpuSceneRenderer {
 }
 
 /// Quantise an RGBA colour to a 32-bit packed key — 8 bits per
-/// channel. Same packing as the cache fingerprint so cbuf rebuilds
-/// align with accumulation restarts.
+/// channel. Used as the tertiary body-cache key so a Color-node tint
+/// change (with no per-vertex overlay) rebuilds the colour VBO.
 fn pack_color_q(c: [f32; 4]) -> u32 {
     let to_u8 = |x: f32| (x.clamp(0.0, 1.0) * 255.0).round() as u32;
     (to_u8(c[0]) << 24) | (to_u8(c[1]) << 16) | (to_u8(c[2]) << 8) | to_u8(c[3])

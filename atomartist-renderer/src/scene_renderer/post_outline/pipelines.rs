@@ -68,8 +68,8 @@ impl OutlinePipelines {
     /// `output_format` is the format of the texture the edge-detect
     /// quad writes into — must match the texture passed as the colour
     /// attachment in `execute_edge_pass`. For the main viewport this
-    /// is the renderer's surface format (the same `output_fb` the
-    /// accumulation chain writes to).
+    /// is `scene_renderer::SAMPLE_FORMAT` (the HDR `scene_fb` composite
+    /// the outline draws into before the 3×3 downsample).
     pub fn new(device: &wgpu::Device, output_format: wgpu::TextureFormat) -> Self {
         let (id_pipeline, id_bgl) = build_id_pipeline(device);
         let id_ub = device.create_buffer(&wgpu::BufferDescriptor {
@@ -143,7 +143,7 @@ impl OutlinePipelines {
     }
 
     /// Drive the full ID-prepass + edge-detect chain into `encoder`.
-    /// Caller has already populated `uniforms` (with the jittered MVP)
+    /// Caller has already populated `uniforms` (with the scene MVP)
     /// and verified there's a mesh to outline.
     ///
     /// Order of operations:
@@ -153,8 +153,8 @@ impl OutlinePipelines {
     ///    selected mesh.
     /// 3. Edge-detect quad reads the mask + selected depth + the
     ///    full-scene depth mirror, alpha-blends an outline ring over
-    ///    `output_view` (typically the per-sample HDR target so the
-    ///    outline gets folded into the accumulation chain).
+    ///    `output_view` (the HDR scene composite, so the outline
+    ///    supersamples with the rest of the scene).
     #[allow(clippy::too_many_arguments)]
     pub fn execute<'a>(
         &self,
@@ -409,8 +409,8 @@ fn build_edge_pipeline(
             targets: &[Some(wgpu::ColorTargetState {
                 format: output_format,
                 // Standard OVER alpha blend so the outline composites
-                // on top of the accumulation chain's output without
-                // touching pixels the shader discards.
+                // on top of the scene composite without touching pixels
+                // the shader discards.
                 blend: Some(wgpu::BlendState {
                     color: wgpu::BlendComponent {
                         src_factor: wgpu::BlendFactor::SrcAlpha,

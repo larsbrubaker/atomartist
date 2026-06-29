@@ -10,33 +10,6 @@ fn renderer_is_constructible() {
     assert!(r.bodies.is_empty());
 }
 
-/// Regression: `WgpuSceneRenderer::render` must update `viewport_size`
-/// from the per-frame `ctx.screen_rect` BEFORE computing the scene
-/// fingerprint. Without the update the fingerprint never sees a
-/// resize — when the user drags the 3D / node-canvas splitter, the
-/// underlying GPU framebuffers reallocate to the new size while the
-/// cache reports `Hit` against the old fingerprint, and the
-/// renderer short-circuits to a blit of an empty texture. Verified
-/// statically because exercising render() requires a wgpu device.
-#[test]
-fn viewport_size_assigned_before_fingerprint() {
-    let src = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/scene_renderer/render_impl.rs",
-    ))
-    .expect("read render_impl.rs");
-    let viewport_assign = src
-        .find("self.viewport_size = (fb_w, fb_h)")
-        .expect("render_impl.rs must assign self.viewport_size from screen_rect");
-    let fingerprint_call = src
-        .find("SceneFingerprint::from_renderer(self)")
-        .expect("render_impl.rs must call SceneFingerprint::from_renderer");
-    assert!(
-        viewport_assign < fingerprint_call,
-        "viewport_size must be assigned BEFORE SceneFingerprint::from_renderer, otherwise the cache misses a splitter / window resize",
-    );
-}
-
 /// Bed is currently hard-locked to `0.0` (ignoring `grid_z` too) so
 /// no codepath can drift it while the bed-Z offset is reworked.
 #[test]

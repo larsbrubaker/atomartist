@@ -3,8 +3,6 @@
 //! guardrail. Nothing here owns rendering state; these are stateless
 //! utilities that the impl blocks call directly.
 
-use super::SAMPLE_COUNT;
-
 /// Format of the auxiliary "depth-as-colour" attachment that mirrors
 /// the opaque-pass depth into a sampleable colour texture. R32Float
 /// is the smallest single-channel float format every wgpu backend
@@ -35,7 +33,7 @@ pub(super) fn ensure_scene_depth(
             depth_or_array_layers: 1,
         },
         mip_level_count: 1,
-        sample_count: SAMPLE_COUNT,
+        sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Depth32Float,
         // Used as the depth attachment only — the dual-peel chain
@@ -75,7 +73,7 @@ pub(super) fn ensure_scene_depth_color(
             depth_or_array_layers: 1,
         },
         mip_level_count: 1,
-        sample_count: SAMPLE_COUNT,
+        sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: SCENE_DEPTH_COLOR_FORMAT,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,

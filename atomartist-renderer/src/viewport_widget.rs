@@ -47,7 +47,7 @@ use viewport_widget_helpers::{
     cross3, dot3, estimate_outline_width, mouse_button_bit, normalize3, project,
     selected_body_world_aabb, stroke_circle, sub3, vert_pos,
 };
-use crate::scene_renderer::{GizmoLineSet, RenderStyle, WgpuSceneRenderer};
+use crate::scene_renderer::WgpuSceneRenderer;
 
 #[path = "viewport_widget/inputs.rs"]
 mod inputs;
@@ -240,19 +240,6 @@ impl Viewport3dWidget {
     /// control-gizmo wiring).
     fn current_geometry(&self) -> Option<Arc<Geometry3d>> {
         self.inputs.last_mesh_output.lock().ok().and_then(|g| g.clone())
-    }
-
-    /// Mesh-only convenience used by raycast / fit-to-bounds /
-    /// software fallback callers that don't care about the matrix or
-    /// colour.
-    fn current_mesh(&self) -> Option<Arc<MeshGL>> {
-        // Single-mesh callers read the first body. Multi-body
-        // viewport rendering (one draw call per body, each with its
-        // own base_color) is a follow-up pass; this fallback keeps
-        // raycast / fit-to-bounds / software-render paths working
-        // through phase 1.
-        self.current_geometry()
-            .and_then(|g| g.first().map(|b| b.mesh.clone()))
     }
 
     /// Re-fit the camera to the last seen mesh's AABB. Used by the Home

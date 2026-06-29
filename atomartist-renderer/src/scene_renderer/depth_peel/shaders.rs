@@ -26,9 +26,8 @@
 //!    the front accumulator (premultiplied) and the back accumulator
 //!    (straight) using [`MatterCAD's `ResolveForComposition`
 //!    formula`](../../../../../../MatterCAD/Submodules/agg-sharp/VorticeD3D/DualDepthPeelingMath.cs).
-//!    The output goes into a single-sample resolved texture in the
-//!    surface format, which the accumulation chain then samples per
-//!    jitter pass.
+//!    The output goes straight into the HDR scene composite that the
+//!    renderer box-downsamples to the widget rect.
 //!
 //! The shader-side discard tolerance (`PEEL_BIAS = 1e-5`) is identical
 //! to MatterCAD's `DepthPeelBias`, so iteration-count behaviour is
@@ -272,8 +271,7 @@ fn fs(in: VOut) -> PeelOut {
 /// * `back_accum`  — straight-alpha back accumulation (`Rgba16Float`).
 ///
 /// The output is the composited opaque-over-back-over-front colour at
-/// each pixel, written straight into the renderer's `resolved` texture
-/// (surface format) so the accumulation chain can sample it.
+/// each pixel, written straight into the renderer's HDR scene composite.
 pub const DUAL_PEEL_RESOLVE_SHADER: &str = r#"
 @group(0) @binding(0) var scene_color: texture_2d<f32>;
 @group(0) @binding(1) var front_accum: texture_2d<f32>;

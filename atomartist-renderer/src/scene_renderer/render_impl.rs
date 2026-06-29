@@ -10,10 +10,6 @@ use bytemuck::cast_slice;
 use demo_wgpu::{WgpuCustomRender, WgpuCustomRenderCtx};
 use glam::Mat4;
 
-use super::accumulation::{
-    apply_jitter_to_proj, jitter_offset, MAX_SAMPLES,
-};
-use super::cache::{handle_cache_hit, CacheOutcome, SceneFingerprint};
 use super::depth_peel::pipelines::{BodyDrawHandle, PeelUniforms};
 use super::depth_peel::{iteration_count, DEFAULT_LAYERS};
 use super::opaque_pass::Uniforms;
@@ -154,28 +150,33 @@ impl WgpuCustomRender for WgpuSceneRenderer {
         self.ensure_state(ctx.device, ctx.queue, ctx.surface_format);
         let ensure_ms = elapsed_ms(t_ensure);
 
-        // Pixel size of the viewport widget rect.  The framebuffer matches
-        // this exactly (1:1 mapping), so blit_to runs an effectively no-op
-        // bilinear sampler.
-        let fb_w = ctx.screen_rect.width.max(1.0) as u32;
-        let fb_h = ctx.screen_rect.height.max(1.0) as u32;
-        if fb_w == 0 || fb_h == 0 {
+        // On-screen pixel size of the viewport widget rect. The
+        // offscreen scene targets are allocated at `SSAA_SCALE ×` this
+        // (see `ensure_framebuffer`); the final composite box-filters
+        // them back down to this rect.
+        let screen_w = ctx.screen_rect.width.max(1.0) as u32;
+        let screen_h = ctx.screen_rect.height.max(1.0) as u32;
+        if screen_w == 0 || screen_h == 0 {
             return;
         }
+        // Supersample dimensions — all scene render passes set their
+        // viewport / scissor / resolution uniform to these so
+        // pixel-space effects (outline width, fragment derivatives)
+        // scale with the oversized buffer.
+        let fb_w = screen_w * super::SSAA_SCALE;
+        let fb_h = screen_h * super::SSAA_SCALE;
 
-        // Keep `viewport_size` in lockstep with the framebuffer dimensions
-        // pulled from `ctx.screen_rect`. The cache fingerprint feeds
-        // `viewport_size` into `fb_size` + the projection's aspect ratio,
-        // so a resize (window resize, splitter drag, etc.) only invalidates
-        // the cache when this field reflects the new dimensions. Without
-        // this assignment the field stays at its `(0, 0)` initial value
-        // forever, the fingerprint never sees a resize, and after the
-        // accumulator converges the renderer short-circuits to a blit of
-        // a freshly-reallocated (empty) output framebuffer.
-        self.viewport_size = (fb_w, fb_h);
+        // Keep `viewport_size` in lockstep with the on-screen rect from
+        // `ctx.screen_rect` — it feeds the projection's aspect ratio.
+        // Without this assignment the field stays at its `(0, 0)`
+        // initial value forever and the aspect ratio never tracks a
+        // window resize / splitter drag.
+        self.viewport_size = (screen_w, screen_h);
 
         let t_fb = web_time::Instant::now();
-        self.ensure_framebuffer(ctx.device, fb_w, fb_h);
+        // Pass the on-screen size — `ensure_framebuffer` multiplies by
+        // SSAA_SCALE to size the oversized scene targets.
+        self.ensure_framebuffer(ctx.device, screen_w, screen_h);
         let fb_ms = elapsed_ms(t_fb);
         let t_mesh = web_time::Instant::now();
         let body_buffer_realloc = self.ensure_body_buffers(ctx.device, ctx.queue);
@@ -207,23 +208,6 @@ impl WgpuCustomRender for WgpuSceneRenderer {
             s.bed.set_dark_mode(grid_dark);
         }
 
-        // ── Fingerprint / cache hit check ────────────────────────────────
-        let current_fp = SceneFingerprint::from_renderer(self);
-        let outcome = handle_cache_hit(
-            &mut self.last_fingerprint,
-            current_fp,
-            &mut self.sample_count,
-        );
-        if matches!(outcome, CacheOutcome::Miss) {
-            // Restart the accumulator from sample 0 — the blend pass
-            // will pick `weight = 1` so the read slot's stale value
-            // is ignored. `accum_read` doesn't need to change; we
-            // just swap slots on each sample.
-        }
-
-        let sample_count_before = self.sample_count;
-        let accum_read_before = self.accum_read;
-
         let s = match &self.state {
             Some(s) => s,
             None => return,
@@ -244,45 +228,24 @@ impl WgpuCustomRender for WgpuSceneRenderer {
             Some(t) => t,
             None => return,
         };
-        let accum_targets = match &s.accum_targets {
-            Some(t) => t,
-            None => return,
-        };
-        let output_fb = match &s.output_fb {
+        let scene_fb = match &s.scene_fb {
             Some(fb) => fb,
             None => return,
         };
+        let scene_view = scene_fb.render_view();
 
-        let aspect = fb_w as f32 / fb_h.max(1) as f32;
+        let aspect = screen_w as f32 / screen_h.max(1) as f32;
         let view = Mat4::from_cols_array(&self.camera.view_matrix());
         let proj = Mat4::from_cols_array(&self.camera.projection_matrix(aspect));
 
-        let already_converged = sample_count_before >= MAX_SAMPLES;
-        if already_converged {
-            output_fb.blit_to(
-                ctx.device,
-                ctx.encoder,
-                ctx.target_view,
-                ctx.target_size,
-                ctx.screen_rect,
-                ctx.parent_clip,
-                ctx.pipelines,
-            );
-            return;
-        }
-
-        let (jx, jy) = jitter_offset(sample_count_before);
-        let mut proj_arr = proj.to_cols_array();
-        apply_jitter_to_proj(&mut proj_arr, jx, jy, fb_w as f32, fb_h as f32);
-        let jittered_proj = Mat4::from_cols_array(&proj_arr);
-        let mvp = (jittered_proj * view).to_cols_array();
-        let jittered_proj_arr = jittered_proj.to_cols_array();
+        let mvp = (proj * view).to_cols_array();
+        let proj_arr = proj.to_cols_array();
         let view_arr = view.to_cols_array();
         let l0 = normalize3(self.light_dir);
         let l1 = normalize3(self.light_dir1);
         let to_vec4 = |v: [f32; 3]| [v[0], v[1], v[2], 0.0];
         let uniforms = Uniforms {
-            proj: jittered_proj_arr,
+            proj: proj_arr,
             view: view_arr,
             light_dir0: to_vec4(l0),
             light_dir1: to_vec4(l1),
@@ -350,7 +313,7 @@ impl WgpuCustomRender for WgpuSceneRenderer {
                 color_attachments: &[
                     Some(wgpu::RenderPassColorAttachment {
                         view: fb.render_view(),
-                        resolve_target: None, // SSAA: no MSAA resolve; downsample is a later blit
+                        resolve_target: None, // SSAA: downsample is a later blit
                         depth_slice: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
@@ -439,7 +402,7 @@ impl WgpuCustomRender for WgpuSceneRenderer {
             peel_targets,
             scene_depth_color_view,
             fb.render_view(),
-            &accum_targets.sample_view,
+            scene_view,
             &body_handles,
             &peel_uniforms,
             iterations,
@@ -483,7 +446,7 @@ impl WgpuCustomRender for WgpuSceneRenderer {
                 // moment it's translated or rotated.
                 let model =
                     Mat4::from_cols_array(&outline_model_matrix(&self.bodies, outline_idx));
-                let outline_mvp = (jittered_proj * view * model).to_cols_array();
+                let outline_mvp = (proj * view * model).to_cols_array();
                 let outline_u = OutlineUniforms {
                     mvp: outline_mvp,
                     outline_color: self.outline_color,
@@ -497,7 +460,7 @@ impl WgpuCustomRender for WgpuSceneRenderer {
                     &outline_u,
                     outline_targets,
                     scene_depth_color_view,
-                    &accum_targets.sample_view,
+                    scene_view,
                     post_outline::pipelines_mesh::Mesh {
                         vbuf: &body.vbuf,
                         ibuf: &body.ibuf,
@@ -515,13 +478,13 @@ impl WgpuCustomRender for WgpuSceneRenderer {
                 .as_ref()
                 .map(Mat4::from_cols_array)
                 .unwrap_or(Mat4::IDENTITY);
-            let gmvp = (jittered_proj * view * model).to_cols_array();
+            let gmvp = (proj * view * model).to_cols_array();
             s.gizmo_pipelines.execute(
                 ctx.device,
                 ctx.encoder,
                 gizmo,
                 gmvp,
-                &accum_targets.sample_view,
+                scene_view,
                 scene_depth_view,
                 (fb_w, fb_h),
             );
@@ -535,41 +498,28 @@ impl WgpuCustomRender for WgpuSceneRenderer {
                 .as_ref()
                 .map(Mat4::from_cols_array)
                 .unwrap_or(Mat4::IDENTITY);
-            let gmvp = (jittered_proj * view * model).to_cols_array();
+            let gmvp = (proj * view * model).to_cols_array();
             s.gizmo_pipelines.execute_tri(
                 ctx.device,
                 ctx.encoder,
                 gizmo,
                 gmvp,
-                &accum_targets.sample_view,
+                scene_view,
                 scene_depth_view,
                 (fb_w, fb_h),
             );
         }
 
-        // ── Pass 3: progressive accumulation ──────────────────────────────
-        let t_accum = web_time::Instant::now();
-        let new_read = s.accum_pipes.execute_blend(
-            ctx.device,
-            ctx.queue,
-            ctx.encoder,
-            accum_targets,
-            sample_count_before,
-            accum_read_before,
-        );
-        s.accum_pipes.execute_copy_to_surface(
-            ctx.device,
-            ctx.encoder,
-            accum_targets,
-            new_read,
-            output_fb.render_view(),
-            (fb_w, fb_h),
-        );
-        let accum_ms = elapsed_ms(t_accum);
-
-        // ── Pass 4: composite resolved scene onto the active 2-D target ────
+        // ── Pass 3: box-downsample the SSAA scene onto the 2-D target ─────
+        //
+        // `scene_fb` is `SSAA_SCALE ×` the on-screen rect in HDR
+        // (SAMPLE_FORMAT). `blit_downsample_3x_to` runs the 9-tap 3×3
+        // box filter so all 9 supersampled texels under each output
+        // pixel contribute equally, and writes to the surface-format
+        // 2-D target (the hardware encodes linear→sRGB on store). One
+        // pass, fully anti-aliased.
         let t_blit = web_time::Instant::now();
-        output_fb.blit_to(
+        scene_fb.blit_downsample_3x_to(
             ctx.device,
             ctx.encoder,
             ctx.target_view,
@@ -580,17 +530,6 @@ impl WgpuCustomRender for WgpuSceneRenderer {
         );
         let blit_ms = elapsed_ms(t_blit);
 
-        self.sample_count = sample_count_before + 1;
-        self.accum_read = new_read;
-        if self.sample_count < MAX_SAMPLES {
-            // IMPORTANT: must NOT call `request_draw()` — that
-            // advances the global invalidation epoch and forces every
-            // retained 2-D widget cache to rebuild for the duration
-            // of accumulation. Our visual change is confined to this
-            // widget's own composite, so the no-invalidation variant
-            // is the precise tool.
-            agg_gui::animation::request_draw_without_invalidation();
-        }
         let total_ms = elapsed_ms(t_total);
         log_scene_timings(SceneTimings {
             total_ms,
@@ -600,7 +539,6 @@ impl WgpuCustomRender for WgpuSceneRenderer {
             bed_composite_ms,
             bed_ran_chain,
             peel_ms,
-            accum_ms,
             blit_ms,
         });
     }

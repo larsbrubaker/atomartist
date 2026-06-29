@@ -90,7 +90,6 @@ pub(super) enum CameraDrag {
     /// `MoveInZControl` follows the same skew-line projection.
     DragBodyZ {
         node_id: NodeId,
-        start_local: Point,
         /// XY of the body's anchor (the gizmo sphere's XY when the
         /// drag started). Stays fixed across the drag so the handle
         /// only moves up / down.

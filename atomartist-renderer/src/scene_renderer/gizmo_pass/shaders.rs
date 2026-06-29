@@ -18,8 +18,8 @@
 //! per-frame uniform write is cheap.
 
 /// Uniform layout consumed by the gizmo line shader. `mvp` is the
-/// renderer's jittered projection × view × model (model defaults to
-/// identity but the gizmo can apply its own transform by passing a
+/// renderer's projection × view × model (model defaults to identity
+/// but the gizmo can apply its own transform by passing a
 /// matrix-folded mvp). `color` is RGBA; the overlay pass folds the
 /// occluded-alpha multiplier into this colour before writing the
 /// uniform.

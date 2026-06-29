@@ -10,7 +10,7 @@
 //!   frame, blurs it, and composites the bed grid + blurred shadow
 //!   into a mipmapped offscreen texture.
 //! * `BedRenderer` owns the bed quad pipeline that samples the
-//!   composite texture and draws into the main MSAA framebuffer.
+//!   composite texture and draws into the scene framebuffer.
 //!
 //! The exported entry points (`new`, `render_to_composite`,
 //! `draw_bed`, `set_line_color`, `set_dark_mode`) are the only API
@@ -74,7 +74,7 @@ struct BedQuadVertex {
 
 /// Bed-rendering glue. Holds the per-frame contact-shadow chain plus
 /// the per-frame bed-quad pipeline that draws the composite texture
-/// into the scene renderer's MSAA framebuffer.
+/// into the scene renderer's framebuffer.
 pub struct BedRenderer {
     /// Surface format threaded through from
     /// [`demo_wgpu::WgpuCustomRenderCtx`] — drives the bed quad's
@@ -116,15 +116,14 @@ pub struct BedRenderer {
 }
 
 impl BedRenderer {
-    /// Construct the bed renderer for the given surface format and
-    /// MSAA sample count. The grid texture is baked immediately with
-    /// `initial_line_color`; callers can re-bake by calling
-    /// [`Self::set_line_color`] when the theme flips.
+    /// Construct the bed renderer for the given surface format. The
+    /// grid texture is baked immediately with `initial_line_color`;
+    /// callers can re-bake by calling [`Self::set_line_color`] when the
+    /// theme flips.
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         surface_format: wgpu::TextureFormat,
-        msaa_sample_count: u32,
         initial_line_color: [f32; 4],
     ) -> Self {
         let chain = ShadowChain::new(device, surface_format);
@@ -139,9 +138,9 @@ impl BedRenderer {
         // texture is pixel-aligned at bake time (see
         // `bed::texture::paint_grid_rgba`), so the on-screen lines
         // remain crisp without resorting to nearest sampling. The
-        // 16-tap progressive jitter accumulator in
-        // [`crate::scene_renderer::accumulation`] handles any
-        // remaining sub-pixel aliasing at oblique camera angles.
+        // 3×3 SSAA supersampling of the whole 3-D scene (see
+        // [`crate::scene_renderer`]) handles any remaining sub-pixel
+        // aliasing at oblique camera angles.
         let bed_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("atomartist bed quad sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -171,8 +170,7 @@ impl BedRenderer {
             usage: wgpu::BufferUsages::VERTEX,
         });
 
-        let (bed_pipeline, bed_bgl) =
-            build_bed_pipeline(device, surface_format, msaa_sample_count);
+        let (bed_pipeline, bed_bgl) = build_bed_pipeline(device, surface_format);
 
         let bed_ub = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("atomartist bed quad ub"),
@@ -376,7 +374,6 @@ impl std::fmt::Debug for CompositeKey {
 fn build_bed_pipeline(
     device: &wgpu::Device,
     surface_format: wgpu::TextureFormat,
-    msaa_sample_count: u32,
 ) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout) {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("atomartist bed quad shader"),
@@ -457,11 +454,7 @@ fn build_bed_pipeline(
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
-        multisample: wgpu::MultisampleState {
-            count: msaa_sample_count,
-            mask: !0,
-            alpha_to_coverage_enabled: false,
-        },
+        multisample: wgpu::MultisampleState::default(),
         fragment: Some(wgpu::FragmentState {
             module: &shader,
             entry_point: Some("fs"),
@@ -525,7 +518,6 @@ mod tests {
             &device,
             &queue,
             wgpu::TextureFormat::Rgba8UnormSrgb,
-            1,
             [0.55, 0.58, 0.66, 0.7],
         );
         // Surface format round-trips through the renderer.

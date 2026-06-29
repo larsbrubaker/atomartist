@@ -5,17 +5,11 @@
 //! See [`shaders`] for the GLSL → WGSL behavioural notes and
 //! [`pipelines`] for the wgpu wiring details.
 //!
-//! The outline runs as the LAST 3-D pass — after the dual-peel + the
-//! progressive accumulation has populated `output_fb` with the
-//! final-sample image. Drawing on top of `output_fb` (rather than the
-//! per-sample target) means:
-//!
-//! * The outline isn't jittered along with the rest of the scene, so
-//!   it stays a crisp 1-2 pixel rim even at sample-count 1.
-//! * Once the accumulation cache converges (sample_count >=
-//!   MAX_SAMPLES), the cached `output_fb` already contains the
-//!   outline baked in — the short-circuit path that just re-blits
-//!   `output_fb` to the surface keeps showing the outline correctly.
+//! The outline runs after the dual-peel resolve, drawing on top of
+//! the HDR scene composite (`scene_fb`) before the final 3×3 box
+//! downsample. It therefore supersamples along with the rest of the
+//! scene — the oversized buffer keeps the rim crisp, and the
+//! downsample anti-aliases it together with the geometry in one pass.
 //!
 //! ## Single-mesh assumption
 //!

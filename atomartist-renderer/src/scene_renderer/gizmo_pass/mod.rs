@@ -13,11 +13,11 @@
 //!
 //! ## Rendering order
 //!
-//! Gizmos run INSIDE the per-sample stream — between the dual-peel
-//! resolve and the accumulation blend, after the post-process
-//! outline. That ordering means:
+//! Gizmos run into the HDR scene composite (`scene_fb`) after the
+//! dual-peel resolve and the post-process outline, before the final
+//! 3×3 box downsample. That ordering means:
 //!
-//! * Gizmos get jittered along with the rest of the scene → 16×
+//! * Gizmos supersample along with the rest of the scene → a smoothly
 //!   anti-aliased rim, same as the outline.
 //! * The solid variant depth-tests against `scene_depth`, which the
 //!   opaque pass populated, so gizmos hide behind closer geometry.
@@ -78,63 +78,6 @@ pub struct GizmoTriangleSet {
     pub occluded_alpha: f32,
 }
 
-impl std::hash::Hash for GizmoTriangleSet {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        for v in &self.vertices {
-            for &f in v {
-                f.to_bits().hash(state);
-            }
-        }
-        for &c in &self.color {
-            c.to_bits().hash(state);
-        }
-        match self.matrix {
-            Some(m) => {
-                1u8.hash(state);
-                for &f in &m {
-                    f.to_bits().hash(state);
-                }
-            }
-            None => 0u8.hash(state),
-        }
-        self.draw_solid.hash(state);
-        self.draw_overlay.hash(state);
-        self.occluded_alpha.to_bits().hash(state);
-    }
-}
-
-/// Cache fingerprint over a slice of filled-triangle gizmo sets — the
-/// triangle-pass analogue of [`hash_gizmos`].
-pub fn hash_gizmo_tris(sets: &[GizmoTriangleSet]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    sets.len().hash(&mut h);
-    for g in sets {
-        g.hash(&mut h);
-    }
-    h.finish()
-}
-
-/// Compute a deterministic cache fingerprint over a slice of gizmos.
-/// Used by [`crate::scene_renderer::cache::SceneFingerprint`] to
-/// reset the accumulation chain when gizmo state changes — when a
-/// bounds box resizes, when the user selects a different gizmo, etc.
-///
-/// Hashes every field that affects the rendered pixels, including
-/// vertices and matrices. For typical gizmos (≤ a few hundred
-/// vertices total across all gizmos) the cost is negligible per
-/// frame; if a future gizmo pushes thousands of vertices this can
-/// be replaced with a host-side memoised signature.
-pub fn hash_gizmos(gizmos: &[GizmoLineSet]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    gizmos.len().hash(&mut h);
-    for g in gizmos {
-        g.hash(&mut h);
-    }
-    h.finish()
-}
-
 /// Host-side description of one gizmo's line segments. Pushed into
 /// [`super::WgpuSceneRenderer::gizmo_lines`] each frame.
 #[derive(Clone, Debug)]
@@ -157,34 +100,6 @@ pub struct GizmoLineSet {
     /// bounds gizmo and 0.35 for the control gizmos. Ignored when
     /// `draw_overlay = false`.
     pub occluded_alpha: f32,
-}
-
-impl std::hash::Hash for GizmoLineSet {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        // `f32` doesn't implement `Hash` (NaN!=NaN), so hash the bit
-        // pattern — fingerprint cares about byte equality, not IEEE
-        // numerical equality.
-        for v in &self.vertices {
-            for &f in v {
-                f.to_bits().hash(state);
-            }
-        }
-        for &c in &self.color {
-            c.to_bits().hash(state);
-        }
-        match self.matrix {
-            Some(m) => {
-                1u8.hash(state);
-                for &f in &m {
-                    f.to_bits().hash(state);
-                }
-            }
-            None => 0u8.hash(state),
-        }
-        self.draw_solid.hash(state);
-        self.draw_overlay.hash(state);
-        self.occluded_alpha.to_bits().hash(state);
-    }
 }
 
 #[cfg(test)]
@@ -267,55 +182,6 @@ mod tests {
         // first edge of the bottom face.
         assert_eq!(set.vertices[0][2], -3.0);
         assert_eq!(set.vertices[1][2], -3.0);
-    }
-
-    /// Hash changes when any field changes. Negation: identical
-    /// gizmos hash identically (so the cache doesn't restart the
-    /// accumulator on every frame for stable gizmos).
-    #[test]
-    fn gizmo_hash_is_deterministic_and_change_sensitive() {
-        let a = GizmoLineSet::bounds_box([0.0, 0.0, 0.0], [1.0, 1.0, 1.0], None);
-        let b = GizmoLineSet::bounds_box([0.0, 0.0, 0.0], [1.0, 1.0, 1.0], None);
-        assert_eq!(hash_gizmos(std::slice::from_ref(&a)), hash_gizmos(std::slice::from_ref(&b)));
-        let c = GizmoLineSet::bounds_box([1.0, 0.0, 0.0], [1.0, 1.0, 1.0], None);
-        assert_ne!(hash_gizmos(std::slice::from_ref(&a)), hash_gizmos(std::slice::from_ref(&c)));
-    }
-
-    /// Triangle-gizmo hash mirrors the line-gizmo hash: same gizmo →
-    /// same hash, any vertex / colour / matrix change rolls it. Sized
-    /// so the cache fingerprint can XOR the line + tri hashes without
-    /// losing change-sensitivity.
-    #[test]
-    fn gizmo_tri_hash_is_deterministic_and_change_sensitive() {
-        let make = |verts: Vec<[f32; 3]>, color: [f32; 4]| GizmoTriangleSet {
-            vertices: verts,
-            color,
-            matrix: None,
-            draw_solid: true,
-            draw_overlay: true,
-            occluded_alpha: 0.35,
-        };
-        let tri = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
-        let a = make(tri.clone(), [1.0, 0.0, 0.0, 1.0]);
-        let b = make(tri.clone(), [1.0, 0.0, 0.0, 1.0]);
-        assert_eq!(
-            hash_gizmo_tris(std::slice::from_ref(&a)),
-            hash_gizmo_tris(std::slice::from_ref(&b)),
-            "identical triangle gizmos must hash identically",
-        );
-        let c = make(tri.clone(), [0.0, 1.0, 0.0, 1.0]);
-        assert_ne!(
-            hash_gizmo_tris(std::slice::from_ref(&a)),
-            hash_gizmo_tris(std::slice::from_ref(&c)),
-            "changing color must roll the hash",
-        );
-        let moved_tri = vec![[5.0, 0.0, 0.0], [6.0, 0.0, 0.0], [5.0, 1.0, 0.0]];
-        let d = make(moved_tri, [1.0, 0.0, 0.0, 1.0]);
-        assert_ne!(
-            hash_gizmo_tris(std::slice::from_ref(&a)),
-            hash_gizmo_tris(std::slice::from_ref(&d)),
-            "changing vertex positions must roll the hash",
-        );
     }
 }
 

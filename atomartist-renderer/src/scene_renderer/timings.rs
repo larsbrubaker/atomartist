@@ -19,7 +19,6 @@ pub(super) struct SceneTimings {
     pub(super) bed_composite_ms: f32,
     pub(super) bed_ran_chain: bool,
     pub(super) peel_ms: f32,
-    pub(super) accum_ms: f32,
     pub(super) blit_ms: f32,
 }
 
@@ -69,7 +68,7 @@ pub(super) fn log_scene_timings(t: SceneTimings) {
         let max_total = buf.iter().map(|t| t.total_ms).fold(0.0_f32, f32::max);
         let chain_hits = buf.iter().filter(|t| t.bed_ran_chain).count();
         eprintln!(
-            "[scene {:>3} samples] total avg={:.2} max={:.2} ms | ensure={:.3} fb={:.3} mesh={:.3} bed_comp={:.3} peel={:.3} accum={:.3} blit={:.3} | chain_runs={}/{}",
+            "[scene {:>3} frames] total avg={:.2} max={:.2} ms | ensure={:.3} fb={:.3} mesh={:.3} bed_comp={:.3} peel={:.3} downsample={:.3} | chain_runs={}/{}",
             buf.len(),
             avg(|t| t.total_ms),
             max_total,
@@ -78,7 +77,6 @@ pub(super) fn log_scene_timings(t: SceneTimings) {
             avg(|t| t.mesh_ms),
             avg(|t| t.bed_composite_ms),
             avg(|t| t.peel_ms),
-            avg(|t| t.accum_ms),
             avg(|t| t.blit_ms),
             chain_hits,
             buf.len(),

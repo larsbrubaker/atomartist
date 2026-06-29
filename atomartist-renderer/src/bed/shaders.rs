@@ -153,10 +153,10 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// Bed-quad shader — final draw of the floor into the main offscreen
-/// MSAA framebuffer. Samples the composite texture and writes
-/// premultiplied alpha that blends cleanly with the model and outline
-/// passes that follow.
+/// Bed-quad shader — final draw of the floor into the offscreen scene
+/// framebuffer. Samples the composite texture and writes premultiplied
+/// alpha that blends cleanly with the model and outline passes that
+/// follow.
 pub(super) const BED_QUAD_SHADER: &str = r#"
 struct U {
     mvp: mat4x4<f32>,

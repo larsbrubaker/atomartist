@@ -36,8 +36,9 @@ dependencies = [
  "image",
  "png",
  "pulldown-cmark",
+ "qrcodegen",
  "rustybuzz",
- "tess2-rust 1.1.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tess2-rust 1.1.8 (registry+https://github.com/rust-lang/crates.io-index)",
  "ttf-parser",
  "usvg",
  "wasm-bindgen",
@@ -346,7 +347,7 @@ dependencies = [
  "quick-xml",
  "serde",
  "serde_json",
- "tess2-rust 1.1.4",
+ "tess2-rust 1.1.8",
  "zip",
 ]
 
@@ -362,7 +363,7 @@ dependencies = [
  "manifold-rust",
  "naga",
  "pollster 0.3.0",
- "tess2-rust 1.1.4",
+ "tess2-rust 1.1.8",
  "web-time",
  "wgpu",
 ]
@@ -2490,6 +2491,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "qrcodegen"
+version = "1.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4339fc7a1021c9c1621d87f5e3505f2805c8c105420ba2f2a4df86814590c142"
+
+[[package]]
 name = "quick-xml"
 version = "0.39.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3072,13 +3079,13 @@ dependencies = [
 
 [[package]]
 name = "tess2-rust"
-version = "1.1.4"
+version = "1.1.8"
 
 [[package]]
 name = "tess2-rust"
-version = "1.1.4"
+version = "1.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0aa03ebd8fe862ffb2452cbb0e7f2a51042be95cb3de59a8828ddc0a003544c"
+checksum = "73d6ded462ba7a8af54161a28dbe102acbc99e07cb56f23199580ddf85e97238"
 
 [[package]]
 name = "thiserror"

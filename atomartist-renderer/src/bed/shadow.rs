@@ -15,10 +15,10 @@
 //!    can sample with a linear-mipmap sampler and avoid moiré at
 //!    glancing angles.
 //!
-//! All offscreen attachments are `sample_count = 1`. The bed-quad pass
-//! that consumes `composite_tex` runs inside the main 3-D MSAA
-//! framebuffer (`SAMPLE_COUNT = 4` in `scene_renderer`), so the
-//! resolve-and-blit-to-screen path is unchanged.
+//! All offscreen attachments are `sample_count = 1`, like the rest of
+//! the 3-D scene targets. The bed-quad pass that consumes
+//! `composite_tex` draws into the scene framebuffer, which is
+//! box-downsampled to the widget rect on the final composite.
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
@@ -52,7 +52,7 @@ pub const DEFAULT_SHADOW_OPACITY: f32 = 0.35;
 /// Color attachment format for the silhouette / blur / composite chain.
 /// Linear (non-sRGB) keeps the Gaussian arithmetic and the composite's
 /// `grid * a + shadow * (1 - a)` math in a perceptually-uniform space —
-/// the final sRGB encoding happens at the bed-quad → MSAA write.
+/// the final sRGB encoding happens at the bed-quad → scene-buffer write.
 pub const CHAIN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 #[repr(C)]

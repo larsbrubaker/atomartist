@@ -82,7 +82,6 @@ impl Viewport3dWidget {
         let (mn, mx) = selected_body_world_aabb(geom.as_deref(), sel_id)?;
         Some(CameraDrag::DragBodyZ {
             node_id: sel_id,
-            start_local: pos,
             anchor_xy: [cube_center[0], cube_center[1]],
             anchor_z,
             start_matrix,

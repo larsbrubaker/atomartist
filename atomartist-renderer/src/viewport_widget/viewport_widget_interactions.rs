@@ -5,10 +5,8 @@
 
 use super::*;
 use super::body_drag;
-use super::rotate_gizmo;
 use super::viewport_widget_helpers::selected_body_world_aabb;
-use super::z_control_gizmo;
-use crate::picking::{pick_handle, pick_origin, raycast_mesh, GizmoHandle, HitPlane};
+use crate::picking::{pick_origin, HitPlane};
 
 // Rotate-gizmo interaction logic (hover pick, drag-start, per-frame
 // rotation, angle snapping) lives in `rotate_interactions.rs` to keep

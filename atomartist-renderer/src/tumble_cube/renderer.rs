@@ -5,18 +5,12 @@
 //! framebuffer (matching [`super::super::scene_renderer::WgpuSceneRenderer`]'s
 //! approach), then blitting the buffer onto the active 2-D target.
 //!
-//! ## Anti-aliasing — SSAA, not MSAA
+//! ## Anti-aliasing — SSAA
 //!
-//! Hardware MSAA is disabled across AtomArtist's 3-D paths so the
-//! main-viewport depth-peel chain can sample per-pixel scene depth via
-//! `texture_depth_2d` (an MSAA depth attachment would expose per-sample
-//! depth values, making that lookup incoherent — see the crate-root
-//! [`crate`] doc → "Anti-aliasing policy"). To still get crisp cube edges
-//! at the small 100 px widget size, the cube renders into an oversized
-//! offscreen backbuffer (`SSAA_SCALE × screen_rect`) and the shared
-//! `SsaaFramebuffer::blit_to` bilinear pipeline downsamples the result
-//! onto the active 2-D target. This is the reference implementation for
-//! the SSAA pattern documented at the crate root.
+//! To get crisp cube edges at the small 100 px widget size, the cube
+//! renders into an oversized offscreen backbuffer
+//! (`SSAA_SCALE × screen_rect`) and a matching box-downsample kernel
+//! from `SsaaFramebuffer` resolves it onto the active 2-D target.
 //!
 //! The cube's own camera is independent of the main viewport: it sits
 //! on a small orbit at the origin with `(azimuth, elevation)` mirrored
@@ -32,12 +26,6 @@ use wgpu::util::DeviceExt;
 use super::cube_geometry::{build_cube, CubeVertex};
 use super::face_textures::{FaceTexture, TEX_SIZE};
 
-/// Hardware MSAA sample count. Must stay `1` so the offscreen framebuffer
-/// matches the depth-peeled scene path (see crate-root docs →
-/// "Anti-aliasing policy"). All anti-aliasing for the cube comes from
-/// `SSAA_SCALE`.
-const SAMPLE_COUNT: u32 = 1;
-
 /// Linear supersampling factor for the offscreen render target. The cube is
 /// rasterized into a framebuffer `SSAA_SCALE × screen_rect` pixels on each
 /// axis, then box-downsampled when compositing onto the widget rect.
@@ -46,12 +34,14 @@ const SAMPLE_COUNT: u32 = 1;
 /// - `1` — no SSAA; the cube renders 1:1 with the widget rect.
 /// - `2` — 4× pixel cost. The composite uses `SsaaFramebuffer::blit_to`
 ///   (single bilinear tap = exact 2×2 box).
-/// - `4` — 16× pixel cost. The composite uses
-///   `SsaaFramebuffer::blit_downsample_4x_to` (4 bilinear taps = exact
-///   4×4 box). A single bilinear tap at this scale would drop 12 of 16
-///   source texels per output pixel — visually identical to `2` at 4×
-///   the cost — so the dedicated 4× pipeline is required.
-const SSAA_SCALE: u32 = 4;
+/// - `3` — 9× pixel cost. The composite uses
+///   `SsaaFramebuffer::blit_downsample_3x_to` (9-tap 3×3 box). A single
+///   bilinear tap at this scale would read only the corner 2×2 block (4
+///   of 9 texels), so the dedicated 3× pipeline is required.
+///
+/// `3` is the sweet spot: visually near-identical to `4` while using
+/// roughly half the framebuffer RAM (9× vs 16× the widget pixels).
+const SSAA_SCALE: u32 = 3;
 
 const FACE_MIP_COUNT: u32 = 9; // 256 -> 1
 
@@ -246,11 +236,7 @@ impl TumbleCubeRenderer {
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
-            multisample: wgpu::MultisampleState {
-                count: SAMPLE_COUNT,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
+            multisample: wgpu::MultisampleState::default(),
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs"),
@@ -481,7 +467,7 @@ impl WgpuCustomRender for TumbleCubeRenderer {
                 label: Some("tumble cube offscreen"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: fb.render_view(),
-                    resolve_target: None, // SSAA: no MSAA resolve; downsample is a later blit
+                    resolve_target: None, // SSAA: downsample is a later blit
                     depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
@@ -518,18 +504,18 @@ impl WgpuCustomRender for TumbleCubeRenderer {
         // the downsample-on-blit needs a kernel that matches the scale:
         //   - `SSAA_SCALE ∈ {1, 2}` → `blit_to` (single bilinear tap is a
         //     perfect 1×1 / 2×2 box).
-        //   - `SSAA_SCALE = 4` → `blit_downsample_4x_to` (4 bilinear taps
-        //     for an exact 4×4 box). The single-tap pipeline would only
-        //     read 4 of 16 source texels per output and silently throw
-        //     away most of the SSAA work.
+        //   - `SSAA_SCALE = 3` → `blit_downsample_3x_to` (9-tap 3×3 box).
+        //     The single-tap pipeline would only read the corner 2×2
+        //     block (4 of 9 texels) and silently throw away most of the
+        //     SSAA work.
         // `SSAA_SCALE` is `const`, so the compiler folds this branch and
         // emits a single call site at the chosen scale.
         // Both pipelines use `BLEND_STANDARD` (`SrcAlpha / OneMinusSrcAlpha`
         // for colour, `One / OneMinusSrcAlpha` for alpha) so the cube
         // reads correctly on whatever sits behind it (the viewport scene
         // + 2-D HUD ring).
-        if SSAA_SCALE >= 4 {
-            fb.blit_downsample_4x_to(
+        if SSAA_SCALE >= 3 {
+            fb.blit_downsample_3x_to(
                 ctx.device,
                 ctx.encoder,
                 ctx.target_view,

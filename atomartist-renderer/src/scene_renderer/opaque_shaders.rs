@@ -3,9 +3,8 @@
 //! Kept separate from pipeline setup so [`super::opaque_pass`] stays
 //! focused on resource wiring and so the shader text remains readable
 //! and uncompressed. Depth-peeling shaders live under
-//! `scene_renderer::depth_peel::shaders`; accumulation-blend shaders
-//! live under `scene_renderer::accumulation`; selection-outline
-//! shaders live under `scene_renderer::post_outline::shaders`.
+//! `scene_renderer::depth_peel::shaders`; selection-outline shaders
+//! live under `scene_renderer::post_outline::shaders`.
 
 // The opaque pass writes a two-attachment FsOut: `@location(0)` is
 // the regular shaded colour, `@location(1)` mirrors `in.clip.z` into

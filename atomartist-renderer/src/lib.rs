@@ -24,45 +24,33 @@
 //! iteration's depth attachment in the fragment shader. Stencil ops
 //! never enter the chain.
 //!
-//! The reason **hardware MSAA is disabled** on every offscreen 3-D
-//! framebuffer in this crate (`sample_count = 1`) is more subtle: the
-//! peeling fragment shader has to ask "what is the opaque-pass depth at
-//! this pixel?" via a `texture_depth_2d` sample. An MSAA depth texture
-//! has a separate depth value per sample-slot, so that question doesn't
-//! have a single answer — the discard test would be incoherent. Single-
-//! sample depth keeps the lookup well-defined.
-//!
-//! Anti-aliasing on the main viewport comes from a **16-sample
-//! progressive jitter accumulator** ([`scene_renderer::accumulation`]),
-//! also ported from NodeDesigner (`accumulation-aa.js`). Each frame
-//! that the scene is static, the renderer adds one more Halton(2,3)
-//! sub-pixel-jittered sample to a `Rgba16Float` ping-pong accumulator;
-//! after 16 samples the running average is a 16x supersampled image.
-//! A [`scene_renderer::cache::SceneFingerprint`] gate ensures the chain
-//! only runs when the scene actually changed — dragging a 2-D node
-//! canvas next to the viewport doesn't invalidate the cache, but
-//! rotating the camera or the tumble cube does.
+//! Anti-aliasing on the main viewport comes from **spatial 3×3 (9×)
+//! supersampling**: every offscreen scene target is single-sample and
+//! allocated at [`scene_renderer::SSAA_SCALE`]× the on-screen pixel
+//! size; the whole scene renders once into that oversized
+//! `Rgba16Float` buffer, and the final composite uses
+//! `SsaaFramebuffer::blit_downsample_3x_to` (a 9-tap box filter) to
+//! resolve it down to the widget rect — one pass, fully anti-aliased.
+//! (The targets stay single-sample because depth peeling samples
+//! per-pixel scene depth in-shader, which a per-sample depth
+//! attachment would make ambiguous.)
 //!
 //! Other 3-D widgets that don't need OIT (the tumble cube, bed
-//! composite chain) keep their existing single-shot pipelines and can
-//! choose **SSAA** if they need anti-aliasing: render into an oversized
-//! offscreen backbuffer and pick the matching composite kernel from
-//! `demo_wgpu::SsaaFramebuffer`. Choosing the right downsample kernel
-//! for the scale is critical — the wrong one silently throws SSAA
-//! work away:
+//! composite chain) follow the same SSAA pattern: render into an
+//! oversized offscreen backbuffer and pick the matching composite
+//! kernel from `demo_wgpu::SsaaFramebuffer`. Pairing the scale with
+//! the right kernel matters — the wrong one silently throws SSAA work
+//! away:
 //!
 //! - `2×` linear scaling (4× pixel cost) → `SsaaFramebuffer::blit_to`. A
 //!   single bilinear tap reads an exact 2×2 box per output pixel.
-//! - `4×` linear scaling (16× pixel cost) → `SsaaFramebuffer::blit_downsample_4x_to`.
-//!   Runs 4 bilinear taps in a 2×2 quadrant grid for an exact 4×4 box
-//!   average. `blit_to` at this scale only sees 4 of the 16 source texels
-//!   per output pixel and degrades to roughly 2× quality — always pair the
-//!   scale and the kernel.
+//! - `3×` linear scaling (9× pixel cost) → `SsaaFramebuffer::blit_downsample_3x_to`.
+//!   A 9-tap 3×3 box; a single bilinear tap at this scale reads only the
+//!   corner 2×2 block (4 of 9 texels) and degrades to roughly 2× quality.
 //!
 //! Reference SSAA implementation: the tumble-cube renderer
-//! ([`tumble_cube::renderer`]) keeps `SAMPLE_COUNT = 1` and renders into a
-//! `2×` SSAA offscreen framebuffer, compositing at widget size through the
-//! shared bilinear blit pipeline.
+//! ([`tumble_cube::renderer`]) renders into a `3×` SSAA offscreen
+//! framebuffer and composites at widget size through the 3×3 box blit.
 
 pub mod bed;
 pub mod camera;

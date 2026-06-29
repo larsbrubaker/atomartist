@@ -273,9 +273,8 @@ pub(super) fn build_resolve_pipeline(
             targets: &[Some(wgpu::ColorTargetState {
                 format: surface_format,
                 // No blending — the resolve fully replaces the output
-                // texture's contents on every run. The accumulation
-                // chain (next step) handles temporal blending; here we
-                // just write the per-sample composite.
+                // texture's contents on every run, writing the composited
+                // scene straight into the HDR scene buffer.
                 blend: None,
                 write_mask: wgpu::ColorWrites::ALL,
             })],

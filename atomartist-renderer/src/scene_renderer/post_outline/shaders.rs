@@ -28,8 +28,8 @@
 //!    with `alpha = 1.0` when the outline pixel is visible and
 //!    `alpha = OCCLUDED_ALPHA (= 0.35)` when it's behind other
 //!    geometry. The output target uses standard `OVER` alpha blending
-//!    so the existing accumulation chain's content shows through where
-//!    the shader didn't paint.
+//!    so the existing scene-composite content shows through where the
+//!    shader didn't paint.
 //!
 //! ## Why one pass, not two
 //!
@@ -37,10 +37,10 @@
 //! across two materials because Three.js's standard `transparent` flag
 //! controls depth-write + sort order; running both materials lets the
 //! occluded-side material avoid corrupting `depth` for the solid side.
-//! Atomartist's outline pass runs OVER an already-composited
-//! `output_fb` with no depth interactions whatsoever, so a single
-//! shader that branches on `visible vs occluded` and writes the
-//! appropriate alpha is sufficient.
+//! Atomartist's outline pass runs OVER the already-composited HDR
+//! scene buffer (`scene_fb`) with no depth interactions whatsoever, so
+//! a single shader that branches on `visible vs occluded` and writes
+//! the appropriate alpha is sufficient.
 
 /// Uniform layout consumed by both shaders. `mvp` is needed by the ID
 /// prepass vertex shader; `resolution`, `outline_color`,
