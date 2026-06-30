@@ -38,7 +38,7 @@ dependencies = [
  "pulldown-cmark",
  "qrcodegen",
  "rustybuzz",
- "tess2-rust 1.1.8 (registry+https://github.com/rust-lang/crates.io-index)",
+ "tess2-rust 1.1.8",
  "ttf-parser",
  "usvg",
  "wasm-bindgen",
@@ -347,7 +347,7 @@ dependencies = [
  "quick-xml",
  "serde",
  "serde_json",
- "tess2-rust 1.1.8",
+ "tess2-rust 1.1.4",
  "zip",
 ]
 
@@ -363,7 +363,7 @@ dependencies = [
  "manifold-rust",
  "naga",
  "pollster 0.3.0",
- "tess2-rust 1.1.8",
+ "tess2-rust 1.1.4",
  "web-time",
  "wgpu",
 ]
@@ -3079,7 +3079,7 @@ dependencies = [
 
 [[package]]
 name = "tess2-rust"
-version = "1.1.8"
+version = "1.1.4"
 
 [[package]]
 name = "tess2-rust"

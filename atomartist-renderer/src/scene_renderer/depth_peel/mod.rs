@@ -396,6 +396,64 @@ mod tests {
         }
     }
 
+    /// Regression for the June 2026 black-canvas bug on the WebGPU/WASM
+    /// build. The dual-peel `fs` reaches `shade` only after a chain of
+    /// depth-slab `discard`s — i.e. from *non-uniform* control flow. WGSL
+    /// forbids screen-space derivative builtins (`dpdx`/`dpdy`/`fwidth`)
+    /// under non-uniform control flow, and the browser's Tint compiler
+    /// rejects the entire shader module when that rule is broken. That
+    /// invalidates every frame's command buffer (`Queue.submit` drops the
+    /// whole encoder, including the 2-D UI pass), so the canvas renders
+    /// solid black with no panic and no native-side error.
+    ///
+    /// Native naga is lenient here, so `peel_shaders_emit_glsl_es_300`
+    /// validates the same shader without complaint — it cannot catch this
+    /// class of bug. Hence this dedicated source-structure guard: the
+    /// derivatives must live in `fs`'s uniform prologue, and `shade` must
+    /// receive the resulting normal as a parameter rather than computing
+    /// it from derivatives itself.
+    #[test]
+    fn shade_has_no_screen_space_derivatives() {
+        let src = super::shaders::DUAL_PEEL_COLOR_SHADER;
+        let start = src
+            .find("fn shade(")
+            .expect("dual-peel shader must define a `shade` helper");
+        let body = first_fn_body(&src[start..]);
+        for builtin in ["dpdx", "dpdy", "fwidth"] {
+            assert!(
+                !body.contains(builtin),
+                "`shade` uses `{builtin}` — screen-space derivatives must be \
+                 evaluated in `fs`'s uniform prologue and threaded in as the \
+                 normal. Under the peel pass's non-uniform control flow the \
+                 browser's WGSL compiler rejects the module and the canvas \
+                 renders black."
+            );
+        }
+    }
+
+    /// Return the brace-delimited body (braces included) of the first WGSL
+    /// function appearing in `src`. Counts brace depth so nested blocks
+    /// don't truncate the body early.
+    fn first_fn_body(src: &str) -> &str {
+        let open = src
+            .find('{')
+            .expect("WGSL function must have an opening brace");
+        let mut depth = 0i32;
+        for (i, c) in src[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &src[open..=open + i];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unbalanced braces in WGSL function body");
+    }
+
     #[test]
     fn ensure_size_is_no_op_when_unchanged() {
         let Some((device, _queue)) = headless_device() else {

@@ -186,11 +186,15 @@ fn srgb_to_linear(srgb: vec3<f32>) -> vec3<f32> {
     return mix(low, high, step(vec3<f32>(0.04045), srgb));
 }
 
-fn shade(view_pos: vec3<f32>, base_color: vec4<f32>) -> vec4<f32> {
+// `n` is the flat-shading normal, supplied by the caller. It is *not*
+// computed here from `dpdx`/`dpdy`: this function is invoked from the
+// peel pass's non-uniform control flow (after a chain of depth-slab
+// `discard`s), and WGSL forbids derivative builtins under non-uniform
+// control flow. The caller computes the derivatives in its uniform
+// prologue and threads the resulting normal in. See `fs` below and the
+// `shade_has_no_screen_space_derivatives` regression test.
+fn shade(view_pos: vec3<f32>, base_color: vec4<f32>, n: vec3<f32>) -> vec4<f32> {
     let base = srgb_to_linear(base_color.rgb);
-    let fdx = dpdx(view_pos);
-    let fdy = dpdy(view_pos);
-    let n = normalize(cross(fdx, fdy));
     let v = normalize(-view_pos);
     let shininess = max(u.params.x, 1.0);
 
@@ -220,6 +224,16 @@ fn shade(view_pos: vec3<f32>, base_color: vec4<f32>) -> vec4<f32> {
 
 @fragment
 fn fs(in: VOut) -> PeelOut {
+    // Flat-shading normal from screen-space derivatives. WGSL requires
+    // derivative builtins (`dpdx`/`dpdy`) to be evaluated under uniform
+    // control flow, so compute the normal here — at the top of the entry
+    // point, before any `discard` or data-dependent branch — and thread
+    // it into `shade`. The peel pass reaches `shade` only after a chain
+    // of depth-slab `discard`s (non-uniform control flow); evaluating the
+    // derivatives there makes the browser's Tint WGSL compiler reject the
+    // whole module (native naga is lenient), which blanks the canvas.
+    let nrm = normalize(cross(dpdx(in.view_pos), dpdy(in.view_pos)));
+
     let pixel = vec2<i32>(clamp(in.clip.xy, vec2<f32>(0.0), u.resolution.xy - vec2<f32>(1.0)));
     let opaque_z = textureLoad(opaque_depth_color, pixel, 0).r;
     if (opaque_z < in.clip.z - PEEL_BIAS) {
@@ -249,7 +263,7 @@ fn fs(in: VOut) -> PeelOut {
 
     // Per-vertex colour (always populated — see the matching note
     // in the opaque shader's `fs`) drives the surface base colour.
-    let shaded = shade(in.view_pos, in.v_color);
+    let shaded = shade(in.view_pos, in.v_color, nrm);
     if (abs(cur_z - front_z) <= PEEL_BIAS) {
         // Front-layer hit: premultiply (per MatterCAD's UnderBlend).
         out.front_color = vec4<f32>(shaded.rgb * shaded.a, shaded.a);
