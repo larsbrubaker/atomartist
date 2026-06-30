@@ -46,13 +46,23 @@ async function main() {
   document.getElementById('status').textContent = '';
 
   const canvas = document.getElementById('canvas');
-  function resizeCanvas() {
+  // Keep the canvas backing store matched to its on-screen size (in
+  // device pixels) so rendering is 1:1 with the page and never stretched.
+  // This is synced every frame from `loop` rather than once at startup:
+  // a one-shot resize raced with the async wgpu init and left the canvas
+  // pinned at its initial 1280x720 attribute size, which CSS then
+  // stretched to fill the window. Assigning canvas.width/height clears
+  // the drawing buffer, so only write when the target actually changes.
+  function syncCanvasSize() {
     const dpr = window.devicePixelRatio || 1;
-    canvas.width  = Math.round(canvas.clientWidth  * dpr);
-    canvas.height = Math.round(canvas.clientHeight * dpr);
+    const w = Math.max(1, Math.round(canvas.clientWidth  * dpr));
+    const h = Math.max(1, Math.round(canvas.clientHeight * dpr));
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width  = w;
+      canvas.height = h;
+    }
   }
-  resizeCanvas();
-  window.addEventListener('resize', resizeCanvas);
+  syncCanvasSize();
 
   // Translate browser mouse coords (top-left origin, CSS pixels) into
   // physical-pixel coords matching what the agg-gui App expects on
@@ -86,6 +96,7 @@ async function main() {
   canvas.addEventListener('contextmenu', e => e.preventDefault());
 
   function loop(t) {
+    syncCanvasSize();
     render(canvas.width, canvas.height, t);
     requestAnimationFrame(loop);
   }
