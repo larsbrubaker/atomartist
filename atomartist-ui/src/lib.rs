@@ -15,6 +15,7 @@ pub mod icons;
 pub mod mattercad_icons;
 pub mod node_helpers;
 pub mod settings;
+pub mod shell_init;
 pub mod status_bar;
 pub mod top_level;
 pub mod top_menu_bar;
@@ -28,6 +29,7 @@ pub use node_helpers::add_node_with_defaults;
 pub use settings::{
     DebugWindowState, DebugWindowsState, MainWindowState, UiSettings, WindowPlacement,
 };
+pub use shell_init::install_theme_and_fonts;
 pub use top_level::{build_app, fresh_state_with_builtins, fresh_state_with_starter_graph};
 pub use viewport_overlay::{build_viewport_overlay, ViewportOverlay};
 

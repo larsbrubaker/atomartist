@@ -13,18 +13,15 @@
 use std::cell::RefCell;
 use std::sync::Arc;
 
-use agg_gui::{theme::{set_visuals, Visuals}, App, MouseButton, Modifiers, Size, text::Font};
+use agg_gui::{App, MouseButton, Modifiers, Size};
 use atomartist_ui::{
-    build_app, fresh_state_with_starter_graph, top_menu_bar::{FileDialogProvider, NoFileDialogs},
+    build_app, fresh_state_with_starter_graph, install_theme_and_fonts,
+    top_menu_bar::{FileDialogProvider, NoFileDialogs},
     DebugWindowHandles,
 };
 use demo_wgpu::{begin_frame, WgpuGfxCtx};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
-
-const DEFAULT_FONT_BYTES: &[u8] =
-    include_bytes!("../../../agg-gui/agg-gui/assets/fonts/NotoSans-Regular.ttf");
-const ICON_FONT_BYTES: &[u8] = include_bytes!("../../atomartist-ui/assets/bootstrap-icons.ttf");
 
 thread_local! {
     static APP:      RefCell<Option<App>>           = RefCell::new(None);
@@ -94,20 +91,20 @@ fn show_fatal(message: &str) {
 pub fn start() {
     console_error_panic_hook::set_once();
 
-    // Theme + font setup mirrors the native shell.
-    set_visuals(Visuals::light());
-    let icon_font =
-        Arc::new(Font::from_bytes(ICON_FONT_BYTES.to_vec()).expect("load Bootstrap Icons"));
-    let font = Arc::new(
-        Font::from_bytes(DEFAULT_FONT_BYTES.to_vec())
-            .expect("load NotoSans-Regular")
-            .with_fallback(icon_font),
-    );
-    agg_gui::font_settings::set_system_font(Some(font));
-    // LCD subpixel rendering is unreliable on retina; assume hi-DPI on
-    // browsers and leave it off.
-    agg_gui::font_settings::set_lcd_enabled(false);
-    agg_gui::font_settings::set_hinting_enabled(false);
+    // Register the browser's device-pixel ratio as the agg-gui device scale
+    // *before* installing fonts, so layout, hit-testing, and the LCD/hinting
+    // DPI decision all use the same value the native shell derives from
+    // `window.scale_factor()`. The JS bootstrap sizes the canvas backing
+    // store at `clientSize * devicePixelRatio` to match.
+    let device_scale = web_sys::window()
+        .map(|w| w.device_pixel_ratio())
+        .filter(|s| *s > 0.0)
+        .unwrap_or(1.0);
+    agg_gui::set_device_scale(device_scale);
+
+    // Theme, fonts, and the full text-quality recipe — shared verbatim with
+    // the native shell so the two render pixel-identically.
+    install_theme_and_fonts(device_scale);
 
     wasm_bindgen_futures::spawn_local(async move {
         match init_wgpu().await {

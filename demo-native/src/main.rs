@@ -12,22 +12,17 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agg_gui::{
-    persistence::AutoSave, App, DrawCtx, Key, Modifiers, MouseButton, text::Font,
-    theme::{set_visuals, Visuals},
+    persistence::AutoSave, App, DrawCtx, Key, Modifiers, MouseButton,
 };
 use atomartist_ui::{
-    build_app, fresh_state_with_starter_graph, top_menu_bar::FileDialogProvider,
-    MainWindowState, UiSettings, WindowPlacement,
+    build_app, fresh_state_with_starter_graph, install_theme_and_fonts,
+    top_menu_bar::FileDialogProvider, MainWindowState, UiSettings, WindowPlacement,
 };
 use demo_wgpu::WgpuGfxCtx;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Event, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::{Window, WindowAttributes};
-
-const DEFAULT_FONT_BYTES: &[u8] =
-    include_bytes!("../../../agg-gui/agg-gui/assets/fonts/NotoSans-Regular.ttf");
-const ICON_FONT_BYTES: &[u8] = include_bytes!("../../atomartist-ui/assets/bootstrap-icons.ttf");
 
 mod frame;
 mod gpu;
@@ -183,37 +178,11 @@ fn main() {
         .as_ref()
         .map(|path| UiSettings::read_from_file(path));
 
-    // Install light theme as the default — AtomArtist is a CAD-style design
-    // tool where high-contrast white backgrounds match user expectation.
-    set_visuals(Visuals::light());
-
-    let icon_font =
-        Arc::new(Font::from_bytes(ICON_FONT_BYTES.to_vec()).expect("load Bootstrap Icons"));
-    let font = Arc::new(
-        Font::from_bytes(DEFAULT_FONT_BYTES.to_vec())
-            .expect("load NotoSans-Regular")
-            .with_fallback(icon_font),
-    );
-    // Make the font available to every widget via agg-gui's thread-local
-    // system-font slot, so widgets can fall back to it without an explicit
-    // ctx.set_font call.
-    agg_gui::font_settings::set_system_font(Some(font.clone()));
-
-    // Text-quality recipe (mirrors agg-gui's demo):
-    //   - LCD subpixel rendering + Y-axis hinting on standard-DPI displays
-    //     (skip on hi-DPI to avoid colour-fringe artifacts at >1.25x).
-    //   - Default gamma / width / weight / italic so the rasterizer matches
-    //     the reference truetype_test demo.
-    let standard_dpi = agg_gui::device_scale() <= 1.25;
-    agg_gui::font_settings::set_font_size_scale(1.0);
-    agg_gui::font_settings::set_lcd_enabled(standard_dpi);
-    agg_gui::font_settings::set_hinting_enabled(standard_dpi);
-    agg_gui::font_settings::set_gamma(1.0);
-    agg_gui::font_settings::set_width(1.0);
-    agg_gui::font_settings::set_interval(0.0);
-    agg_gui::font_settings::set_faux_weight(0.0);
-    agg_gui::font_settings::set_faux_italic(0.0);
-    agg_gui::font_settings::set_primary_weight(1.0 / 3.0);
+    // Theme + fonts + text-quality are installed *after* window creation
+    // (see below), once `window.scale_factor()` is known — the LCD/hinting
+    // DPI decision needs the real device scale. The recipe itself lives in
+    // `atomartist_ui::install_theme_and_fonts`, shared verbatim with the
+    // wasm shell so the two render pixel-identically.
 
     // Compose the initial window placement. We create the window
     // *hidden* so we can validate the saved position against the
@@ -237,7 +206,9 @@ fn main() {
     let window = Arc::new(
         event_loop.create_window(window_attributes).expect("create window"),
     );
-    agg_gui::set_device_scale(window.scale_factor());
+    let device_scale = window.scale_factor();
+    agg_gui::set_device_scale(device_scale);
+    install_theme_and_fonts(device_scale);
 
     // Decide what the saved bounds map to now that we know the live
     // monitor layout. Three outcomes — see `WindowPlacement`:
