@@ -36,6 +36,9 @@ mod pipeline_build;
 pub mod pipelines;
 pub mod shaders;
 
+#[cfg(test)]
+mod peel_readback_test;
+
 /// MatterCAD's default `DepthPeelingLayers = 6`, halved to 3 iterations
 /// by [`iteration_count`] (each iteration peels one front layer and one
 /// back layer). Six layers is the empirically chosen sweet spot in
@@ -452,6 +455,61 @@ mod tests {
             }
         }
         panic!("unbalanced braces in WGSL function body");
+    }
+
+    /// Transparent meshes must match MatterCAD's dual-peel shading:
+    /// render BOTH faces (a transparent object's near and far surfaces
+    /// are all visible) and shade with the mesh's **per-vertex** normal
+    /// transformed to view space — NOT a flat normal derived from
+    /// screen-space derivatives, which spikes at triangle edges under
+    /// perspective and, amplified by specular, paints bright streaks
+    /// along the triangulation. Verified by source structure because a
+    /// built `RenderPipeline`'s cull state isn't introspectable at
+    /// runtime (same rationale as the other source-guard tests here).
+    #[test]
+    fn peel_colour_pass_uses_vertex_normal_both_faces() {
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/scene_renderer/depth_peel/pipeline_build.rs",
+        ))
+        .expect("read pipeline_build.rs");
+        // Isolate the colour pass's constructor so we don't inspect the
+        // init / resolve passes' primitive state.
+        let start = src
+            .find("fn build_peel_pipeline(")
+            .expect("pipeline_build.rs must define build_peel_pipeline");
+        let end = src[start..]
+            .find("fn build_resolve_pipeline(")
+            .map(|o| start + o)
+            .expect("build_resolve_pipeline must follow build_peel_pipeline");
+        let body = &src[start..end];
+        assert!(
+            body.contains("cull_mode: None"),
+            "dual-peel colour pass must render both faces (cull_mode: None) \
+             so transparent meshes show their front AND back surfaces",
+        );
+        assert!(
+            !body.contains("Face::Back"),
+            "dual-peel colour pass must not back-face cull transparent meshes",
+        );
+
+        // Shade with the interpolated per-vertex normal, and never
+        // reconstruct the shading normal from screen-space derivatives.
+        let shader = super::shaders::DUAL_PEEL_COLOR_SHADER;
+        assert!(
+            shader.contains("view_normal"),
+            "dual-peel colour shader must carry the per-vertex normal into \
+             view space (`view_normal`) and shade with it, like MatterCAD",
+        );
+        for builtin in ["dpdx", "dpdy", "fwidth"] {
+            assert!(
+                !shader.contains(builtin),
+                "dual-peel colour shader must not derive the shading normal \
+                 from `{builtin}` — screen-space derivatives spike at \
+                 triangle edges and streak the surface; use the per-vertex \
+                 normal instead",
+            );
+        }
     }
 
     #[test]

@@ -10,6 +10,72 @@ fn renderer_is_constructible() {
     assert!(r.bodies.is_empty());
 }
 
+/// Opaque/translucent classification drives the render split: opaque
+/// bodies take the shaded depth-tested pass, translucent ones the
+/// dual-peel chain. A fully-opaque tint and the un-tinted
+/// inherit-sentinel (which resolves to the opaque default) must both
+/// read opaque; anything with real alpha < 1 must read translucent.
+#[test]
+fn opaque_classification_matches_resolved_alpha() {
+    use super::is_opaque_color;
+    use atomartist_lib::geometry::{DEFAULT_GEOMETRY_COLOR, INHERIT_COLOR};
+
+    assert!(is_opaque_color([0.6, 0.6, 0.6, 1.0]), "alpha 1 is opaque");
+    assert!(
+        is_opaque_color(DEFAULT_GEOMETRY_COLOR),
+        "the default geometry colour is opaque",
+    );
+    assert!(
+        is_opaque_color(INHERIT_COLOR),
+        "the inherit sentinel resolves to the opaque default, so it is opaque",
+    );
+    assert!(
+        !is_opaque_color([0.6, 0.6, 0.6, 0.5]),
+        "alpha 0.5 is translucent → dual-peel",
+    );
+    assert!(
+        !is_opaque_color([0.6, 0.6, 0.6, 0.9]),
+        "alpha 0.9 is still translucent",
+    );
+}
+
+/// Regression: opaque and translucent bodies take disjoint paths.
+///
+/// * Opaque bodies render through the shaded, depth-tested opaque pass
+///   and are EXCLUDED from the dual-peel chain — forcing an opaque,
+///   self-overlapping mesh through the peel produced black/white resolve
+///   splotches.
+/// * Translucent bodies are NOT drawn in the opaque pass at all, so they
+///   never write the opaque depth. Depth-pre-passing them made the
+///   peel's reject-behind-opaque collapse each translucent body to its
+///   front layer (splotches / "only front faces"). MatterCAD likewise
+///   keeps transparent geometry out of the opaque depth.
+///
+/// Verified statically because exercising the render path needs a wgpu
+/// device.
+#[test]
+fn opaque_and_translucent_take_disjoint_paths() {
+    let src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/scene_renderer/render_impl.rs",
+    ))
+    .expect("read render_impl.rs");
+    assert!(
+        src.contains("s.opaque.draw_body(") && src.contains("!body.opaque"),
+        "the opaque pass must shade opaque bodies via `draw_body` and skip \
+         translucent ones (`!body.opaque`)",
+    );
+    assert!(
+        !src.contains("draw_body_depth_only"),
+        "translucent bodies must not be depth-pre-passed — writing the \
+         opaque depth makes the peel reject their own back layers",
+    );
+    assert!(
+        src.contains("b.index_count > 0 && !b.opaque"),
+        "the dual-peel body list must exclude opaque bodies (`!b.opaque`)",
+    );
+}
+
 /// Bed is currently hard-locked to `0.0` (ignoring `grid_z` too) so
 /// no codepath can drift it while the bed-Z offset is reworked.
 #[test]

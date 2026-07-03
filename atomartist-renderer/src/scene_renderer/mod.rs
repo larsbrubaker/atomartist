@@ -135,6 +135,13 @@ pub struct BodyGpu {
     /// Vertex count — used to size the colour-fill when the source
     /// body lacks per-vertex data.
     pub vert_count: u32,
+    /// True when the body's resolved colour is fully opaque (alpha ≈ 1).
+    /// Opaque bodies render through the shaded, depth-tested opaque pass
+    /// ([`OpaquePipelines::draw_body`]); only translucent bodies go
+    /// through the dual-peel chain. Forcing an opaque, self-overlapping
+    /// mesh through the peel produced the black/white splotches this
+    /// split fixes — MatterCAD likewise peels only transparent geometry.
+    pub opaque: bool,
 }
 
 /// Linear SSAA scale: every offscreen scene target is allocated at
@@ -564,6 +571,7 @@ impl WgpuSceneRenderer {
                         cbuf: prev.cbuf.clone(),
                         index_count: prev.index_count,
                         vert_count: prev.vert_count,
+                        opaque: prev.opaque,
                     };
                     new_cache.push(clone);
                     reused = true;
@@ -637,6 +645,7 @@ impl WgpuSceneRenderer {
                 cbuf,
                 index_count: mesh.tri_verts.len() as u32,
                 vert_count: n_verts as u32,
+                opaque: is_opaque_color(body.color),
             });
         }
 
@@ -669,6 +678,22 @@ impl WgpuSceneRenderer {
         }
         realloc
     }
+}
+
+/// A body counts as opaque when its resolved colour's alpha is ≈ 1.
+/// The `INHERIT_COLOR` sentinel (alpha 0) resolves to the opaque
+/// [`DEFAULT_GEOMETRY_COLOR`] — same substitution the uniform-slot path
+/// makes — so an un-tinted body is opaque, not treated as fully
+/// transparent. Opaque bodies bypass the dual-peel chain and render in
+/// the shaded opaque pass instead.
+fn is_opaque_color(color: [f32; 4]) -> bool {
+    const OPAQUE_ALPHA_THRESHOLD: f32 = 0.999;
+    let resolved = if is_inherit_color(&color) {
+        DEFAULT_GEOMETRY_COLOR
+    } else {
+        color
+    };
+    resolved[3] >= OPAQUE_ALPHA_THRESHOLD
 }
 
 /// Quantise an RGBA colour to a 32-bit packed key — 8 bits per

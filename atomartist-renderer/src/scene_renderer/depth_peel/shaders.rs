@@ -153,12 +153,13 @@ struct VOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) view_pos: vec3<f32>,
     @location(1) v_color: vec4<f32>,
+    @location(2) view_normal: vec3<f32>,
 };
 
 @vertex
 fn vs(
     @location(0) pos: vec3<f32>,
-    @location(1) _normal: vec3<f32>,
+    @location(1) normal: vec3<f32>,
     @location(2) v_color: vec4<f32>,
 ) -> VOut {
     var o: VOut;
@@ -167,6 +168,11 @@ fn vs(
     o.view_pos = view_pos4.xyz;
     o.clip = u.proj * view_pos4;
     o.v_color = v_color;
+    // Per-vertex normal into view space (model then view), matching
+    // MatterCAD's `mul(float4(Normal, 0), ModelView)`. Uses the plain
+    // model-view (not the inverse-transpose), same as the reference —
+    // correct for the rigid / uniform-scale body transforms we use.
+    o.view_normal = (u.view * b.model * vec4<f32>(normal, 0.0)).xyz;
     return o;
 }
 
@@ -186,53 +192,49 @@ fn srgb_to_linear(srgb: vec3<f32>) -> vec3<f32> {
     return mix(low, high, step(vec3<f32>(0.04045), srgb));
 }
 
-// `n` is the flat-shading normal, supplied by the caller. It is *not*
-// computed here from `dpdx`/`dpdy`: this function is invoked from the
-// peel pass's non-uniform control flow (after a chain of depth-slab
-// `discard`s), and WGSL forbids derivative builtins under non-uniform
-// control flow. The caller computes the derivatives in its uniform
-// prologue and threads the resulting normal in. See `fs` below and the
-// `shade_has_no_screen_space_derivatives` regression test.
-fn shade(view_pos: vec3<f32>, base_color: vec4<f32>, n: vec3<f32>) -> vec4<f32> {
+// Blinn-Phong-ish surface shading, matching MatterCAD's `ApplyLighting`
+// for the dual-peel scene: a global ambient plus two camera-fixed
+// directional lights contributing per-light ambient + diffuse. No
+// specular — MatterCAD's transparent scene shading omits it, and a
+// specular term amplifies any normal noise into bright streaks. `n` is
+// the interpolated per-vertex view-space normal (see the vertex stage);
+// both faces are rendered, so a back face's `n` points away from the
+// viewer and its diffuse terms fall to zero, leaving the ambient floor —
+// exactly how the reference keeps far walls visible.
+fn shade(base_color: vec4<f32>, n: vec3<f32>) -> vec4<f32> {
     let base = srgb_to_linear(base_color.rgb);
-    let v = normalize(-view_pos);
-    let shininess = max(u.params.x, 1.0);
 
     let l0 = normalize(u.light_dir0.xyz);
     let ndotl0 = max(dot(n, l0), 0.0);
-    let ambient0 = u.light_ambient0.rgb * base;
-    let diffuse0 = u.light_diffuse0.rgb * base * ndotl0;
-    let h0 = normalize(l0 + v);
-    let ndoth0 = max(dot(n, h0), 0.0);
-    let spec0_active = step(0.0001, ndotl0);
-    let specular0 = u.light_specular0.rgb * u.material_specular.rgb
-        * pow(ndoth0, shininess) * spec0_active;
+    let lit0 = u.light_ambient0.rgb * base + u.light_diffuse0.rgb * base * ndotl0;
 
     let l1 = normalize(u.light_dir1.xyz);
     let ndotl1 = max(dot(n, l1), 0.0);
-    let diffuse1 = u.light_diffuse1.rgb * base * ndotl1;
-    let h1 = normalize(l1 + v);
-    let ndoth1 = max(dot(n, h1), 0.0);
-    let spec1_active = step(0.0001, ndotl1);
-    let specular1 = u.light_specular1.rgb * u.material_specular.rgb
-        * pow(ndoth1, shininess) * spec1_active;
+    let lit1 = u.light_diffuse1.rgb * base * ndotl1;
 
     let global_amb = u.global_ambient.rgb * base;
-    let lit = global_amb + ambient0 + diffuse0 + specular0 + diffuse1 + specular1;
+    let lit = global_amb + lit0 + lit1;
     return vec4<f32>(lit, base_color.a);
 }
 
 @fragment
 fn fs(in: VOut) -> PeelOut {
-    // Flat-shading normal from screen-space derivatives. WGSL requires
-    // derivative builtins (`dpdx`/`dpdy`) to be evaluated under uniform
-    // control flow, so compute the normal here — at the top of the entry
-    // point, before any `discard` or data-dependent branch — and thread
-    // it into `shade`. The peel pass reaches `shade` only after a chain
-    // of depth-slab `discard`s (non-uniform control flow); evaluating the
-    // derivatives there makes the browser's Tint WGSL compiler reject the
-    // whole module (native naga is lenient), which blanks the canvas.
-    let nrm = normalize(cross(dpdx(in.view_pos), dpdy(in.view_pos)));
+    // Shade with the mesh's interpolated per-vertex normal in view
+    // space, matching MatterCAD. No screen-space derivatives: a
+    // derivative-reconstructed normal spikes at triangle edges under
+    // perspective and, amplified by lighting, streaks the surface along
+    // the triangulation.
+    var nrm = normalize(in.view_normal);
+    // Two-sided lighting: a transparent mesh renders BOTH faces (no
+    // back-face cull), so a back face whose normal points away from the
+    // camera must be flipped toward the viewer. Otherwise its diffuse
+    // terms fall to zero and it shades to the dark ambient floor —
+    // reading as the dark internal patches that mottle a translucent
+    // mesh against its bright front faces.
+    let vdir = normalize(-in.view_pos);
+    if (dot(nrm, vdir) < 0.0) {
+        nrm = -nrm;
+    }
 
     let pixel = vec2<i32>(clamp(in.clip.xy, vec2<f32>(0.0), u.resolution.xy - vec2<f32>(1.0)));
     let opaque_z = textureLoad(opaque_depth_color, pixel, 0).r;
@@ -263,7 +265,7 @@ fn fs(in: VOut) -> PeelOut {
 
     // Per-vertex colour (always populated — see the matching note
     // in the opaque shader's `fs`) drives the surface base colour.
-    let shaded = shade(in.view_pos, in.v_color, nrm);
+    let shaded = shade(in.v_color, nrm);
     if (abs(cur_z - front_z) <= PEEL_BIAS) {
         // Front-layer hit: premultiply (per MatterCAD's UnderBlend).
         out.front_color = vec4<f32>(shaded.rgb * shaded.a, shaded.a);

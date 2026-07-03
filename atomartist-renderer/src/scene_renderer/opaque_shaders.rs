@@ -18,24 +18,19 @@
 // colour texture sidesteps the limitation on every backend at the
 // cost of a single extra fragment-shader output.
 //
-// Shading model is a behavioural port of NodeDesigner's
-// `depth-peeling.js::generateFragmentShader`:
+// Shading matches the dual-peel colour shader and MatterCAD's
+// `ApplyLighting`, so an opaque body and a translucent one shade
+// identically:
 //
-// * View-space lighting. The vertex shader splits the MVP into
-//   `view` (uploaded as a uniform) and `proj` so we can pass the
-//   view-space position through as a varying — the fragment shader
-//   recovers a flat normal via `dpdx(view_pos) × dpdy(view_pos)` and
-//   the view direction as `normalize(-view_pos)`.
-// * Two camera-fixed directional lights, each with independent
-//   diffuse, specular and (light 0 only) per-light ambient.
-// * Configurable shininess (Blinn-Phong half-vector specular).
-// * sRGB-encoded base colour: the shader converts sRGB → linear
-//   before lighting, outputs linear (the surface format does the
+// * View-space lighting against the mesh's per-vertex normal
+//   (transformed by model→view in the vertex stage). No screen-space
+//   derivatives — a derivative-reconstructed normal spikes at triangle
+//   edges under perspective and streaks the surface.
+// * A global ambient plus two camera-fixed directional lights, each
+//   contributing per-light ambient + diffuse. No specular.
+// * sRGB-encoded base colour: the shader converts sRGB → linear before
+//   lighting and outputs linear (the surface format does the
 //   linear → sRGB encode on present).
-//
-// Defaults are picked to match NodeDesigner's `createDepthPeelMaterial`
-// uniform defaults (Light 0 from `(-1,-1,1)` etc.). See
-// `WgpuSceneRenderer::new` for the exact values.
 
 pub(super) const SCENE_SHADER: &str = r#"
 struct U {
@@ -72,6 +67,7 @@ struct VOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) view_pos: vec3<f32>,
     @location(1) v_color: vec4<f32>,
+    @location(2) view_normal: vec3<f32>,
 };
 
 struct FsOut {
@@ -82,7 +78,7 @@ struct FsOut {
 @vertex
 fn vs(
     @location(0) pos: vec3<f32>,
-    @location(1) _normal: vec3<f32>,
+    @location(1) normal: vec3<f32>,
     @location(2) v_color: vec4<f32>,
 ) -> VOut {
     var o: VOut;
@@ -93,6 +89,9 @@ fn vs(
     o.view_pos = view_pos4.xyz;
     o.clip = u.proj * view_pos4;
     o.v_color = v_color;
+    // Per-vertex normal into view space (model then view), matching the
+    // dual-peel colour shader and MatterCAD's `mul(Normal, ModelView)`.
+    o.view_normal = (u.view * b.model * vec4<f32>(normal, 0.0)).xyz;
     return o;
 }
 
@@ -102,35 +101,19 @@ fn srgb_to_linear(srgb: vec3<f32>) -> vec3<f32> {
     return mix(low, high, step(vec3<f32>(0.04045), srgb));
 }
 
-fn shade(view_pos: vec3<f32>, base_color_srgb: vec3<f32>) -> vec3<f32> {
+fn shade(base_color_srgb: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     let base = srgb_to_linear(base_color_srgb);
-    let fdx = dpdx(view_pos);
-    let fdy = dpdy(view_pos);
-    let n = normalize(cross(fdx, fdy));
-    let v = normalize(-view_pos);
-    let shininess = max(u.params.x, 1.0);
 
     let l0 = normalize(u.light_dir0.xyz);
     let ndotl0 = max(dot(n, l0), 0.0);
-    let ambient0 = u.light_ambient0.rgb * base;
-    let diffuse0 = u.light_diffuse0.rgb * base * ndotl0;
-    let h0 = normalize(l0 + v);
-    let ndoth0 = max(dot(n, h0), 0.0);
-    let spec0_active = step(0.0001, ndotl0);
-    let specular0 = u.light_specular0.rgb * u.material_specular.rgb
-        * pow(ndoth0, shininess) * spec0_active;
+    let lit0 = u.light_ambient0.rgb * base + u.light_diffuse0.rgb * base * ndotl0;
 
     let l1 = normalize(u.light_dir1.xyz);
     let ndotl1 = max(dot(n, l1), 0.0);
-    let diffuse1 = u.light_diffuse1.rgb * base * ndotl1;
-    let h1 = normalize(l1 + v);
-    let ndoth1 = max(dot(n, h1), 0.0);
-    let spec1_active = step(0.0001, ndotl1);
-    let specular1 = u.light_specular1.rgb * u.material_specular.rgb
-        * pow(ndoth1, shininess) * spec1_active;
+    let lit1 = u.light_diffuse1.rgb * base * ndotl1;
 
     let global_amb = u.global_ambient.rgb * base;
-    return global_amb + ambient0 + diffuse0 + specular0 + diffuse1 + specular1;
+    return global_amb + lit0 + lit1;
 }
 
 @fragment
@@ -140,7 +123,16 @@ fn fs(in: VOut) -> FsOut {
     // carries it verbatim; otherwise the buffer is filled with the
     // body's uniform tint repeated per vertex. Either way the
     // fragment shader uses `v_color` directly — no branch needed.
-    let lit = shade(in.view_pos, in.v_color.rgb);
+    // Two-sided lighting, matching the dual-peel colour shader: flip a
+    // back face's normal toward the viewer so it never collapses to the
+    // dark ambient floor. (Opaque bodies back-face cull, so this is a
+    // no-op here — kept so the two shaders shade identically.)
+    var nrm = normalize(in.view_normal);
+    let vdir = normalize(-in.view_pos);
+    if (dot(nrm, vdir) < 0.0) {
+        nrm = -nrm;
+    }
+    let lit = shade(in.v_color.rgb, nrm);
     var out: FsOut;
     out.color = vec4<f32>(lit, in.v_color.a);
     out.depth_color = vec4<f32>(in.clip.z, 0.0, 0.0, 1.0);

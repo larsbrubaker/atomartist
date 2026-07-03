@@ -354,16 +354,25 @@ impl WgpuCustomRender for WgpuSceneRenderer {
                 s.bed.draw_bed(ctx.queue, &mut pass, mvp, bed_z);
             }
             if draw_surface {
-                // Per-body depth-only — populates the opaque depth
-                // attachment + R32Float depth-colour mirror for the
-                // dual-peel discard. Each body's model matrix lives
-                // in its slot of the dynamic uniform buffer
-                // (`body_index` indexes the slot).
+                // ONLY opaque bodies render here — fully shaded, colour +
+                // depth, depth-tested like any normal solid mesh. This
+                // depth is the "opaque depth" the peel discards behind.
+                //
+                // Translucent bodies are deliberately NOT drawn in this
+                // pass: they must not write the opaque depth, or the
+                // peel's reject-behind-opaque test would treat each
+                // translucent body's own front surface as opaque and
+                // discard everything behind it (collapsing it to a single
+                // front layer — the black/white splotch failure). Their
+                // depth range is instead seeded by the peel's own init
+                // pass, and their colour comes from the peel. MatterCAD
+                // likewise keeps transparent geometry out of the opaque
+                // depth. `body_index` indexes the body's uniform slot.
                 for (body_index, body) in s.bodies_gpu.iter().enumerate() {
-                    if body.index_count == 0 {
+                    if body.index_count == 0 || !body.opaque {
                         continue;
                     }
-                    s.opaque.draw_body_depth_only(
+                    s.opaque.draw_body(
                         &mut pass,
                         &body.vbuf,
                         &body.ibuf,
@@ -376,12 +385,17 @@ impl WgpuCustomRender for WgpuSceneRenderer {
         }
 
         // ── Pass 2: dual depth-peeling chain ──────────────────────────────
+        // Only translucent bodies are peeled — opaque bodies were already
+        // drawn (shaded, depth-tested) in Pass 1 and composite in via the
+        // resolve's `scene_color`. `body_index` still indexes the shared
+        // uniform slot, so the peel reads each translucent body's own
+        // model / colour.
         let t_peel = web_time::Instant::now();
         let body_handles: Vec<BodyDrawHandle> = if draw_surface {
             s.bodies_gpu
                 .iter()
                 .enumerate()
-                .filter(|(_, b)| b.index_count > 0)
+                .filter(|(_, b)| b.index_count > 0 && !b.opaque)
                 .map(|(i, b)| BodyDrawHandle {
                     vbuf: &b.vbuf,
                     ibuf: &b.ibuf,

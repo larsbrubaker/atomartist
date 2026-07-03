@@ -156,7 +156,11 @@ pub(super) fn build_peel_pipeline(
         },
         primitive: wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleList,
-            cull_mode: Some(wgpu::Face::Back),
+            // No culling: a transparent mesh's back faces (far / interior
+            // walls) are visible surfaces too, so both faces must feed the
+            // peel chain. The colour shader flips the shading normal to
+            // face the viewer for back faces (`@builtin(front_facing)`).
+            cull_mode: None,
             ..Default::default()
         },
         depth_stencil: None,

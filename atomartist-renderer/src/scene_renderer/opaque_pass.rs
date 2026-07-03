@@ -104,28 +104,16 @@ pub struct OpaquePipelines {
     /// uniform buffer. `None` until the first body-buffer alloc;
     /// rebuilt whenever the buffer reallocates.
     pub body_bg: Option<wgpu::BindGroup>,
-
-    /// Depth-only twin of `scene_pipeline`: runs the same vertex
-    /// shader, writes depth + `scene_depth_color` (the R32Float mirror
-    /// the dual-peel chain samples), but the colour attachment's
-    /// write mask is empty so the surface colour stays untouched —
-    /// the mesh's colour is produced by the dual-peel chain rather
-    /// than the opaque pass. Mirrors MatterCAD's `RenderSceneDepth`
-    /// use of `sceneEffectDepthPS` with `colorWritesEnabled: false`.
-    pub depth_only_pipeline: wgpu::RenderPipeline,
 }
 
 impl OpaquePipelines {
-    /// Build both pipelines for the given offscreen target format.
-    /// Depth attachment format is always `Depth32Float`.
+    /// Build the shaded scene pipeline for the given offscreen target
+    /// format. Depth attachment format is always `Depth32Float`.
     pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
         let body_bgl = build_body_bgl(device);
         let (scene_pipeline, scene_bgl) =
             build_scene_pipeline(device, surface_format, &body_bgl);
         let (scene_ub, scene_bg) = build_scene_uniforms(device, &scene_bgl);
-
-        let depth_only_pipeline =
-            build_depth_only_pipeline(device, &scene_bgl, surface_format, &body_bgl);
 
         Self {
             scene_pipeline,
@@ -133,7 +121,6 @@ impl OpaquePipelines {
             scene_bg,
             body_bgl,
             body_bg: None,
-            depth_only_pipeline,
         }
     }
 
@@ -188,32 +175,6 @@ impl OpaquePipelines {
         pass.draw_indexed(0..index_count, 0, 0..1);
     }
 
-    /// Depth-only twin of [`Self::draw_body`]: writes depth + the
-    /// R32Float depth-colour mirror so the dual-peel chain has a
-    /// per-pixel opaque-depth value to discard against. Colour
-    /// write-mask is empty in the pipeline so the mesh's surface
-    /// colour stays the responsibility of the dual-peel chain.
-    pub fn draw_body_depth_only<'rpass>(
-        &'rpass self,
-        pass: &mut wgpu::RenderPass<'rpass>,
-        vbuf: &'rpass wgpu::Buffer,
-        ibuf: &'rpass wgpu::Buffer,
-        cbuf: &'rpass wgpu::Buffer,
-        index_count: u32,
-        body_index: u32,
-    ) {
-        let body_bg = match &self.body_bg {
-            Some(bg) => bg,
-            None => return,
-        };
-        pass.set_pipeline(&self.depth_only_pipeline);
-        pass.set_bind_group(0, &self.scene_bg, &[]);
-        pass.set_bind_group(1, body_bg, &[body_index * DYN_OFFSET_ALIGN]);
-        pass.set_vertex_buffer(0, vbuf.slice(..));
-        pass.set_vertex_buffer(1, cbuf.slice(..));
-        pass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
-        pass.draw_indexed(0..index_count, 0, 0..1);
-    }
 }
 
 /// Vertex layouts for the per-body pipelines. Slot 0 carries
@@ -383,69 +344,3 @@ fn build_scene_uniforms(
     (ub, bg)
 }
 
-fn build_depth_only_pipeline(
-    device: &wgpu::Device,
-    scene_bgl: &wgpu::BindGroupLayout,
-    surface_format: wgpu::TextureFormat,
-    body_bgl: &wgpu::BindGroupLayout,
-) -> wgpu::RenderPipeline {
-    // Reuse the scene shader's vertex + fragment stages; the fragment
-    // shader still runs (cheap, no varying / texture work) but the
-    // colour target's write_mask is `empty`, so no colour writes
-    // reach the attachment. We *could* drop the fragment stage
-    // entirely (`fragment: None`), but combining a no-fragment
-    // pipeline with a colour-attached render pass is a wgpu
-    // validation grey area on some backends; a real fragment with an
-    // empty write mask is the well-established depth-only idiom.
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("atomartist scene shader (depth-only reuse)"),
-        source: wgpu::ShaderSource::Wgsl(SCENE_SHADER.into()),
-    });
-    let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("atomartist depth-only pl"),
-        bind_group_layouts: &[Some(scene_bgl), Some(body_bgl)],
-        immediate_size: 0,
-    });
-    let layouts = vertex_layouts();
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("atomartist depth-only pipeline"),
-        layout: Some(&pl),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vs"),
-            buffers: &layouts,
-            compilation_options: Default::default(),
-        },
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            cull_mode: Some(wgpu::Face::Back),
-            ..Default::default()
-        },
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: wgpu::TextureFormat::Depth32Float,
-            depth_write_enabled: Some(true),
-            depth_compare: Some(wgpu::CompareFunction::Less),
-            stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState::default(),
-        }),
-        multisample: wgpu::MultisampleState::default(),
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs"),
-            targets: &[
-                Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: None,
-                    // Suppresses the mesh's *colour* (the dual-peel
-                    // chain writes that), while we still let the
-                    // `depth_color` attachment receive the mesh's z.
-                    write_mask: wgpu::ColorWrites::empty(),
-                }),
-                Some(scene_depth_color_target()),
-            ],
-            compilation_options: Default::default(),
-        }),
-        multiview_mask: None,
-        cache: None,
-    })
-}
