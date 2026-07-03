@@ -43,9 +43,13 @@ use bytemuck::{Pod, Zeroable};
 #[derive(Clone, Copy)]
 pub struct BodyDrawHandle<'a> {
     pub vbuf: &'a wgpu::Buffer,
-    pub ibuf: &'a wgpu::Buffer,
     pub cbuf: &'a wgpu::Buffer,
-    pub index_count: u32,
+    /// Per-vertex edge-hint buffer (slot 2). Bound on every per-body
+    /// draw so the shared vertex layout is satisfied; the depth-only /
+    /// init / shadow shaders ignore it.
+    pub hbuf: &'a wgpu::Buffer,
+    /// Vertex count for the non-indexed draw (`3 × tri_count`).
+    pub vertex_count: u32,
     pub body_index: u32,
 }
 

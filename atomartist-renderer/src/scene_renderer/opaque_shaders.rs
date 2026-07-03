@@ -46,8 +46,9 @@ struct U {
     global_ambient: vec4<f32>,
     material_specular: vec4<f32>,
     base_color: vec4<f32>,    // fallback when no bodies are bound
-    params: vec4<f32>,        // x = shininess
+    params: vec4<f32>,        // x = shininess, y = wire width (px)
     resolution: vec4<f32>,    // xy = pixel size, zw = pad
+    wire_color: vec4<f32>,    // folded-in edge colour (a scales alpha)
 };
 
 // Per-body uniform — selected via the dynamic-offset bind group at
@@ -68,7 +69,73 @@ struct VOut {
     @location(0) view_pos: vec3<f32>,
     @location(1) v_color: vec4<f32>,
     @location(2) view_normal: vec3<f32>,
+    // World-space normal (model rotation only, un-normalised) — the
+    // Overhang mode recolours by its Z in the fragment stage. Kept out
+    // of `shade`'s view-space normal so the two are independent.
+    @location(3) world_normal: vec3<f32>,
+    // Barycentric corner (from the de-indexed vertex index) + the
+    // triangle's edge hint — fold the wireframe into the polygon pass.
+    @location(4) bary: vec3<f32>,
+    @location(5) hint: vec3<f32>,
 };
+
+/// Unit barycentric for a de-indexed corner (`vertex_index % 3`).
+fn corner_bary(vid: u32) -> vec3<f32> {
+    let c = vid % 3u;
+    if (c == 0u) { return vec3<f32>(1.0, 0.0, 0.0); }
+    if (c == 1u) { return vec3<f32>(0.0, 1.0, 0.0); }
+    return vec3<f32>(0.0, 0.0, 1.0);
+}
+
+/// Blend the folded-in wireframe over a shaded fragment. `bary`/`hint`
+/// are interpolated; `surf` is the lit surface colour (rgb) and
+/// `surf_a` its alpha. Returns the composited RGBA. Ports MatterCAD's
+/// `WireframeEdgeFactors` + edge blend; edge alpha follows `surf_a` so
+/// the outline is as transparent as the polygon it rims.
+fn wire_blend(surf: vec3<f32>, surf_a: f32, bary: vec3<f32>, hint: vec3<f32>) -> vec4<f32> {
+    let width = max(u.params.y, 0.375);
+    let d = fwidth(bary);
+    let edge_factors = vec3<f32>(1.0) - smoothstep(vec3<f32>(0.0), d * width, bary);
+    let visible = edge_factors * step(vec3<f32>(0.5), hint);
+    let edge = max(max(visible.x, visible.y), visible.z);
+    if (edge <= 1e-5) {
+        return vec4<f32>(surf, surf_a);
+    }
+    let cov = edge * u.wire_color.a;
+    let rgb = mix(surf, u.wire_color.rgb, cov);
+    let a = max(surf_a, cov * surf_a);
+    return vec4<f32>(rgb, a);
+}
+
+// ── Overhang ramp (hardware port of `render_modes::overhang_colors`) ──
+// Cyan (223°) for up/vertical faces, ramping to red (5°) as the face
+// points straight down. Fed through `shade` like any base colour, so
+// the overhang preview is still lit — matching MatterCAD's
+// `OverhangRender`, which colours per-face then shades normally.
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> vec3<f32> {
+    let c = (1.0 - abs(2.0 * l - 1.0)) * s;
+    let hp = (h * 6.0) % 6.0;
+    let x = c * (1.0 - abs(hp % 2.0 - 1.0));
+    var rgb = vec3<f32>(0.0);
+    if (hp < 1.0) { rgb = vec3<f32>(c, x, 0.0); }
+    else if (hp < 2.0) { rgb = vec3<f32>(x, c, 0.0); }
+    else if (hp < 3.0) { rgb = vec3<f32>(0.0, c, x); }
+    else if (hp < 4.0) { rgb = vec3<f32>(0.0, x, c); }
+    else if (hp < 5.0) { rgb = vec3<f32>(x, 0.0, c); }
+    else { rgb = vec3<f32>(c, 0.0, x); }
+    return rgb + vec3<f32>(l - c / 2.0);
+}
+
+fn overhang_rgb(world_normal: vec3<f32>) -> vec3<f32> {
+    let nz = normalize(world_normal).z;
+    let cyan = 223.0 / 360.0;
+    let red = 5.0 / 360.0;
+    var hue = cyan;
+    if (nz < 0.0) {
+        hue = cyan + (red - cyan) * (-nz);
+    }
+    return hsl_to_rgb(hue, 0.99, 0.49);
+}
 
 struct FsOut {
     @location(0) color: vec4<f32>,
@@ -77,9 +144,11 @@ struct FsOut {
 
 @vertex
 fn vs(
+    @builtin(vertex_index) vid: u32,
     @location(0) pos: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) v_color: vec4<f32>,
+    @location(3) hint: vec3<f32>,
 ) -> VOut {
     var o: VOut;
     // Apply the per-body model matrix before the camera view so each
@@ -92,6 +161,10 @@ fn vs(
     // Per-vertex normal into view space (model then view), matching the
     // dual-peel colour shader and MatterCAD's `mul(Normal, ModelView)`.
     o.view_normal = (u.view * b.model * vec4<f32>(normal, 0.0)).xyz;
+    // World-space normal (model rotation only) for the Overhang ramp.
+    o.world_normal = (b.model * vec4<f32>(normal, 0.0)).xyz;
+    o.bary = corner_bary(vid);
+    o.hint = hint;
     return o;
 }
 
@@ -132,9 +205,17 @@ fn fs(in: VOut) -> FsOut {
     if (dot(nrm, vdir) < 0.0) {
         nrm = -nrm;
     }
-    let lit = shade(in.v_color.rgb, nrm);
+    // Overhang mode (b.flags.y) swaps the surface base colour for the
+    // slope ramp; every other mode shades the per-vertex colour.
+    var base = in.v_color.rgb;
+    if (b.flags.y != 0u) {
+        base = overhang_rgb(in.world_normal);
+    }
+    let lit = shade(base, nrm);
     var out: FsOut;
-    out.color = vec4<f32>(lit, in.v_color.a);
+    // Fold the wireframe into the polygon fragment — same depth as the
+    // surface, so no separate pass and no z-fighting.
+    out.color = wire_blend(lit, in.v_color.a, in.bary, in.hint);
     out.depth_color = vec4<f32>(in.clip.z, 0.0, 0.0, 1.0);
     return out;
 }

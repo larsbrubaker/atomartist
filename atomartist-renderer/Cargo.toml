@@ -25,6 +25,11 @@ wgpu           = { version = "29", default-features = false, features = ["wgsl"]
 bytemuck       = { version = "1", features = ["derive"] }
 glam           = { workspace = true }
 web-time       = "1"
+# Fast, non-cryptographic hashing for the render-mode edge topology
+# pass (feature / non-manifold classification). The mesh is
+# split-vertex so edges are keyed by position bits; std's SipHash makes
+# that ~4× slower than it needs to be on dense meshes rebuilt per eval.
+rustc-hash     = "2"
 
 [dev-dependencies]
 pollster       = "0.3"

@@ -43,6 +43,7 @@ use atomartist_lib::geometry::{is_inherit_color, Body, DEFAULT_GEOMETRY_COLOR};
 use crate::bed::BedRenderer;
 use crate::camera::OrbitCamera;
 
+mod body_buffers;
 pub mod body_uniform;
 pub mod depth_peel;
 pub mod gizmo_pass;
@@ -164,33 +165,30 @@ pub struct BodyGpu {
     /// rebuilds when a Color-node-tinted body has no per-vertex
     /// data but its uniform tint changes.
     pub body_color_q: u32,
-    /// Position + normal vertex buffer (slot 0).
+    /// **De-indexed** position + normal vertex buffer (slot 0): three
+    /// vertices per triangle, drawn non-indexed. De-indexing lets the
+    /// surface shaders fold the wireframe into the polygon pass — each
+    /// triangle owns its barycentric corners (derived from the vertex
+    /// index) even where the source mesh shares vertices (e.g. tess2
+    /// extrude caps). No separate index buffer.
     pub vbuf: wgpu::Buffer,
-    /// Triangle index buffer.
-    pub ibuf: wgpu::Buffer,
-    /// Per-vertex RGBA colour buffer (slot 1). Always populated —
-    /// see the type-level doc for the per-vertex vs uniform-fill
-    /// branch at build time.
+    /// De-indexed per-vertex RGBA colour buffer (slot 1), same corner
+    /// order as `vbuf`. Always populated — per-vertex overlay or the
+    /// body's uniform tint repeated.
     pub cbuf: wgpu::Buffer,
-    /// Triangle index count for `draw_indexed`.
-    pub index_count: u32,
-    /// Vertex count — used to size the colour-fill when the source
-    /// body lacks per-vertex data.
-    pub vert_count: u32,
-    /// Render-mode fingerprint the mode-dependent buffers (`cbuf`
-    /// when Overhang, `edge_vbuf`) were built for. Quaternary cache
-    /// key: switching render style — or, in Overhang, rotating the
-    /// body — rolls this and rebuilds the colour + edge buffers while
-    /// leaving the geometry VBO/IBO untouched. See [`variant_key`].
+    /// De-indexed per-vertex edge-hint buffer (slot 2): `[hint.xyz]`,
+    /// the triangle's three-edge classification replicated across its
+    /// corners. Zero for Shaded / Overhang. The surface shaders gate
+    /// the barycentric wireframe on it. Always allocated so the shared
+    /// vertex layout binds a valid slot 2 on every per-body draw.
+    pub hbuf: wgpu::Buffer,
+    /// Vertex count for the non-indexed draws (`3 × tri_count`).
+    pub vertex_count: u32,
+    /// Render-mode fingerprint the mode-dependent `hbuf` was built for.
+    /// Quaternary cache key: switching render style rolls this and
+    /// rebuilds the hint buffer while leaving `vbuf` / `cbuf` reusable.
+    /// See [`variant_key`].
     pub variant_key: u64,
-    /// Cached local-space edge segments for the active edge mode
-    /// (Outlines / NonManifold / Polygons), as a `LineList` vertex
-    /// buffer. `None` for Shaded / Overhang or when the mesh has no
-    /// qualifying edges. Drawn over the shaded surface through the
-    /// gizmo line pipeline (see [`render_impl`]).
-    pub edge_vbuf: Option<wgpu::Buffer>,
-    /// Vertex count for `edge_vbuf` (two per segment).
-    pub edge_count: u32,
     /// True when the body's resolved colour is fully opaque (alpha ≈ 1).
     /// Opaque bodies render through the shaded, depth-tested opaque pass
     /// ([`OpaquePipelines::draw_body`]); only translucent bodies go
@@ -562,214 +560,10 @@ impl WgpuSceneRenderer {
     fn bed_render_z(&self) -> f32 {
         0.0
     }
-
-    /// Refresh the per-body GPU cache + the dynamic body-uniform
-    /// buffer so they reflect `self.bodies`.
-    ///
-    /// Strategy: for each body in declaration order, reuse the
-    /// existing `bodies_gpu` entry when its `(mesh_ptr, vertex_colors_ptr)`
-    /// matches; rebuild otherwise. Surplus entries are dropped.
-    ///
-    /// Per-body uniforms (model + colour + flags) are repacked into
-    /// the dynamic uniform buffer every frame — the body Vec is small
-    /// (typically ≤ 16) and the slot write is one `queue.write_buffer`
-    /// call, so amortising further isn't worth the bookkeeping.
-    ///
-    /// Returns `true` when the underlying uniform buffer reallocated
-    /// (capacity grew). Callers rebuild any bind group that resolves
-    /// against the buffer's identity on a `true` return.
-    pub(crate) fn ensure_body_buffers(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-    ) -> bool {
-        let bodies = self.bodies.clone();
-        let render_style = self.render_style;
-        let s = match &mut self.state {
-            Some(s) => s,
-            None => return false,
-        };
-
-        let mut new_cache: Vec<BodyGpu> = Vec::with_capacity(bodies.len());
-        let mut taken = vec![false; s.bodies_gpu.len()];
-
-        for body in bodies.iter() {
-            let mesh = &body.mesh;
-            if mesh.num_prop < 6 || mesh.vert_properties.is_empty() {
-                // Skip — degenerate body. Slot still consumes a
-                // `BodyUniform` entry below for index parity.
-                continue;
-            }
-            let mesh_ptr = mesh.vert_properties.as_ptr() as usize;
-            let vc_ptr = body
-                .vertex_colors
-                .as_ref()
-                .map(|v| v.as_ptr() as usize)
-                .unwrap_or(0);
-            let color_q = pack_color_q(body.color);
-            let variant = variant_key(render_style, &body.matrix);
-
-            // Reuse an existing cache entry with matching pointers,
-            // tint AND render-mode fingerprint (the tint participates
-            // in the cbuf fill when there's no per-vertex overlay; the
-            // variant guards the mode-dependent cbuf/edge buffers).
-            let mut reused = false;
-            for (i, prev) in s.bodies_gpu.iter().enumerate() {
-                if !taken[i]
-                    && prev.mesh_ptr == mesh_ptr
-                    && prev.vertex_colors_ptr == vc_ptr
-                    && prev.body_color_q == color_q
-                    && prev.variant_key == variant
-                {
-                    taken[i] = true;
-                    let clone = BodyGpu {
-                        mesh_ptr: prev.mesh_ptr,
-                        vertex_colors_ptr: prev.vertex_colors_ptr,
-                        body_color_q: prev.body_color_q,
-                        vbuf: prev.vbuf.clone(),
-                        ibuf: prev.ibuf.clone(),
-                        cbuf: prev.cbuf.clone(),
-                        index_count: prev.index_count,
-                        vert_count: prev.vert_count,
-                        variant_key: prev.variant_key,
-                        edge_vbuf: prev.edge_vbuf.clone(),
-                        edge_count: prev.edge_count,
-                        opaque: prev.opaque,
-                    };
-                    new_cache.push(clone);
-                    reused = true;
-                    break;
-                }
-            }
-            if reused {
-                continue;
-            }
-
-            // Build fresh — pos+normal VBO, index, then the colour
-            // VBO at slot 1.
-            let stride = mesh.num_prop as usize;
-            let n_verts = mesh.vert_properties.len() / stride;
-            let mut verts: Vec<Vertex> = Vec::with_capacity(n_verts);
-            for i in 0..n_verts {
-                verts.push(Vertex {
-                    pos: [
-                        mesh.vert_properties[i * stride],
-                        mesh.vert_properties[i * stride + 1],
-                        mesh.vert_properties[i * stride + 2],
-                    ],
-                    normal: [
-                        mesh.vert_properties[i * stride + 3],
-                        mesh.vert_properties[i * stride + 4],
-                        mesh.vert_properties[i * stride + 5],
-                    ],
-                });
-            }
-            let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("atomartist body vb"),
-                contents: cast_slice(&verts),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-            let ibuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("atomartist body ib"),
-                contents: cast_slice(&mesh.tri_verts),
-                usage: wgpu::BufferUsages::INDEX,
-            });
-
-            // Colour VBO. In Overhang mode the surface is recoloured by
-            // world-space face slope (the shader still lights it), so
-            // the cbuf carries the overhang ramp instead of the tint.
-            // Otherwise: per-vertex overlay when the source body has
-            // one, else the body's uniform colour. See the `BodyGpu`
-            // doc for why we always allocate this.
-            let cbuf_data: Vec<f32> = if render_style.is_overhang() {
-                render_modes::overhang_colors(mesh, &body.matrix)
-            } else {
-                match body.vertex_colors.as_ref() {
-                    Some(colors) if colors.len() == n_verts * 4 => (**colors).clone(),
-                    _ => {
-                        // Either no per-vertex overlay OR length mismatch
-                        // (defensive — a mis-sized overlay falls back to
-                        // the uniform tint rather than risking a buffer
-                        // overrun in the shader).
-                        let mut v = Vec::with_capacity(n_verts * 4);
-                        for _ in 0..n_verts {
-                            v.extend_from_slice(&body.color);
-                        }
-                        v
-                    }
-                }
-            };
-            let cbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("atomartist body cb"),
-                contents: cast_slice(&cbuf_data),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-
-            // Edge overlay VBO — built once per (mesh, mode). Empty for
-            // Shaded / Overhang or when the mesh has no qualifying edges.
-            let (edge_vbuf, edge_count) = match render_style.edge_kind() {
-                Some(kind) => {
-                    let segs = render_modes::edges_for(mesh, kind);
-                    if segs.is_empty() {
-                        (None, 0)
-                    } else {
-                        let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                            label: Some("atomartist body edge vb"),
-                            contents: cast_slice(&segs),
-                            usage: wgpu::BufferUsages::VERTEX,
-                        });
-                        (Some(buf), segs.len() as u32)
-                    }
-                }
-                None => (None, 0),
-            };
-
-            new_cache.push(BodyGpu {
-                mesh_ptr,
-                vertex_colors_ptr: vc_ptr,
-                body_color_q: color_q,
-                vbuf,
-                ibuf,
-                cbuf,
-                index_count: mesh.tri_verts.len() as u32,
-                vert_count: n_verts as u32,
-                variant_key: variant,
-                edge_vbuf,
-                edge_count,
-                opaque: is_opaque_color(body.color),
-            });
-        }
-
-        s.bodies_gpu = new_cache;
-
-        // Resize + repopulate the dynamic uniform buffer. One slot
-        // per body — the slot order matches `bodies_gpu` so a draw
-        // call's body index doubles as the uniform-slot index.
-        let needed = bodies.len() as u32;
-        let realloc = s.body_uniforms.ensure_capacity(device, needed);
-        let mut slots: Vec<body_uniform::BodyUniform> = Vec::with_capacity(bodies.len());
-        for body in bodies.iter() {
-            // Renderer-side fallback for the `INHERIT_COLOR` sentinel:
-            // if a body reaches the renderer with alpha = 0, no node
-            // along its chain set an explicit colour, so substitute
-            // `DEFAULT_GEOMETRY_COLOR` to keep the body visible.
-            let color = if is_inherit_color(&body.color) {
-                DEFAULT_GEOMETRY_COLOR
-            } else {
-                body.color
-            };
-            slots.push(body_uniform::BodyUniform {
-                model: body.matrix,
-                color,
-                flags: [body.has_vertex_colors() as u32, 0, 0, 0],
-            });
-        }
-        if !slots.is_empty() {
-            s.body_uniforms.write_slots(queue, &slots);
-        }
-        realloc
-    }
 }
+
+// `ensure_body_buffers` — the per-body GPU buffer builder — lives in
+// `body_buffers.rs` to keep this file under the 800-line guardrail.
 
 /// A body counts as opaque when its resolved colour's alpha is ≈ 1.
 /// The `INHERIT_COLOR` sentinel (alpha 0) resolves to the opaque
@@ -788,23 +582,14 @@ fn is_opaque_color(color: [f32; 4]) -> bool {
 }
 
 /// Fingerprint of the render mode for the body cache. Rolls whenever
-/// the selected [`RenderStyle`] changes so the mode-dependent buffers
-/// (edge overlay, and the Overhang cbuf) rebuild. In Overhang the
-/// surface colour depends on the body's world orientation, so the
-/// matrix is folded in too — rotating the body reramps the overhang;
-/// the other modes ignore the matrix (their edges are local-space and
-/// the tint is orientation-independent).
-fn variant_key(style: RenderStyle, matrix: &[f32; 16]) -> u64 {
+/// the selected [`RenderStyle`] changes so the mode-dependent edge
+/// overlay buffer rebuilds. Overhang is now computed live in the shader
+/// from the world normal, so it no longer participates — the key is
+/// purely the style discriminant.
+fn variant_key(style: RenderStyle) -> u64 {
     // `+ 1` so the Shaded discriminant (0) can't collide with a
     // freshly-zeroed key.
-    let mut k = style as u64 + 1;
-    if style.is_overhang() {
-        for &f in matrix {
-            let q = (f * 1e4).round() as i64 as u64;
-            k = k.wrapping_mul(0x100000001B3) ^ q;
-        }
-    }
-    k
+    style as u64 + 1
 }
 
 /// Quantise an RGBA colour to a 32-bit packed key — 8 bits per

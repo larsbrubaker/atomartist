@@ -147,16 +147,21 @@ fn render_layers_proj(
         contents: bytemuck::cast_slice(&cols),
         usage: wgpu::BufferUsages::VERTEX,
     });
-    let ibuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("test ib"),
-        contents: bytemuck::cast_slice(&idx),
-        usage: wgpu::BufferUsages::INDEX,
+    // Geometry is already de-indexed (3 fresh verts per layer), so the
+    // non-indexed draw path just walks `verts`. Zero edge hints — this
+    // test exercises the peel composite, not the folded wireframe.
+    let vertex_count = (verts.len() / 6) as u32;
+    let hbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("test hb"),
+        contents: bytemuck::cast_slice(&vec![0.0f32; vertex_count as usize * 3]),
+        usage: wgpu::BufferUsages::VERTEX,
     });
+    let _ = &idx;
     let handles = [BodyDrawHandle {
         vbuf: &vbuf,
-        ibuf: &ibuf,
         cbuf: &cbuf,
-        index_count: idx.len() as u32,
+        hbuf: &hbuf,
+        vertex_count,
         body_index: 0,
     }];
 
@@ -212,6 +217,7 @@ fn render_layers_proj(
             base_color: [1.0, 1.0, 1.0, 1.0],
             params: [1.0, 0.0, 0.0, 0.0],
             resolution: [w as f32, h as f32, super::peel_bias(device), 0.0],
+            wire_color: [0.0, 0.0, 0.0, 0.0],
         }
     } else {
         PeelUniforms {
@@ -229,6 +235,7 @@ fn render_layers_proj(
             base_color: [1.0, 1.0, 1.0, 1.0],
             params: [1.0, 0.0, 0.0, 0.0],
             resolution: [w as f32, h as f32, super::peel_bias(device), 0.0],
+            wire_color: [0.0, 0.0, 0.0, 0.0],
         }
     };
 

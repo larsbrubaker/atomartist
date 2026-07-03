@@ -516,13 +516,16 @@ mod tests {
 
         // Shade with the interpolated per-vertex normal, and never
         // reconstruct the shading normal from screen-space derivatives.
+        // (`fwidth` IS used — for the folded-in wireframe coverage — but
+        // only in the uniform prologue; see the dedicated guard
+        // `peel_wireframe_derivative_is_in_uniform_prologue`.)
         let shader = super::shaders::DUAL_PEEL_COLOR_SHADER;
         assert!(
             shader.contains("view_normal"),
             "dual-peel colour shader must carry the per-vertex normal into \
              view space (`view_normal`) and shade with it, like MatterCAD",
         );
-        for builtin in ["dpdx", "dpdy", "fwidth"] {
+        for builtin in ["dpdx", "dpdy"] {
             assert!(
                 !shader.contains(builtin),
                 "dual-peel colour shader must not derive the shading normal \
@@ -531,6 +534,43 @@ mod tests {
                  normal instead",
             );
         }
+    }
+
+    /// The folded-in wireframe uses `fwidth(bary)`, which WGSL forbids
+    /// under non-uniform control flow. The peel `fs` reaches its colour
+    /// path only after depth-slab `discard`s, so the derivative MUST be
+    /// evaluated in the uniform prologue — before the first `discard` —
+    /// and its scalar coverage threaded through. If it slips below a
+    /// `discard`, Tint rejects the module in the browser and the canvas
+    /// goes black (native naga is lenient and won't catch it).
+    #[test]
+    fn peel_wireframe_derivative_is_in_uniform_prologue() {
+        let src = super::shaders::DUAL_PEEL_COLOR_SHADER;
+        let start = src.rfind("fn fs(").expect("peel shader must define `fs`");
+        let fs = &src[start..];
+        let cov = fs
+            .find("edge_coverage(")
+            .expect("peel `fs` must call `edge_coverage` for the wireframe");
+        // Match the `discard;` statement, not the word in a comment.
+        let discard = fs
+            .find("discard;")
+            .expect("peel `fs` is expected to `discard` on depth-slab rejects");
+        assert!(
+            cov < discard,
+            "peel `fs` must call `edge_coverage` (the `fwidth` site) BEFORE \
+             its first `discard` — otherwise the derivative runs under \
+             non-uniform control flow and Tint rejects the module (black \
+             canvas in the browser)",
+        );
+        // And the `fwidth` itself must live in `edge_coverage`, not in the
+        // post-discard blend (`wire_apply`).
+        let apply = super::shaders::DUAL_PEEL_COLOR_SHADER;
+        let ea = apply.find("fn wire_apply(").expect("expect `wire_apply`");
+        let ea_body = first_fn_body(&apply[ea..]);
+        assert!(
+            !ea_body.contains("fwidth"),
+            "`wire_apply` runs after the discards and must not use `fwidth`",
+        );
     }
 
     #[test]

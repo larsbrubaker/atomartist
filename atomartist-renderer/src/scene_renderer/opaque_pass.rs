@@ -54,10 +54,18 @@ pub struct Uniforms {
     pub global_ambient: [f32; 4],
     pub material_specular: [f32; 4],
     pub base_color: [f32; 4],
-    /// `x` = Blinn-Phong shininess exponent. `y..w` reserved.
+    /// `x` = Blinn-Phong shininess exponent, `y` = wireframe half-line
+    /// width in pixels (edge modes; folded into the polygon pass).
+    /// `zw` reserved.
     pub params: [f32; 4],
     /// `xy` = framebuffer pixel size. `zw` reserved.
     pub resolution: [f32; 4],
+    /// Wireframe colour for the folded-in edge modes — dark grey for
+    /// Outlines / Polygons, red for Non-Manifold. `a` scales the edge
+    /// alpha alongside coverage + the surface's own alpha, so the
+    /// outline follows the polygon's transparency. Ignored when the
+    /// per-vertex hint is zero (Shaded / Overhang).
+    pub wire_color: [f32; 4],
 }
 
 #[repr(C)]
@@ -153,13 +161,14 @@ impl OpaquePipelines {
     /// scene uniforms via [`Self::write_scene_uniforms`] and bound
     /// viewport / scissor on `pass`. `body_index` indexes into the
     /// dynamic uniform buffer — see [`super::body_uniform::slot_offset`].
+    #[allow(clippy::too_many_arguments)]
     pub fn draw_body<'rpass>(
         &'rpass self,
         pass: &mut wgpu::RenderPass<'rpass>,
         vbuf: &'rpass wgpu::Buffer,
-        ibuf: &'rpass wgpu::Buffer,
         cbuf: &'rpass wgpu::Buffer,
-        index_count: u32,
+        hbuf: &'rpass wgpu::Buffer,
+        vertex_count: u32,
         body_index: u32,
     ) {
         let body_bg = match &self.body_bg {
@@ -171,10 +180,12 @@ impl OpaquePipelines {
         pass.set_bind_group(1, body_bg, &[body_index * DYN_OFFSET_ALIGN]);
         pass.set_vertex_buffer(0, vbuf.slice(..));
         pass.set_vertex_buffer(1, cbuf.slice(..));
-        pass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
-        pass.draw_indexed(0..index_count, 0, 0..1);
+        pass.set_vertex_buffer(2, hbuf.slice(..));
+        // Non-indexed: geometry is de-indexed (3 verts/tri) so the
+        // shader can derive per-triangle barycentric from the vertex
+        // index and fold the wireframe into this pass.
+        pass.draw(0..vertex_count, 0..1);
     }
-
 }
 
 /// Vertex layouts for the per-body pipelines. Slot 0 carries
@@ -183,7 +194,7 @@ impl OpaquePipelines {
 /// renderer always populates the colour VBO, either with per-vertex
 /// overlay data or with the body's uniform tint repeated — see
 /// [`super::BodyGpu`] for the build-time branch.
-pub fn vertex_layouts() -> [wgpu::VertexBufferLayout<'static>; 2] {
+pub fn vertex_layouts() -> [wgpu::VertexBufferLayout<'static>; 3] {
     static SLOT0_ATTRS: [wgpu::VertexAttribute; 2] = [
         wgpu::VertexAttribute {
             offset: 0,
@@ -201,6 +212,15 @@ pub fn vertex_layouts() -> [wgpu::VertexBufferLayout<'static>; 2] {
         shader_location: 2,
         format: wgpu::VertexFormat::Float32x4,
     }];
+    // Slot 2: per-vertex edge hint (`[hint.xyz]`). Only the two surface
+    // shaders (opaque scene + dual-peel colour) read it to fold the
+    // wireframe into the polygon pass; the depth-only / init / shadow
+    // shaders ignore location 3 but still bind this buffer.
+    static SLOT2_ATTRS: [wgpu::VertexAttribute; 1] = [wgpu::VertexAttribute {
+        offset: 0,
+        shader_location: 3,
+        format: wgpu::VertexFormat::Float32x3,
+    }];
     [
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Vertex>() as u64,
@@ -211,6 +231,11 @@ pub fn vertex_layouts() -> [wgpu::VertexBufferLayout<'static>; 2] {
             array_stride: 16,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &SLOT1_ATTRS,
+        },
+        wgpu::VertexBufferLayout {
+            array_stride: 12,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &SLOT2_ATTRS,
         },
     ]
 }

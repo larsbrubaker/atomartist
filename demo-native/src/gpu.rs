@@ -67,7 +67,15 @@ impl Gpu {
             format: surface_format,
             width: size.width.max(1),
             height: size.height.max(1),
-            present_mode: wgpu::PresentMode::AutoVsync,
+            // NOT AutoVsync (FIFO): on Windows a reactive (on-demand)
+            // redraw loop paired with FIFO makes `get_current_texture()`
+            // block on the DWM present queue for many vblank intervals —
+            // the ~90 ms/frame stall seen even on a trivial scene, while
+            // the WASM build (browser compositor, non-blocking) stays
+            // smooth. AutoNoVsync resolves to Immediate/Mailbox so each
+            // frame presents without pacing to the refresh rate. A CAD
+            // viewport tolerates the occasional tear for the latency win.
+            present_mode: wgpu::PresentMode::AutoNoVsync,
             desired_maximum_frame_latency: 2,
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],

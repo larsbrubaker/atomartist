@@ -216,8 +216,7 @@ impl OutlinePipelines {
             pass.set_pipeline(&self.id_pipeline);
             pass.set_bind_group(0, &self.id_bg, &[]);
             pass.set_vertex_buffer(0, mesh.vbuf.slice(..));
-            pass.set_index_buffer(mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+            pass.draw(0..mesh.vertex_count, 0..1);
         }
 
         let edge_bg = self.build_edge_bind_group(

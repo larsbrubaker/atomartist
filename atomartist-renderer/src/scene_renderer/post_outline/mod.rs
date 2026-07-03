@@ -33,9 +33,10 @@ pub use pipelines::{OutlinePipelines, OutlineUniforms};
 pub mod pipelines_mesh {
     #[derive(Clone, Copy)]
     pub struct Mesh<'a> {
+        /// De-indexed position+normal buffer (drawn non-indexed).
         pub vbuf: &'a wgpu::Buffer,
-        pub ibuf: &'a wgpu::Buffer,
-        pub index_count: u32,
+        /// Vertex count for the non-indexed ID prepass draw.
+        pub vertex_count: u32,
     }
 }
 

@@ -449,15 +449,15 @@ impl ShadowChain {
                 pass.set_pipeline(&self.shadow_caster_pipeline);
                 pass.set_bind_group(0, &self.shadow_caster_bg, &[]);
                 for h in bodies {
-                    if h.index_count == 0 {
+                    if h.vertex_count == 0 {
                         continue;
                     }
                     let off = h.body_index * DYN_OFFSET_ALIGN;
                     pass.set_bind_group(1, body_bg, &[off]);
                     pass.set_vertex_buffer(0, h.vbuf.slice(..));
                     pass.set_vertex_buffer(1, h.cbuf.slice(..));
-                    pass.set_index_buffer(h.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..h.index_count, 0, 0..1);
+                    pass.set_vertex_buffer(2, h.hbuf.slice(..));
+                    pass.draw(0..h.vertex_count, 0..1);
                 }
             }
         }

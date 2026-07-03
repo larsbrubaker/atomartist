@@ -131,8 +131,9 @@ struct U {
     global_ambient: vec4<f32>,
     material_specular: vec4<f32>,
     base_color: vec4<f32>,    // fallback only — body colour preferred
-    params: vec4<f32>,        // x = shininess
+    params: vec4<f32>,        // x = shininess, y = wire width (px)
     resolution: vec4<f32>,    // xy = pixel size, z = peel bias
+    wire_color: vec4<f32>,    // folded-in edge colour (a scales alpha)
 };
 
 struct B {
@@ -154,13 +155,27 @@ struct VOut {
     @location(0) view_pos: vec3<f32>,
     @location(1) v_color: vec4<f32>,
     @location(2) view_normal: vec3<f32>,
+    // World-space normal for the Overhang ramp — see the opaque shader.
+    @location(3) world_normal: vec3<f32>,
+    // Barycentric corner + edge hint for the folded-in wireframe.
+    @location(4) bary: vec3<f32>,
+    @location(5) hint: vec3<f32>,
 };
+
+fn corner_bary(vid: u32) -> vec3<f32> {
+    let c = vid % 3u;
+    if (c == 0u) { return vec3<f32>(1.0, 0.0, 0.0); }
+    if (c == 1u) { return vec3<f32>(0.0, 1.0, 0.0); }
+    return vec3<f32>(0.0, 0.0, 1.0);
+}
 
 @vertex
 fn vs(
+    @builtin(vertex_index) vid: u32,
     @location(0) pos: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) v_color: vec4<f32>,
+    @location(3) hint: vec3<f32>,
 ) -> VOut {
     var o: VOut;
     let world_pos4 = b.model * vec4<f32>(pos, 1.0);
@@ -168,12 +183,43 @@ fn vs(
     o.view_pos = view_pos4.xyz;
     o.clip = u.proj * view_pos4;
     o.v_color = v_color;
+    o.bary = corner_bary(vid);
+    o.hint = hint;
     // Per-vertex normal into view space (model then view), matching
     // MatterCAD's `mul(float4(Normal, 0), ModelView)`. Uses the plain
     // model-view (not the inverse-transpose), same as the reference —
     // correct for the rigid / uniform-scale body transforms we use.
     o.view_normal = (u.view * b.model * vec4<f32>(normal, 0.0)).xyz;
+    o.world_normal = (b.model * vec4<f32>(normal, 0.0)).xyz;
     return o;
+}
+
+// Overhang ramp — hardware port of `render_modes::overhang_colors`,
+// identical to the opaque shader's copy (kept in sync by hand, like the
+// `shade` / `srgb_to_linear` helpers these shaders already duplicate).
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> vec3<f32> {
+    let c = (1.0 - abs(2.0 * l - 1.0)) * s;
+    let hp = (h * 6.0) % 6.0;
+    let x = c * (1.0 - abs(hp % 2.0 - 1.0));
+    var rgb = vec3<f32>(0.0);
+    if (hp < 1.0) { rgb = vec3<f32>(c, x, 0.0); }
+    else if (hp < 2.0) { rgb = vec3<f32>(x, c, 0.0); }
+    else if (hp < 3.0) { rgb = vec3<f32>(0.0, c, x); }
+    else if (hp < 4.0) { rgb = vec3<f32>(0.0, x, c); }
+    else if (hp < 5.0) { rgb = vec3<f32>(x, 0.0, c); }
+    else { rgb = vec3<f32>(c, 0.0, x); }
+    return rgb + vec3<f32>(l - c / 2.0);
+}
+
+fn overhang_rgb(world_normal: vec3<f32>) -> vec3<f32> {
+    let nz = normalize(world_normal).z;
+    let cyan = 223.0 / 360.0;
+    let red = 5.0 / 360.0;
+    var hue = cyan;
+    if (nz < 0.0) {
+        hue = cyan + (red - cyan) * (-nz);
+    }
+    return hsl_to_rgb(hue, 0.99, 0.49);
 }
 
 struct PeelOut {
@@ -216,8 +262,41 @@ fn shade(base_color: vec4<f32>, n: vec3<f32>) -> vec4<f32> {
     return vec4<f32>(lit, base_color.a);
 }
 
+/// Wireframe edge coverage (`fwidth(bary)`) — MUST be called from the
+/// peel `fs`'s UNIFORM prologue, before any depth-slab `discard`. WGSL
+/// forbids screen-space derivatives under non-uniform control flow and
+/// the browser's Tint compiler rejects the whole module (black canvas)
+/// if that rule is broken — see `shade_has_no_screen_space_derivatives`.
+/// So the derivative is isolated here and its scalar result threaded
+/// into `wire_apply` after the discards.
+fn edge_coverage(bary: vec3<f32>, hint: vec3<f32>) -> f32 {
+    let width = max(u.params.y, 0.375);
+    let d = fwidth(bary);
+    let edge_factors = vec3<f32>(1.0) - smoothstep(vec3<f32>(0.0), d * width, bary);
+    let visible = edge_factors * step(vec3<f32>(0.5), hint);
+    return max(max(visible.x, visible.y), visible.z);
+}
+
+/// Blend the precomputed wireframe coverage over a translucent fragment.
+/// No derivatives — safe to call after the peel's `discard`s. Edge alpha
+/// scales with the surface alpha so a translucent body gets a
+/// translucent outline.
+fn wire_apply(surf: vec3<f32>, surf_a: f32, edge: f32) -> vec4<f32> {
+    if (edge <= 1e-5) {
+        return vec4<f32>(surf, surf_a);
+    }
+    let cov = edge * u.wire_color.a;
+    return vec4<f32>(mix(surf, u.wire_color.rgb, cov), max(surf_a, cov * surf_a));
+}
+
 @fragment
 fn fs(in: VOut) -> PeelOut {
+    // UNIFORM PROLOGUE: evaluate the wireframe's screen-space derivative
+    // here, before any `discard` below, then thread the scalar coverage
+    // through. `fwidth` under the peel's non-uniform (post-discard)
+    // control flow would make Tint reject the module — see `edge_coverage`.
+    let wire_cov = edge_coverage(in.bary, in.hint);
+
     // Shade with the mesh's interpolated per-vertex normal in view
     // space, matching MatterCAD. No screen-space derivatives: a
     // derivative-reconstructed normal spikes at triangle edges under
@@ -263,14 +342,25 @@ fn fs(in: VOut) -> PeelOut {
     }
 
     // Per-vertex colour (always populated — see the matching note
-    // in the opaque shader's `fs`) drives the surface base colour.
-    let shaded = shade(in.v_color, nrm);
+    // in the opaque shader's `fs`) drives the surface base colour,
+    // except in Overhang mode (b.flags.y) which swaps in the slope
+    // ramp while preserving the body's alpha for the peel blend.
+    var base_color = in.v_color;
+    if (b.flags.y != 0u) {
+        base_color = vec4<f32>(overhang_rgb(in.world_normal), in.v_color.a);
+    }
+    let shaded = shade(base_color, nrm);
+    // Fold the wireframe into the translucent fragment — same depth as
+    // the surface, so edges peel/blend with the polygon instead of
+    // fighting it in a separate pass. Coverage was computed in the
+    // uniform prologue; applying it here uses no derivatives.
+    let wired = wire_apply(shaded.rgb, shaded.a, wire_cov);
     if (abs(cur_z - front_z) <= u.resolution.z) {
         // Front-layer hit: premultiply (per MatterCAD's UnderBlend).
-        out.front_color = vec4<f32>(shaded.rgb * shaded.a, shaded.a);
+        out.front_color = vec4<f32>(wired.rgb * wired.a, wired.a);
     } else {
         // Back-layer hit: standard over blend uses straight alpha.
-        out.back_color = shaded;
+        out.back_color = wired;
     }
     return out;
 }

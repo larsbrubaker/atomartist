@@ -18,6 +18,12 @@ use super::timings::{elapsed_ms, log_scene_timings, SceneTimings};
 use super::util::normalize3;
 use super::WgpuSceneRenderer;
 
+/// Wireframe half-line width, in **framebuffer** pixels. The scene
+/// supersamples at [`super::SSAA_SCALE`]× (3×), so this is ~⅓ of a
+/// screen pixel per unit — `1.5` fb-px lands a ~1px line on screen after
+/// the box downsample. Passed to the edge shader's `fwidth` threshold.
+const EDGE_WIDTH_PX: f32 = 1.5;
+
 /// Cache key for the bed-shadow chain. Hashes mesh pointer + matrix
 /// per body so a drag (mesh ptr unchanged, matrix shifts) rolls the
 /// key and forces the shadow to re-render at the body's new
@@ -257,7 +263,9 @@ impl WgpuCustomRender for WgpuSceneRenderer {
             global_ambient: to_vec4(self.global_ambient),
             material_specular: to_vec4(self.material_specular),
             base_color: self.base_color,
-            params: [self.shininess, 0.0, 0.0, 0.0],
+            // params.y = wireframe half-line width (px) for the edge
+            // modes, folded into the surface shaders.
+            params: [self.shininess, EDGE_WIDTH_PX, 0.0, 0.0],
             // `resolution.z` carries the dual-peel discard bias, paired
             // with the depth format the device supports (1e-5 for 32-bit
             // depth, 1e-3 for the half-float fallback). The opaque /
@@ -268,6 +276,10 @@ impl WgpuCustomRender for WgpuSceneRenderer {
                 super::depth_peel::peel_bias(ctx.device),
                 0.0,
             ],
+            // Wire colour for the folded-in wireframe (dark grey for
+            // Outlines / Polygons, red for Non-Manifold). Only takes
+            // effect where the per-vertex hint is non-zero.
+            wire_color: self.render_style.edge_color(),
         };
         s.opaque.write_scene_uniforms(ctx.queue, &uniforms);
         // Suppress an unused warning until the cast_slice import is
@@ -291,12 +303,12 @@ impl WgpuCustomRender for WgpuSceneRenderer {
                 .bodies_gpu
                 .iter()
                 .enumerate()
-                .filter(|(_, b)| b.index_count > 0)
+                .filter(|(_, b)| b.vertex_count > 0)
                 .map(|(i, b)| super::body_uniform::BodyDrawHandle {
                     vbuf: &b.vbuf,
-                    ibuf: &b.ibuf,
                     cbuf: &b.cbuf,
-                    index_count: b.index_count,
+                    hbuf: &b.hbuf,
+                    vertex_count: b.vertex_count,
                     body_index: i as u32,
                 })
                 .collect();
@@ -381,15 +393,15 @@ impl WgpuCustomRender for WgpuSceneRenderer {
                 // likewise keeps transparent geometry out of the opaque
                 // depth. `body_index` indexes the body's uniform slot.
                 for (body_index, body) in s.bodies_gpu.iter().enumerate() {
-                    if body.index_count == 0 || !body.opaque {
+                    if body.vertex_count == 0 || !body.opaque {
                         continue;
                     }
                     s.opaque.draw_body(
                         &mut pass,
                         &body.vbuf,
-                        &body.ibuf,
                         &body.cbuf,
-                        body.index_count,
+                        &body.hbuf,
+                        body.vertex_count,
                         body_index as u32,
                     );
                 }
@@ -407,12 +419,12 @@ impl WgpuCustomRender for WgpuSceneRenderer {
             .bodies_gpu
             .iter()
             .enumerate()
-            .filter(|(_, b)| b.index_count > 0 && !b.opaque)
+            .filter(|(_, b)| b.vertex_count > 0 && !b.opaque)
             .map(|(i, b)| BodyDrawHandle {
                 vbuf: &b.vbuf,
-                ibuf: &b.ibuf,
                 cbuf: &b.cbuf,
-                index_count: b.index_count,
+                hbuf: &b.hbuf,
+                vertex_count: b.vertex_count,
                 body_index: i as u32,
             })
             .collect();
@@ -486,47 +498,17 @@ impl WgpuCustomRender for WgpuSceneRenderer {
                     scene_view,
                     post_outline::pipelines_mesh::Mesh {
                         vbuf: &body.vbuf,
-                        ibuf: &body.ibuf,
-                        index_count: body.index_count,
+                        vertex_count: body.vertex_count,
                     },
                     (fb_w, fb_h),
                 );
             }
         }
 
-        // ── Pass 2.55: render-mode edge overlays ─────────────────────────
-        //
-        // Outlines / NonManifold / Polygons draw a wireframe over the
-        // shaded surface (Overhang / Shaded have no `edge_vbuf`). The
-        // segments are cached local-space in each `BodyGpu` and drawn
-        // depth-tested through the gizmo solid pipeline so occluded
-        // edges hide behind the surface — the same result MatterCAD
-        // gets by classifying edges inside the surface shader. The
-        // colour is per-mode (`edge_color`): dark grey for feature /
-        // all edges, red for non-manifold.
-        let edge_color = self.render_style.edge_color();
-        for (i, body) in s.bodies_gpu.iter().enumerate() {
-            let edge_vbuf = match &body.edge_vbuf {
-                Some(b) => b,
-                None => continue,
-            };
-            // Same body-matrix seam as the opaque / outline passes:
-            // fold the body's live model matrix into the MVP so the
-            // wireframe tracks the body as it's transformed.
-            let model = Mat4::from_cols_array(&outline_model_matrix(&self.bodies, i));
-            let emvp = (proj * view * model).to_cols_array();
-            s.gizmo_pipelines.execute_lines_buffer(
-                ctx.device,
-                ctx.encoder,
-                edge_vbuf,
-                body.edge_count,
-                edge_color,
-                emvp,
-                scene_view,
-                scene_depth_view,
-                (fb_w, fb_h),
-            );
-        }
+        // The render-mode wireframe is no longer a separate pass — it's
+        // folded into the opaque + dual-peel surface shaders (see
+        // `wire_blend`), so the edges share the surface's exact depth and
+        // can't z-fight it. Nothing to draw here.
 
         // ── Pass 2.6: gizmos ─────────────────────────────────────────────
         for gizmo in &self.gizmo_lines {

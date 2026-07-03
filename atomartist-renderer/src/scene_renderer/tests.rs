@@ -71,7 +71,7 @@ fn opaque_and_translucent_take_disjoint_paths() {
          opaque depth makes the peel reject their own back layers",
     );
     assert!(
-        src.contains("b.index_count > 0 && !b.opaque"),
+        src.contains("b.vertex_count > 0 && !b.opaque"),
         "the dual-peel body list must exclude opaque bodies (`!b.opaque`)",
     );
 }

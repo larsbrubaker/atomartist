@@ -242,8 +242,8 @@ impl DualPeelPipelines {
                     pass.set_bind_group(1, body_bg, &[off]);
                     pass.set_vertex_buffer(0, h.vbuf.slice(..));
                     pass.set_vertex_buffer(1, h.cbuf.slice(..));
-                    pass.set_index_buffer(h.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..h.index_count, 0, 0..1);
+                    pass.set_vertex_buffer(2, h.hbuf.slice(..));
+                    pass.draw(0..h.vertex_count, 0..1);
                 }
             }
         }
@@ -306,16 +306,15 @@ impl DualPeelPipelines {
                     for h in bodies {
                         let off = h.body_index * DYN_OFFSET_ALIGN;
                         pass.set_bind_group(1, body_bg, &[off]);
-                        // Both vertex-buffer slots must be set —
-                        // the pipeline declares slot 0 (pos+normal)
-                        // and slot 1 (per-vertex colour) and wgpu
-                        // validates the bind on every draw call.
-                        // The init pass above does the same; keep
-                        // these two loops in lockstep.
+                        // All three vertex-buffer slots must be set —
+                        // the shared layout declares slot 0 (pos+normal),
+                        // slot 1 (colour) and slot 2 (edge hint) and wgpu
+                        // validates the bind on every draw call. The init
+                        // pass above does the same; keep them in lockstep.
                         pass.set_vertex_buffer(0, h.vbuf.slice(..));
                         pass.set_vertex_buffer(1, h.cbuf.slice(..));
-                        pass.set_index_buffer(h.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                        pass.draw_indexed(0..h.index_count, 0, 0..1);
+                        pass.set_vertex_buffer(2, h.hbuf.slice(..));
+                        pass.draw(0..h.vertex_count, 0..1);
                     }
                 }
             }
