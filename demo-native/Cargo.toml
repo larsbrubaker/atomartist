@@ -24,6 +24,13 @@ image               = { version = "0.24", default-features = false, features = [
 rfd                 = "0.15"
 web-time            = "1"
 
+# Drop-position workaround: winit's Windows backend performs OLE
+# drag-and-drop without emitting CursorMoved (and discards the drop
+# point), so we query the live cursor at DroppedFile time. Same
+# windows-sys version winit already pulls in — no extra build cost.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+
 [dependencies.wgpu]
 version = "29"
 default-features = false

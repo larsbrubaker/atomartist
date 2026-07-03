@@ -61,7 +61,9 @@ fn top_menu_bar_hugs_top_with_no_padding_strip() {
     // fix locks the row to `MENU_BAR_H` so the menu fills the whole row
     // — traditional Windows-style placement against the top edge.
     let h = TestHarness::new();
-    let bar = h.find_by_type("MenuBar").expect("menu bar widget");
+    // The bar is hosted inside the MenuChrome wrapper (which rebuilds
+    // menus from app state); the wrapper's bounds ARE the bar's bounds.
+    let bar = h.find_by_type("MenuChrome").expect("menu chrome widget");
     let bar_h = bar.bounds().height;
     assert!(
         (bar_h - agg_gui::widgets::menu::MENU_BAR_H).abs() < 0.5,

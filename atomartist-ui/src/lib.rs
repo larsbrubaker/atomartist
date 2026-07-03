@@ -6,6 +6,7 @@
 //! mount. No platform code lives here.
 
 pub mod app_state;
+pub mod app_state_files;
 pub mod app_state_model;
 pub mod circular_dropdown;
 pub mod circular_icon_button;
@@ -13,6 +14,7 @@ pub mod debug_windows;
 pub mod floating_overlay;
 pub mod icons;
 pub mod mattercad_icons;
+pub mod menu_actions;
 pub mod node_helpers;
 pub mod settings;
 pub mod shell_init;
@@ -22,6 +24,7 @@ pub mod top_menu_bar;
 pub mod viewport_overlay;
 
 pub use app_state::AppState;
+pub use app_state_files::MeshExportFormat;
 pub use app_state_model::{shared_model_for, AppStateModel};
 pub use debug_windows::{build_debug_windows, DebugWindowHandles};
 pub use floating_overlay::{FloatingOverlayHandle, FloatingOverlayHost};

@@ -26,7 +26,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agg-gui"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "agg-rust 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "base64",
@@ -38,7 +38,7 @@ dependencies = [
  "pulldown-cmark",
  "qrcodegen",
  "rustybuzz",
- "tess2-rust 1.1.8",
+ "tess2-rust 1.1.8 (registry+https://github.com/rust-lang/crates.io-index)",
  "ttf-parser",
  "usvg",
  "wasm-bindgen",
@@ -347,7 +347,7 @@ dependencies = [
  "quick-xml",
  "serde",
  "serde_json",
- "tess2-rust 1.1.4",
+ "tess2-rust 1.1.8",
  "zip",
 ]
 
@@ -363,7 +363,7 @@ dependencies = [
  "manifold-rust",
  "naga",
  "pollster 0.3.0",
- "tess2-rust 1.1.4",
+ "tess2-rust 1.1.8",
  "web-time",
  "wgpu",
 ]
@@ -391,6 +391,8 @@ dependencies = [
  "atomartist-renderer",
  "atomartist-ui",
  "manifold-rust",
+ "serde_json",
+ "zip",
 ]
 
 [[package]]
@@ -832,6 +834,7 @@ dependencies = [
  "rfd",
  "web-time",
  "wgpu",
+ "windows-sys 0.59.0",
  "winit",
 ]
 
@@ -859,8 +862,14 @@ dependencies = [
  "agg-gui",
  "agg-rust 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "bytemuck",
+ "console_error_panic_hook",
+ "pollster 0.3.0",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
  "web-time",
  "wgpu",
+ "winit",
 ]
 
 [[package]]
@@ -3079,7 +3088,7 @@ dependencies = [
 
 [[package]]
 name = "tess2-rust"
-version = "1.1.4"
+version = "1.1.8"
 
 [[package]]
 name = "tess2-rust"

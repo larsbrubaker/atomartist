@@ -24,9 +24,11 @@ use winit::event::{ElementState, Event, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::{Window, WindowAttributes};
 
+mod dialogs;
 mod frame;
 mod gpu;
 
+use dialogs::NativeDialogs;
 use frame::paint_frame;
 use gpu::Gpu;
 
@@ -141,6 +143,34 @@ fn settings_path() -> Option<PathBuf> {
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
             .map(|p| p.join("atomartist").join("settings.txt"))
     }
+}
+
+/// Physical-pixel cursor position relative to the window's client
+/// area, queried live from the OS. Used by the file-drop handler
+/// because winit's tracked cursor is stale during an OLE drag (see
+/// the DroppedFile arm). Returns `None` off-Windows or when the
+/// window position is unavailable — callers fall back to the last
+/// tracked cursor position.
+#[cfg(target_os = "windows")]
+fn live_cursor_in_window(window: &Window) -> Option<(f64, f64)> {
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    let mut pt = POINT { x: 0, y: 0 };
+    // SAFETY: GetCursorPos writes into the POINT we own; no other
+    // preconditions.
+    if unsafe { GetCursorPos(&mut pt) } == 0 {
+        return None;
+    }
+    let client_origin = window.inner_position().ok()?;
+    Some((
+        (pt.x - client_origin.x) as f64,
+        (pt.y - client_origin.y) as f64,
+    ))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn live_cursor_in_window(_window: &Window) -> Option<(f64, f64)> {
+    None
 }
 
 /// Parsed CLI: `--screenshot <path>` exits after grabbing one frame.
@@ -378,6 +408,20 @@ fn main() {
                 Event::WindowEvent {
                     event: WindowEvent::CloseRequested, ..
                 } => {
+                    // Unsaved-changes gate: same Save / Discard / Cancel
+                    // flow the File menu's destructive actions use.
+                    // Cancel (or a cancelled/failed save) keeps the app
+                    // running. Skipped in screenshot mode — those runs
+                    // are headless and must never block on a dialog.
+                    if screenshot_path.is_none()
+                        && state_for_save.has_unsaved_changes()
+                        && !atomartist_ui::menu_actions::confirm_discard_unsaved(
+                            &state_for_save,
+                            &NativeDialogs,
+                        )
+                    {
+                        return;
+                    }
                     // Flush pending settings before exiting so the
                     // last-opened project path (and theme / accent /
                     // window bounds the user just changed) survives
@@ -489,9 +533,18 @@ fn main() {
                     event: WindowEvent::DroppedFile(path), ..
                 } => {
                     // winit emits one DroppedFile per file in a multi-file
-                    // drop. Forward each separately at the current cursor
-                    // position; the app's node canvas handles them.
-                    app.on_file_dropped(cursor_x, cursor_y, vec![path]);
+                    // drop. Forward each separately at the drop position.
+                    //
+                    // (cursor_x, cursor_y) is STALE here on Windows: the
+                    // OS owns the pointer during an OLE drag, winit emits
+                    // no CursorMoved for it, and its IDropTarget::Drop
+                    // discards the drop point — so the tracked cursor
+                    // still says wherever the mouse was before the drag
+                    // began. Query the live cursor instead; fall back to
+                    // the tracked position on other platforms.
+                    let (drop_x, drop_y) =
+                        live_cursor_in_window(&window).unwrap_or((cursor_x, cursor_y));
+                    app.on_file_dropped(drop_x, drop_y, vec![path]);
                 }
                 Event::WindowEvent {
                     event: WindowEvent::MouseWheel { delta, .. }, ..
@@ -646,49 +699,14 @@ fn main() {
         .expect("event loop run");
 }
 
-/// File-dialog provider for native — backed by `rfd`. Blocking dialogs
-/// are fine: the agg-gui App's render loop is paused while the modal is
-/// up, and the user's response unblocks it.
-///
-/// Filter ordering matters: rfd uses the first filter as the default
-/// "Save as type" so we list `.atmr` first and keep `.json` as a
-/// secondary entry for opening / converting legacy projects.
-struct NativeDialogs;
-impl FileDialogProvider for NativeDialogs {
-    fn pick_open_project(&self) -> Option<PathBuf> {
-        rfd::FileDialog::new()
-            .add_filter("AtomArtist project", &["atmr"])
-            .add_filter("AtomArtist project (legacy JSON)", &["json"])
-            .add_filter("All files", &["*"])
-            .pick_file()
-    }
-    fn pick_save_project(&self, default_name: &str) -> Option<PathBuf> {
-        rfd::FileDialog::new()
-            .add_filter("AtomArtist project", &["atmr"])
-            .add_filter("AtomArtist project (legacy JSON)", &["json"])
-            .set_file_name(default_name)
-            .save_file()
-    }
-    fn pick_save_stl(&self, default_name: &str) -> Option<PathBuf> {
-        rfd::FileDialog::new()
-            .add_filter("Binary STL", &["stl"])
-            .set_file_name(default_name)
-            .save_file()
-    }
-    fn show_error(&self, message: &str) {
-        rfd::MessageDialog::new()
-            .set_title("AtomArtist")
-            .set_description(message)
-            .set_level(rfd::MessageLevel::Error)
-            .show();
-    }
-    fn show_info(&self, title: &str, message: &str) {
-        rfd::MessageDialog::new()
-            .set_title(title)
-            .set_description(message)
-            .set_level(rfd::MessageLevel::Info)
-            .show();
-    }
+
+// Phase 0 placeholder kept while atomartist-{lib,renderer,ui} stubs still
+// expose `placeholder`. Removed once they all carry real public API.
+#[allow(dead_code)]
+fn _touch_placeholders() {
+    atomartist_lib::placeholder();
+    atomartist_renderer::placeholder();
+    atomartist_ui::placeholder();
 }
 
 /// Encode an RGBA8 buffer to PNG. The capture path returns Y-down rows
@@ -704,13 +722,4 @@ fn save_rgba_png(path: &std::path::Path, pixels: &[u8], w: u32, h: u32) -> Resul
         }
     }
     buf.save(path).map_err(|e| e.to_string())
-}
-
-// Phase 0 placeholder kept while atomartist-{lib,renderer,ui} stubs still
-// expose `placeholder`. Removed once they all carry real public API.
-#[allow(dead_code)]
-fn _touch_placeholders() {
-    atomartist_lib::placeholder();
-    atomartist_renderer::placeholder();
-    atomartist_ui::placeholder();
 }

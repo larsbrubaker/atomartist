@@ -10,9 +10,12 @@
 //! are fanned around `v0`. Negative indices (relative to the current
 //! vertex count, as the OBJ spec allows) are resolved.
 //!
-//! OBJ is currently import-only — projects always re-export meshes as
-//! `.3mf`, which preserves units, color, and multi-part data the OBJ
-//! geometry layer can't carry.
+//! Projects always persist meshes as `.3mf` (which preserves units,
+//! color, and multi-part data the OBJ geometry layer can't carry);
+//! [`export_obj`] exists for the File → Export menu so users can hand
+//! geometry to OBJ-only tools. Positions + faces only — normals are
+//! recomputed flat per face on import anyway, so re-emitting them
+//! would just triple the file size.
 
 use manifold_rust::types::MeshGL;
 
@@ -123,6 +126,32 @@ pub fn import_obj(data: &[u8]) -> Result<MeshGL, ObjError> {
     Ok(make_mesh(vert_props, tri_verts))
 }
 
+/// Encode a mesh as ASCII Wavefront OBJ (positions + triangular faces,
+/// 1-based indices). The inverse of [`import_obj`] up to vertex
+/// deduplication: importing the output reproduces the same triangles
+/// with per-face flat normals.
+pub fn export_obj(mesh: &MeshGL) -> Vec<u8> {
+    use std::fmt::Write as _;
+    let stride = mesh.num_prop as usize;
+    let n_verts = if stride == 0 {
+        0
+    } else {
+        mesh.vert_properties.len() / stride
+    };
+    let mut out = String::with_capacity(n_verts * 24 + mesh.tri_verts.len() * 8 + 64);
+    out.push_str("# AtomArtist OBJ export\n");
+    for v in 0..n_verts {
+        let x = mesh.vert_properties[v * stride];
+        let y = mesh.vert_properties[v * stride + 1];
+        let z = mesh.vert_properties[v * stride + 2];
+        let _ = writeln!(out, "v {} {} {}", x, y, z);
+    }
+    for t in mesh.tri_verts.chunks_exact(3) {
+        let _ = writeln!(out, "f {} {} {}", t[0] + 1, t[1] + 1, t[2] + 1);
+    }
+    out.into_bytes()
+}
+
 fn resolve_index(i: i64, count: usize) -> Result<usize, ()> {
     if i > 0 {
         let idx = (i as usize).checked_sub(1).ok_or(())?;
@@ -217,6 +246,28 @@ f 1//1 2//1 3//1
     fn empty_obj_returns_error() {
         let r = import_obj(b"# nothing to see here\n");
         assert!(matches!(r, Err(ObjError::EmptyMesh)));
+    }
+
+    #[test]
+    fn export_obj_round_trips_through_import() {
+        let mesh = crate::geometry::generate_box(2.0, 3.0, 4.0);
+        let bytes = export_obj(&mesh);
+        let back = import_obj(&bytes).unwrap();
+        assert_eq!(num_tris(&back), num_tris(&mesh));
+        // Same axis-aligned bounds — positions survived the text trip.
+        let bounds = |m: &MeshGL| {
+            let mut lo = [f32::MAX; 3];
+            let mut hi = [f32::MIN; 3];
+            for i in 0..num_verts(m) {
+                let p = get_pos(m, i);
+                for a in 0..3 {
+                    lo[a] = lo[a].min(p[a]);
+                    hi[a] = hi[a].max(p[a]);
+                }
+            }
+            (lo, hi)
+        };
+        assert_eq!(bounds(&back), bounds(&mesh));
     }
 
     #[test]

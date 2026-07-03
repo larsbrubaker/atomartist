@@ -142,9 +142,93 @@ fn dropped_mesh_propagates_through_evaluate_now() {
 }
 
 #[test]
+fn dropping_over_the_3d_viewport_still_imports() {
+    // Real-world drops rarely land on the node canvas: users aim at
+    // the 3D viewport, and on Windows the shell can't even trust the
+    // drop position (winit discards it). The App re-offers unconsumed
+    // drops to the whole tree, so a drop anywhere in the window must
+    // reach the canvas's file-drop handler.
+    let mut h = TestHarness::new();
+    let nodes_before = h.state().graph.lock().unwrap().node_count();
+
+    let viewport = h.find_by_id("viewport-3d").expect("viewport widget");
+    let b = viewport.bounds();
+    let drop_x = b.x + b.width * 0.5;
+    let drop_y_screen = 720.0 - (b.y + b.height * 0.5);
+
+    h.drop_file(drop_x, drop_y_screen, mesh_fixture("simple_box.stl"));
+
+    assert_eq!(
+        h.state().graph.lock().unwrap().node_count(),
+        nodes_before + 1,
+        "a drop over the viewport must still spawn a MeshNode",
+    );
+}
+
+#[test]
+fn dropped_mesh_is_wired_to_output_and_visible() {
+    // The user-visible contract: drop an STL, see it in the viewport.
+    // That requires the import to connect itself to the Output node —
+    // the viewport renders only what's wired to Output.
+    let mut h = TestHarness::with_starter_graph();
+    let canvas = h.find_by_id("node-canvas").expect("canvas widget");
+    let b = canvas.bounds();
+    h.drop_file(
+        b.x + b.width * 0.5,
+        720.0 - (b.y + b.height * 0.5),
+        mesh_fixture("simple_box.stl"),
+    );
+    h.state().evaluate_now();
+
+    let graph = h.state().graph.lock().unwrap();
+    let mesh_id = graph
+        .nodes()
+        .find(|n| n.type_id.as_ref() == mesh_node::TYPE_ID)
+        .expect("MeshNode added")
+        .id;
+    let output_id = graph
+        .nodes()
+        .find(|n| n.type_id.as_ref() == "Output")
+        .expect("starter graph has an Output node")
+        .id;
+    assert!(
+        graph
+            .noodles()
+            .iter()
+            .any(|n| n.from.node == mesh_id && n.to.node == output_id),
+        "imported mesh must be connected into the Output node",
+    );
+}
+
+#[test]
+fn dropping_an_atmr_project_merges_into_the_scene() {
+    // Scene formats route through import_scene_file: dropping a saved
+    // project merges its nodes (minus Output) into the current graph.
+    let mut h = TestHarness::with_starter_graph();
+    let proj = std::env::temp_dir().join("__atmr_drop_project.atmr");
+    h.state().save_graph_to_path(&proj).unwrap();
+    let before = h.state().graph.lock().unwrap().node_count();
+
+    let canvas = h.find_by_id("node-canvas").expect("canvas widget");
+    let b = canvas.bounds();
+    h.drop_file(
+        b.x + b.width * 0.5,
+        720.0 - (b.y + b.height * 0.5),
+        proj.clone(),
+    );
+
+    assert_eq!(
+        h.state().graph.lock().unwrap().node_count(),
+        before + 3,
+        "starter pipeline (minus Output) must merge in",
+    );
+    let _ = std::fs::remove_file(proj);
+}
+
+#[test]
 fn dropping_an_unsupported_extension_is_a_silent_no_op() {
-    // The current handler only knows about .stl / .obj / .3mf. A
-    // dropped .txt must not crash and must not add a node.
+    // The drop handler only knows mesh + scene formats. A dropped
+    // .txt must not crash and must not add a node.
     let mut h = TestHarness::new();
     let before = h.state().graph.lock().unwrap().node_count();
 

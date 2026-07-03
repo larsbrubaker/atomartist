@@ -1,9 +1,11 @@
-//! Top menu bar — File / Edit / Settings / Help / Add Node.
+//! Top menu bar — File / Edit / View / Help / Add Node.
 //!
-//! Mirrors NodeDesigner's chrome. Actions are dispatched via string ids;
-//! the parent app translates them into graph mutations / file dialogs.
-//! For now the action strings are surfaced via the `on_action` callback
-//! handed to `MenuBar`; future iterations wire them up to `AppState`.
+//! Mirrors NodeDesigner's chrome. Actions are dispatched via string ids
+//! routed through `menu_actions::handle_action`. The bar itself is
+//! hosted inside [`MenuChrome`], a thin wrapper that rebuilds the menu
+//! list whenever state it renders (theme / accent radios, the recent-
+//! projects list) changes — `MenuItem::radio` marks are baked in at
+//! construction, so a static bar would go stale after the first change.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,11 +13,14 @@ use std::sync::Arc;
 use agg_gui::{
     text::Font,
     theme::{AccentColor, ThemePreference},
-    MenuBar, MenuEntry, MenuItem, TopMenu, Widget,
+    widget::{BackbufferCache, BackbufferMode},
+    DrawCtx, Event, EventResult, Key, MenuBar, MenuEntry, MenuItem, Modifiers,
+    Rect, Size, TopMenu, Widget,
 };
 
 use crate::app_state::AppState;
 use crate::debug_windows::DebugWindowHandles;
+use crate::menu_actions::handle_action;
 
 mod bi {
     pub const ARROW_CLOCKWISE: char = '\u{f116}';
@@ -24,6 +29,7 @@ mod bi {
     pub const BOOK: char = '\u{f194}';
     pub const BOX: char = '\u{f1c8}';
     pub const BOX_ARROW_UP_RIGHT: char = '\u{f1c5}';
+    pub const BOX_ARROW_IN_DOWN: char = '\u{f1bb}';
     pub const BOX_SEAM: char = '\u{f1c7}';
     pub const BUG: char = '\u{f2a3}';
     pub const CALCULATOR: char = '\u{f1e0}';
@@ -39,6 +45,17 @@ mod bi {
     pub const VECTOR_PEN: char = '\u{f604}';
 }
 
+/// User's answer to the "you have unsaved changes" prompt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnsavedChoice {
+    /// Save first, then proceed with the destructive action.
+    Save,
+    /// Throw the changes away and proceed.
+    Discard,
+    /// Abort the action entirely.
+    Cancel,
+}
+
 /// Platform-supplied file-picker hooks. demo-native provides an `rfd`-
 /// backed implementation; demo-wasm will provide a browser File API
 /// version. The trait is invoked from the menu's action callback so the
@@ -46,7 +63,17 @@ mod bi {
 pub trait FileDialogProvider: Send + Sync {
     fn pick_open_project(&self) -> Option<PathBuf>;
     fn pick_save_project(&self, default_name: &str) -> Option<PathBuf>;
-    fn pick_save_stl(&self, default_name: &str) -> Option<PathBuf>;
+    /// Destination picker for File → Export. `extension` is the
+    /// lowercase format extension without the dot ("stl", "3mf",
+    /// "obj", "atmr"); implementations use it for the dialog filter.
+    fn pick_save_export(&self, extension: &str, default_name: &str) -> Option<PathBuf>;
+    /// Source picker for File → Import — meshes (`.stl` / `.obj` /
+    /// `.3mf`), MatterControl scenes (`.mcx`), and AtomArtist projects
+    /// (`.atmr`).
+    fn pick_import_file(&self) -> Option<PathBuf>;
+    /// "You have unsaved changes" — Save / Discard / Cancel. Shown
+    /// before New / Open / recent-open and by the shell before close.
+    fn confirm_unsaved_changes(&self) -> UnsavedChoice;
     /// User-facing error notice — typically a message dialog. Returning
     /// nothing keeps the trait simple; severity is implicit "error".
     fn show_error(&self, message: &str);
@@ -55,41 +82,25 @@ pub trait FileDialogProvider: Send + Sync {
 }
 
 /// No-op file-dialog provider used by tests / WASM (until Phase 10 wires
-/// up the browser File API). Every call returns `None`.
+/// up the browser File API). Every picker returns `None`; the unsaved-
+/// changes prompt answers `Discard` so scripted flows never block.
 pub struct NoFileDialogs;
 impl FileDialogProvider for NoFileDialogs {
     fn pick_open_project(&self) -> Option<PathBuf> { None }
     fn pick_save_project(&self, _name: &str) -> Option<PathBuf> { None }
-    fn pick_save_stl(&self, _name: &str) -> Option<PathBuf> { None }
+    fn pick_save_export(&self, _ext: &str, _name: &str) -> Option<PathBuf> { None }
+    fn pick_import_file(&self) -> Option<PathBuf> { None }
+    fn confirm_unsaved_changes(&self) -> UnsavedChoice { UnsavedChoice::Discard }
     fn show_error(&self, _message: &str) {}
     fn show_info(&self, _title: &str, _message: &str) {}
 }
 
-/// Build the application's top menu bar widget. `state` is captured so
-/// menu actions can mutate the graph (load/save, undo/redo, add-node).
-/// `dialogs` injects platform-specific file pickers; pass
-/// `NoFileDialogs` from tests / non-native shells. `debug` carries the
-/// shared visibility cells so the `View → Debug` items can toggle the
-/// Inspector / Performance windows.
-pub fn build_menu_bar(
-    state: AppState,
-    font: Arc<Font>,
-    dialogs: Arc<dyn FileDialogProvider>,
-    debug: DebugWindowHandles,
-) -> MenuBar {
-    let menus = vec![
-        TopMenu::new(
-            "File",
-            vec![
-                MenuEntry::Item(MenuItem::action("New", "file.new").icon(bi::FILE_PLUS)),
-                MenuEntry::Item(MenuItem::action("Open\u{2026}", "file.open").icon(bi::FOLDER2_OPEN)),
-                MenuEntry::Separator,
-                MenuEntry::Item(MenuItem::action("Save", "file.save").icon(bi::FLOPPY)),
-                MenuEntry::Item(MenuItem::action("Save As\u{2026}", "file.save_as").icon(bi::FLOPPY)),
-                MenuEntry::Separator,
-                MenuEntry::Item(MenuItem::action("Export STL\u{2026}", "file.export_stl").icon(bi::BOX_ARROW_UP_RIGHT)),
-            ],
-        ),
+/// Compose the full menu list from the current app state. Called at
+/// construction and again by [`MenuChrome`] whenever the state the
+/// menus render has changed.
+fn compose_menus(state: &AppState) -> Vec<TopMenu> {
+    vec![
+        TopMenu::new("File", build_file_entries(state)),
         TopMenu::new(
             "Edit",
             vec![
@@ -116,7 +127,7 @@ pub fn build_menu_bar(
                 ),
             ],
         ),
-        TopMenu::new("View", build_view_entries(&state)),
+        TopMenu::new("View", build_view_entries(state)),
         TopMenu::new(
             "Help",
             vec![
@@ -126,35 +137,55 @@ pub fn build_menu_bar(
             ],
         ),
         // "Add Node" lists every registered node type, grouped by category.
-        TopMenu::new("Add Node", build_add_node_entries(&state)),
-    ];
-
-    let dispatch_state = state;
-    let dispatch_dialogs = dialogs;
-    let dispatch_debug = debug;
-    MenuBar::new(font, menus, move |action| {
-        handle_action(
-            &dispatch_state,
-            dispatch_dialogs.as_ref(),
-            &dispatch_debug,
-            action,
-        );
-    })
-    .with_font_size(13.0)
-    // Tight width — lets the parent FlexRow place chrome on the right.
-    .with_fit_width(true)
+        TopMenu::new("Add Node", build_add_node_entries(state)),
+    ]
 }
 
-/// Backwards-compat name kept for callers that imported the SizedBox
-/// wrapper. Now that agg-gui's MenuBar supports `fit_width` natively
-/// the wrapper isn't needed; this just forwards to `build_menu_bar`.
-pub fn build_menu_bar_sized(
-    state: AppState,
-    font: Arc<Font>,
-    dialogs: Arc<dyn FileDialogProvider>,
-    debug: DebugWindowHandles,
-) -> Box<dyn Widget> {
-    Box::new(build_menu_bar(state, font, dialogs, debug))
+/// File menu: project lifecycle up top, then import/export.
+fn build_file_entries(state: &AppState) -> Vec<MenuEntry> {
+    let recent = state.recent_projects.lock().unwrap().clone();
+    let recent_submenu: Vec<MenuEntry> = if recent.is_empty() {
+        vec![MenuEntry::Item(
+            MenuItem::action("(No Recent Projects)", "file.recent.none").disabled(),
+        )]
+    } else {
+        recent
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let label = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| p.to_string_lossy().into_owned());
+                MenuEntry::Item(MenuItem::action(label, format!("file.recent.{i}")))
+            })
+            .collect()
+    };
+
+    let export_submenu = vec![
+        MenuEntry::Item(MenuItem::action("STL\u{2026}", "file.export.stl")),
+        MenuEntry::Item(MenuItem::action("3MF\u{2026}", "file.export.3mf")),
+        MenuEntry::Item(MenuItem::action("OBJ\u{2026}", "file.export.obj")),
+        MenuEntry::Separator,
+        MenuEntry::Item(MenuItem::action(
+            "AtomArtist Project\u{2026}",
+            "file.export.atmr",
+        )),
+    ];
+
+    vec![
+        MenuEntry::Item(MenuItem::action("New", "file.new").icon(bi::FILE_PLUS)),
+        MenuEntry::Item(MenuItem::action("Open\u{2026}", "file.open").icon(bi::FOLDER2_OPEN)),
+        MenuEntry::Item(MenuItem::submenu("Open Recent", recent_submenu).icon(bi::FOLDER2_OPEN)),
+        MenuEntry::Separator,
+        MenuEntry::Item(MenuItem::action("Save", "file.save").icon(bi::FLOPPY)),
+        MenuEntry::Item(MenuItem::action("Save As\u{2026}", "file.save_as").icon(bi::FLOPPY)),
+        MenuEntry::Separator,
+        MenuEntry::Item(
+            MenuItem::action("Import\u{2026}", "file.import").icon(bi::BOX_ARROW_IN_DOWN),
+        ),
+        MenuEntry::Item(MenuItem::submenu("Export", export_submenu).icon(bi::BOX_ARROW_UP_RIGHT)),
+    ]
 }
 
 /// Build the View menu — debug toggles, theme (Light / Dark), and an
@@ -219,20 +250,6 @@ fn build_view_entries(state: &AppState) -> Vec<MenuEntry> {
     ]
 }
 
-/// Apply the current theme + accent combination to agg-gui's live
-/// visuals. Called whenever either changes — same shape as the demo's
-/// `apply_theme_visuals`.
-fn apply_theme_visuals(theme: ThemePreference, accent: AccentColor) {
-    use agg_gui::theme::{set_visuals, Visuals};
-    let base = match theme {
-        ThemePreference::Light => Visuals::light(),
-        // System currently falls back to Dark; if agg-gui later grows
-        // a `detect_system_theme()` AtomArtist can plug it in here.
-        ThemePreference::Dark | ThemePreference::System => Visuals::dark(),
-    };
-    set_visuals(base.with_accent_color(accent));
-}
-
 /// Walk the `NodeRegistry` and build a category-grouped Add Node submenu
 /// list. Each leaf is a `MenuItem` whose action is `"add.{type_id}"`.
 fn build_add_node_entries(state: &AppState) -> Vec<MenuEntry> {
@@ -271,141 +288,145 @@ fn category_icon(category: &str) -> Option<char> {
     }
 }
 
-fn handle_action(
-    state: &AppState,
-    dialogs: &dyn FileDialogProvider,
-    debug: &DebugWindowHandles,
-    action: &str,
-) {
-    if let Some(type_id) = action.strip_prefix("add.") {
-        // Find the action's NodeDef by its dynamic type_id string and
-        // intern it. Registry stores &'static str ids; we look up the
-        // exact one rather than leaking new memory each call.
-        let interned = state
-            .registry
-            .iter()
-            .map(|d| d.type_id())
-            .find(|s| *s == type_id);
-        if let Some(static_id) = interned {
-            let mut g = state.graph.lock().unwrap();
-            let _ = crate::node_helpers::add_node_with_defaults(
-                &mut g,
-                &state.registry,
-                static_id,
-                [80.0, 220.0],
-            );
-            drop(g);
-            state.schedule_evaluate();
-        }
-        return;
+/// Wraps the `MenuBar` so its item tree can be regenerated from app
+/// state. `MenuItem::radio` / the recent-files list are baked into the
+/// items at construction; this wrapper diffs a snapshot of that state
+/// in `layout` and swaps the menu list via [`MenuBar::set_menus`] when
+/// it moves — same pattern as agg-gui's demo `MenuChrome`.
+///
+/// The bar is a concrete field (not a tree child) so we can call
+/// `set_menus`; in exchange the wrapper forwards every Widget hook the
+/// bar relies on.
+pub struct MenuChrome {
+    bounds: Rect,
+    children: Vec<Box<dyn Widget>>, // intentionally empty — see struct docs
+    bar: MenuBar,
+    state: AppState,
+    last_snapshot: Option<(ThemePreference, AccentColor, Vec<PathBuf>)>,
+}
+
+impl MenuChrome {
+    fn snapshot(&self) -> (ThemePreference, AccentColor, Vec<PathBuf>) {
+        (
+            *self.state.theme.lock().unwrap(),
+            *self.state.accent_color.lock().unwrap(),
+            self.state.recent_projects.lock().unwrap().clone(),
+        )
     }
-    // Accent swatch picker — routes to the shared `Visuals` apply path
-    // so the chosen colour flows through every widget on the next frame.
-    if let Some(key) = action.strip_prefix("view.accent.") {
-        if let Some(accent) = AccentColor::from_key(key) {
-            *state.accent_color.lock().unwrap() = accent;
-            let theme = *state.theme.lock().unwrap();
-            apply_theme_visuals(theme, accent);
+
+    /// Rebuild the menu list if any rendered state changed since the
+    /// last rebuild. Cheap when nothing changed.
+    fn refresh_menus(&mut self) {
+        let snapshot = self.snapshot();
+        if self.last_snapshot.as_ref() == Some(&snapshot) {
+            return;
         }
-        return;
+        self.bar.set_menus(compose_menus(&self.state));
+        self.last_snapshot = Some(snapshot);
     }
-    if let Some(theme) = match action {
-        "view.theme.light" => Some(ThemePreference::Light),
-        "view.theme.dark" => Some(ThemePreference::Dark),
-        "view.theme.system" => Some(ThemePreference::System),
-        _ => None,
-    } {
-        *state.theme.lock().unwrap() = theme;
-        let accent = *state.accent_color.lock().unwrap();
-        apply_theme_visuals(theme, accent);
-        return;
+
+    /// Read-only view of the composed menu list — test hook, mirrors
+    /// [`MenuBar::menus`].
+    pub fn menus(&self) -> &[TopMenu] {
+        self.bar.menus()
     }
-    match action {
-        "edit.undo" => {
-            let mut buf = state.undo.lock().unwrap();
-            buf.undo();
-            state.schedule_evaluate();
-        }
-        "edit.redo" => {
-            let mut buf = state.undo.lock().unwrap();
-            buf.redo();
-            state.schedule_evaluate();
-        }
-        "file.new" => state.new_empty_project(),
-        "file.open" => {
-            if let Some(path) = dialogs.pick_open_project() {
-                if let Err(e) = state.load_graph_from_path(&path) {
-                    dialogs.show_error(&format!("Open failed: {}", e));
-                }
-            }
-        }
-        "file.save" => {
-            // If we already have a path, save directly. Otherwise prompt.
-            let existing = state.current_file.lock().unwrap().clone();
-            let path = match existing {
-                Some(p) => Some(p),
-                None => dialogs.pick_save_project("untitled.atmr"),
-            };
-            if let Some(p) = path {
-                if let Err(e) = state.save_graph_to_path(&p) {
-                    dialogs.show_error(&format!("Save failed: {}", e));
-                }
-            }
-        }
-        "file.save_as" => {
-            let suggested = state
-                .current_file
-                .lock()
-                .unwrap()
-                .as_ref()
-                .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()))
-                .unwrap_or_else(|| "untitled.atmr".to_string());
-            if let Some(path) = dialogs.pick_save_project(&suggested) {
-                if let Err(e) = state.save_graph_to_path(&path) {
-                    dialogs.show_error(&format!("Save failed: {}", e));
-                }
-            }
-        }
-        "file.export_stl" => {
-            if let Some(path) = dialogs.pick_save_stl("export.stl") {
-                if let Err(e) = state.export_stl_to_path(&path) {
-                    dialogs.show_error(&format!("Export failed: {}", e));
-                }
-            }
-        }
-        "help.about" => {
-            dialogs.show_info(
-                "About AtomArtist",
-                &format!(
-                    "AtomArtist v{}\n\n\
-                    A pure-Rust visual node-based 3D design tool.\n\
-                    Built on agg-gui + manifold-rust + clipper2-rust + tess2-rust.\n\n\
-                    https://github.com/larsbrubaker/atomartist",
-                    env!("CARGO_PKG_VERSION"),
-                ),
-            );
-        }
-        "help.license" => {
-            dialogs.show_info(
-                "License",
-                "AtomArtist is licensed under the MIT License.\n\
-                See the LICENSE file in the project root for the full text.",
-            );
-        }
-        "help.docs" => {
-            dialogs.show_info(
-                "Documentation",
-                "Documentation lives in README.md and CLAUDE.md\n\
-                in the project repository.\n\n\
-                https://github.com/larsbrubaker/atomartist",
-            );
-        }
-        "view.debug.inspector" => {
-            debug.inspector_visible.set(!debug.inspector_visible.get());
-        }
-        "view.debug.performance" => {
-            debug.perf_visible.set(!debug.perf_visible.get());
-        }
-        _ => {}
+}
+
+impl Widget for MenuChrome {
+    fn type_name(&self) -> &'static str {
+        "MenuChrome"
     }
+    fn bounds(&self) -> Rect {
+        self.bounds
+    }
+    fn set_bounds(&mut self, b: Rect) {
+        self.bounds = b;
+        self.bar.set_bounds(Rect::new(0.0, 0.0, b.width, b.height));
+    }
+    fn children(&self) -> &[Box<dyn Widget>] {
+        &self.children
+    }
+    fn children_mut(&mut self) -> &mut Vec<Box<dyn Widget>> {
+        &mut self.children
+    }
+    fn layout(&mut self, available: Size) -> Size {
+        self.refresh_menus();
+        let used = self.bar.layout(available);
+        self.bounds = Rect::new(0.0, 0.0, used.width, used.height);
+        self.bar
+            .set_bounds(Rect::new(0.0, 0.0, used.width, used.height));
+        used
+    }
+    fn paint(&mut self, ctx: &mut dyn DrawCtx) {
+        self.bar.paint(ctx);
+    }
+    fn paint_global_overlay(&mut self, ctx: &mut dyn DrawCtx) {
+        self.bar.paint_global_overlay(ctx);
+    }
+    fn hit_test_global_overlay(&self, local_pos: agg_gui::Point) -> bool {
+        self.bar.hit_test_global_overlay(local_pos)
+    }
+    fn has_active_modal(&self) -> bool {
+        self.bar.has_active_modal()
+    }
+    fn on_event(&mut self, event: &Event) -> EventResult {
+        self.bar.on_event(event)
+    }
+    fn on_unconsumed_key(&mut self, key: &Key, modifiers: Modifiers) -> EventResult {
+        self.bar.on_unconsumed_key(key, modifiers)
+    }
+    fn backbuffer_cache_mut(&mut self) -> Option<&mut BackbufferCache> {
+        self.bar.backbuffer_cache_mut()
+    }
+    fn backbuffer_mode(&self) -> BackbufferMode {
+        self.bar.backbuffer_mode()
+    }
+}
+
+/// Build the application's top menu bar widget. `state` is captured so
+/// menu actions can mutate the graph (load/save, undo/redo, add-node)
+/// and so the chrome can rebuild the menus when rendered state (theme,
+/// accent, recent files) changes. `dialogs` injects platform-specific
+/// file pickers; pass `NoFileDialogs` from tests / non-native shells.
+/// `debug` carries the shared visibility cells so the `View → Debug`
+/// items can toggle the Inspector / Performance windows.
+pub fn build_menu_bar(
+    state: AppState,
+    font: Arc<Font>,
+    dialogs: Arc<dyn FileDialogProvider>,
+    debug: DebugWindowHandles,
+) -> MenuChrome {
+    let menus = compose_menus(&state);
+    let dispatch_state = state.clone();
+    let dispatch_dialogs = dialogs;
+    let dispatch_debug = debug;
+    let bar = MenuBar::new(font, menus, move |action| {
+        handle_action(
+            &dispatch_state,
+            dispatch_dialogs.as_ref(),
+            &dispatch_debug,
+            action,
+        );
+        agg_gui::animation::request_draw();
+    })
+    .with_font_size(13.0)
+    // Tight width — lets the parent FlexRow place chrome on the right.
+    .with_fit_width(true);
+    MenuChrome {
+        bounds: Rect::default(),
+        children: Vec::new(),
+        bar,
+        state,
+        last_snapshot: None,
+    }
+}
+
+/// Boxed variant used by `top_level::build_app`.
+pub fn build_menu_bar_sized(
+    state: AppState,
+    font: Arc<Font>,
+    dialogs: Arc<dyn FileDialogProvider>,
+    debug: DebugWindowHandles,
+) -> Box<dyn Widget> {
+    Box::new(build_menu_bar(state, font, dialogs, debug))
 }

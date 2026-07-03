@@ -11,17 +11,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use agg_gui::undo::{UndoBuffer, UndoRedoCommand};
+use agg_gui::undo::UndoBuffer;
 use atomartist_lib::geometry::Geometry3d;
 use atomartist_lib::graph::executor::evaluate_dirty;
 use atomartist_lib::graph::node::{NodeId, PortValue};
-use atomartist_lib::graph::undo_commands::{AddNodeCmd, ChangePropertyCmd, ChangePropsCmd};
+use atomartist_lib::graph::undo_commands::{ChangePropertyCmd, ChangePropsCmd};
 use atomartist_lib::registry::NodeRegistry;
-use atomartist_lib::nodes::mesh::mesh_node;
-use atomartist_lib::serialization::{
-    export_3mf, export_stl, load_project_with_assets_from_path,
-    save_project_with_assets_to_path,
-};
+use atomartist_lib::serialization::ChangeTracker;
 use atomartist_lib::Graph;
 use atomartist_renderer::{
     CameraPoseAnimation, OrbitCamera, ProjectionAnimation, RenderStyle, ViewportTool,
@@ -118,10 +114,27 @@ pub struct AppState {
     /// `Visuals` snapshot).
     pub theme: Arc<Mutex<agg_gui::theme::ThemePreference>>,
     pub accent_color: Arc<Mutex<agg_gui::theme::AccentColor>>,
+    /// Snapshot-based unsaved-changes detector. Re-baselined on
+    /// new / load / save; consulted by the "discard changes?"
+    /// prompts before destructive file actions and app close.
+    pub change_tracker: Arc<Mutex<ChangeTracker>>,
+    /// Most-recently-used project files, newest first, deduped and
+    /// capped at [`crate::settings::MAX_RECENT_PROJECTS`]. Fed from
+    /// persisted settings at startup; updated on every successful
+    /// load / save; rendered as the File → Open Recent submenu.
+    pub recent_projects: Arc<Mutex<Vec<PathBuf>>>,
 }
 
 impl AppState {
     pub fn new(graph: Graph, registry: NodeRegistry) -> Self {
+        // Baseline the tracker on the graph we're handed so "unsaved
+        // changes" means "diverged from launch state" until the first
+        // save / load establishes a real on-disk baseline.
+        let change_tracker = {
+            let mut t = ChangeTracker::new();
+            t.mark_saved(&graph);
+            t
+        };
         Self {
             graph: Arc::new(Mutex::new(graph)),
             registry: Arc::new(registry),
@@ -148,7 +161,33 @@ impl AppState {
             )),
             theme: Arc::new(Mutex::new(agg_gui::theme::ThemePreference::Light)),
             accent_color: Arc::new(Mutex::new(agg_gui::theme::AccentColor::default())),
+            change_tracker: Arc::new(Mutex::new(change_tracker)),
+            recent_projects: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Re-baseline the unsaved-changes tracker on the current graph.
+    /// Call after any operation that establishes a new "clean" state
+    /// (seeding the starter graph, save, load).
+    pub fn mark_saved_baseline(&self) {
+        let graph = self.graph.lock().unwrap();
+        self.change_tracker.lock().unwrap().mark_saved(&graph);
+    }
+
+    /// True when the live graph differs from the last clean baseline.
+    /// Drives the "discard changes?" prompts.
+    pub fn has_unsaved_changes(&self) -> bool {
+        let graph = self.graph.lock().unwrap();
+        self.change_tracker.lock().unwrap().has_unsaved_changes(&graph)
+    }
+
+    /// Record `path` as the most recent project, deduping and capping
+    /// the list. Called on every successful load / save.
+    pub fn note_recent_project(&self, path: &Path) {
+        let mut recent = self.recent_projects.lock().unwrap();
+        recent.retain(|p| p != path);
+        recent.insert(0, path.to_path_buf());
+        recent.truncate(crate::settings::MAX_RECENT_PROJECTS);
     }
 
     /// Update the visual selection — the canvas highlights the source
@@ -444,252 +483,11 @@ impl Clone for AppState {
             assets: self.assets.clone(),
             theme: self.theme.clone(),
             accent_color: self.accent_color.clone(),
+            change_tracker: self.change_tracker.clone(),
+            recent_projects: self.recent_projects.clone(),
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// File operations — invoked from menu actions in `top_menu_bar`.
-// ---------------------------------------------------------------------------
-
-impl AppState {
-    /// Replace the current graph with an empty one. Clears undo history
-    /// and the current-file slot.
-    pub fn new_empty_project(&self) {
-        *self.graph.lock().unwrap() = Graph::new();
-        self.undo.lock().unwrap().clear_history();
-        *self.current_file.lock().unwrap() = None;
-        *self.display_node.lock().unwrap() = None;
-        *self.selection.lock().unwrap() = None;
-        *self.last_mesh_output.lock().unwrap() = None;
-        self.mark_viewport_dirty();
-    }
-
-    /// Load a graph from `path`. Replaces the current graph wholesale,
-    /// clears undo history, and runs an initial evaluation so the
-    /// viewport repopulates. Returns `Err` with a user-readable message
-    /// on parse / IO failure.
-    ///
-    /// Dispatches on file extension: `.atmr` loads through the zip
-    /// container, `.json` reads the raw JSON file. Unknown / missing
-    /// extensions try ATMR first — see `serialization::atmr` for
-    /// the full dispatch rules.
-    pub fn load_graph_from_path(&self, path: &Path) -> Result<(), String> {
-        let (result, assets) = load_project_with_assets_from_path(path, &self.registry)
-            .map_err(|e| format!("open {}: {}", path.display(), e))?;
-        let mut graph = result.graph;
-        // Resolve every MeshNode's asset reference into a live MeshGL
-        // before swapping the graph in — once the executor sees the new
-        // graph it'll be eligible for evaluation.
-        let warnings = mesh_node::resolve_mesh_assets(&mut graph, &assets);
-        for w in &warnings {
-            eprintln!("project load: {}", w);
-        }
-        *self.graph.lock().unwrap() = graph;
-        *self.assets.lock().unwrap() = assets;
-        self.undo.lock().unwrap().clear_history();
-        *self.current_file.lock().unwrap() = Some(path.to_path_buf());
-        // Pick a default display node — the highest-id node with a
-        // Geometry3d output, matching what evaluate_now does.
-        *self.display_node.lock().unwrap() = None;
-        *self.selection.lock().unwrap() = None;
-        self.evaluate_now();
-        Ok(())
-    }
-
-    /// Save the current graph to `path`. Picks the on-disk format
-    /// from the file extension — `.atmr` writes a zip archive
-    /// containing `graph.json`, `.json` writes plain JSON, anything
-    /// else (including no extension at all) defaults to `.atmr`.
-    /// Updates `current_file` on success so subsequent `Save` actions
-    /// reuse the chosen path without re-prompting.
-    pub fn save_graph_to_path(&self, path: &Path) -> Result<(), String> {
-        let graph = self.graph.lock().unwrap();
-        let assets = self.assets.lock().unwrap();
-        save_project_with_assets_to_path(path, &graph, &assets)
-            .map_err(|e| format!("write {}: {}", path.display(), e))?;
-        drop(graph);
-        drop(assets);
-        *self.current_file.lock().unwrap() = Some(path.to_path_buf());
-        Ok(())
-    }
-
-    /// Import a mesh file (`.stl`, `.obj`, or `.3mf`) and spawn a
-    /// `MeshNode` at the supplied canvas-space position.
-    ///
-    /// 1. Reads the file bytes off disk.
-    /// 2. Decodes into a `MeshGL` via the format-detecting
-    ///    [`mesh_node::decode_mesh`].
-    /// 3. Re-encodes the mesh as `.3mf` so the project always persists
-    ///    in one canonical format (matches the project rule "meshes
-    ///    are stored as .3mf").
-    /// 4. Inserts the bytes into [`AppState::assets`] (deduplicating
-    ///    on content hash).
-    /// 5. Creates a fresh `MeshNode` instance with the asset reference
-    ///    set and the runtime mesh cache pre-populated, so the
-    ///    viewport sees geometry immediately without waiting for a
-    ///    re-resolve pass.
-    /// 6. Triggers `evaluate_now` to push the new mesh into the
-    ///    `last_mesh_output` channel the viewport reads.
-    ///
-    /// Returns the new `NodeId` on success.
-    pub fn import_mesh_file(
-        &self,
-        path: &Path,
-        canvas_pos: [f64; 2],
-    ) -> Result<NodeId, String> {
-        let bytes = std::fs::read(path)
-            .map_err(|e| format!("read {}: {}", path.display(), e))?;
-        let original_filename = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "mesh".to_string());
-        let extension = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        let mesh =
-            mesh_node::decode_mesh(&bytes, &extension).map_err(|e| format!("import: {}", e))?;
-        // Always persist as .3mf — the project rule.
-        let three_mf_bytes = export_3mf(&mesh)
-            .map_err(|e| format!("re-encode as 3MF: {}", e))?;
-
-        let asset_ref = {
-            let mut assets = self.assets.lock().unwrap();
-            assets.insert(three_mf_bytes, original_filename, None, Some("3mf".into()))
-        };
-
-        let new_id = {
-            let mut graph = self.graph.lock().unwrap();
-            // Create + populate the node in one pass; then pull the
-            // fully-configured instance out so AddNodeCmd owns it (so
-            // Ctrl+Z removes the import + Ctrl+Y restores it with the
-            // same asset_ref + mesh cache).
-            let id = graph
-                .add_new_node(mesh_node::TYPE_ID, canvas_pos, &self.registry)
-                .map_err(|e| format!("add MeshNode: {}", e))?;
-            graph
-                .set_property(
-                    id,
-                    Arc::<str>::from("asset"),
-                    PortValue::StringVal(Arc::new(asset_ref.as_str().to_string())),
-                )
-                .ok();
-            graph
-                .set_property(
-                    id,
-                    Arc::<str>::from("mesh"),
-                    PortValue::Geometry3d(Arc::new(
-                        atomartist_lib::geometry::Geometry3d::from_mesh(Arc::new(mesh)),
-                    )),
-                )
-                .ok();
-            let (node, _detached) = graph
-                .remove_node(id)
-                .map_err(|e| format!("snapshot for undo: {:?}", e))?;
-            drop(graph);
-            let cmd = AddNodeCmd::new(self.graph.clone(), node).with_label("Import Mesh");
-            self.undo.lock().unwrap().add_and_do(Box::new(cmd));
-            id
-        };
-        self.evaluate_now();
-        Ok(new_id)
-    }
-
-    /// Snapshot the HUD-button state into a [`crate::UiSettings`]
-    /// for persistence. Callers serialise this to disk via
-    /// `UiSettings::write_to_file`.
-    ///
-    /// `debug_windows` and `main_window` are filled in with
-    /// defaults — those live outside `AppState` (the widget tree
-    /// and the platform shell respectively), so the shell is
-    /// responsible for splicing the current values in before
-    /// writing the settings blob (see `demo-native::main`).
-    pub fn ui_settings(&self) -> crate::UiSettings {
-        crate::UiSettings {
-            perspective: *self.perspective.lock().unwrap(),
-            turntable: *self.turntable.lock().unwrap(),
-            show_bed: *self.show_bed.lock().unwrap(),
-            render_style: *self.render_style.lock().unwrap(),
-            snap_amount: *self.snap_amount.lock().unwrap(),
-            main_window: crate::MainWindowState::default(),
-            debug_windows: crate::DebugWindowsState::default(),
-            // Forward the path of the currently-open project so the
-            // shell's AutoSave loop persists it on every paint where
-            // it changed. The native shell uses this on next launch
-            // to auto-reopen the same file.
-            last_project_path: self.current_file.lock().unwrap().clone(),
-            theme: *self.theme.lock().unwrap(),
-            accent_color: *self.accent_color.lock().unwrap(),
-        }
-    }
-
-    /// Push a saved [`crate::UiSettings`] snapshot back into the
-    /// live `AppState` AND propagate the perspective / turntable
-    /// flags into the shared camera so the very first frame after
-    /// startup matches what the user left things as. Used by the
-    /// demo-native shell on load.
-    ///
-    /// Takes the settings by reference so the caller can keep them
-    /// around for the auto-reopen path (which needs `last_project_path`)
-    /// and for `build_app` (which reads `debug_windows`).
-    pub fn apply_ui_settings(&self, s: &crate::UiSettings) {
-        use atomartist_renderer::{OrbitMode, Projection};
-        *self.perspective.lock().unwrap() = s.perspective;
-        *self.turntable.lock().unwrap() = s.turntable;
-        *self.show_bed.lock().unwrap() = s.show_bed;
-        *self.render_style.lock().unwrap() = s.render_style;
-        *self.snap_amount.lock().unwrap() = s.snap_amount;
-        // Mirror into the camera so the very first paint sees the
-        // restored projection / orbit mode (the HUD buttons read
-        // from the same `Arc<Mutex<bool>>` slots above, so they're
-        // already correct).
-        let mut c = self.camera.lock().unwrap();
-        c.projection = if s.perspective {
-            Projection::Perspective
-        } else {
-            Projection::Orthographic
-        };
-        c.orbit_mode = if s.turntable {
-            OrbitMode::Turntable
-        } else {
-            OrbitMode::Trackball
-        };
-        drop(c);
-        *self.theme.lock().unwrap() = s.theme;
-        *self.accent_color.lock().unwrap() = s.accent_color;
-        // Push the restored theme + accent into agg-gui's live
-        // visuals so the very first paint matches the user's saved
-        // selection — same call the View menu uses.
-        let base = match s.theme {
-            agg_gui::theme::ThemePreference::Light => agg_gui::theme::Visuals::light(),
-            agg_gui::theme::ThemePreference::Dark | agg_gui::theme::ThemePreference::System => {
-                agg_gui::theme::Visuals::dark()
-            }
-        };
-        agg_gui::theme::set_visuals(base.with_accent_color(s.accent_color));
-    }
-
-    /// Save the current displayed mesh as a binary STL. Reads the
-    /// triangle data out of [`Geometry3d::mesh`] — STL export
-    /// disregards the per-node matrix + colour bundle the renderer
-    /// uses.
-    pub fn export_stl_to_path(&self, path: &Path) -> Result<(), String> {
-        let geom = self
-            .last_mesh_output
-            .lock()
-            .unwrap()
-            .clone()
-            .ok_or_else(|| "no geometry to export — wire up a node with a 3D output".to_string())?;
-        // STL has no per-body / per-colour notion — concatenate the
-        // group's triangles into a single mesh before encoding. For a
-        // single-body group this is identical to the pre-multi-body
-        // behaviour; multi-body groups land as one merged STL.
-        let meshes: Vec<_> = geom.iter().map(|b| b.mesh.clone()).collect();
-        let merged = atomartist_lib::geometry::merge_meshes(&meshes);
-        let bytes = export_stl(&merged);
-        std::fs::write(path, bytes).map_err(|e| format!("write {}: {}", path.display(), e))?;
-        Ok(())
-    }
-}
+// File operations (load / save / import / export) live in
+// `app_state_files.rs` to keep this file under the 800-line cap.

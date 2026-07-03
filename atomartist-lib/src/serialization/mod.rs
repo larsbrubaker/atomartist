@@ -6,6 +6,7 @@ pub mod change_detection;
 pub mod graph_json;
 pub mod mesh_3mf;
 pub mod mesh_io;
+pub mod mesh_mcx;
 pub mod mesh_obj;
 pub mod nodedesigner_import;
 
@@ -22,6 +23,7 @@ pub use graph_json::{
     LoadResult, SCHEMA_VERSION,
 };
 pub use mesh_3mf::{export_3mf, import_3mf, ThreemfError};
+pub use mesh_mcx::{import_mcx, McxError, McxPart};
 pub use mesh_io::{export_stl, import_stl, StlError};
-pub use mesh_obj::{import_obj, ObjError};
+pub use mesh_obj::{export_obj, import_obj, ObjError};
 pub use nodedesigner_import::import_nodedesigner_scene_str;

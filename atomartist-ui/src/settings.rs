@@ -296,7 +296,15 @@ pub struct UiSettings {
     /// User's chosen accent swatch. Persisted so the View → Color
     /// selection survives across runs.
     pub accent_color: AccentColor,
+    /// Most-recently-used project files, newest first. Rendered as
+    /// the File → Open Recent submenu; capped at
+    /// [`MAX_RECENT_PROJECTS`] on both write and read so a hand-
+    /// edited file can't grow the menu unboundedly.
+    pub recent_projects: Vec<PathBuf>,
 }
+
+/// Upper bound on the persisted / displayed recent-projects list.
+pub const MAX_RECENT_PROJECTS: usize = 10;
 
 impl Default for UiSettings {
     fn default() -> Self {
@@ -314,6 +322,7 @@ impl Default for UiSettings {
             // startup matches.
             theme: ThemePreference::Light,
             accent_color: AccentColor::default(),
+            recent_projects: Vec::new(),
         }
     }
 }
@@ -347,6 +356,17 @@ impl UiSettings {
             // exists, so a corrupted path here can't break startup.
             out.push_str(&format!("last_project_path={}\n", p.to_string_lossy()));
         }
+        for (i, p) in self
+            .recent_projects
+            .iter()
+            .take(MAX_RECENT_PROJECTS)
+            .enumerate()
+        {
+            // Indexed keys keep the format line-per-value; the parser
+            // sorts by index so a hand-shuffled file still round-trips
+            // in a deterministic order.
+            out.push_str(&format!("recent_project_{}={}\n", i, p.to_string_lossy()));
+        }
         out
     }
 
@@ -354,6 +374,9 @@ impl UiSettings {
     /// back to `UiSettings::default()`.
     pub fn from_text(text: &str) -> Self {
         let mut out = Self::default();
+        // Collected out-of-line so shuffled / duplicated indices in a
+        // hand-edited file still produce a stable, capped list.
+        let mut recent: Vec<(usize, PathBuf)> = Vec::new();
         for line in text.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -414,6 +437,14 @@ impl UiSettings {
                     }
                 }
                 _ => {
+                    if let Some(idx) = key.strip_prefix("recent_project_") {
+                        if let Ok(i) = idx.parse::<usize>() {
+                            if !value.is_empty() {
+                                recent.push((i, PathBuf::from(value)));
+                            }
+                        }
+                        continue;
+                    }
                     if apply_main_window_kv(&mut out.main_window, key, value) {
                         continue;
                     }
@@ -421,6 +452,10 @@ impl UiSettings {
                 }
             }
         }
+        recent.sort_by_key(|(i, _)| *i);
+        out.recent_projects = recent.into_iter().map(|(_, p)| p).collect();
+        out.recent_projects.dedup();
+        out.recent_projects.truncate(MAX_RECENT_PROJECTS);
         out
     }
 

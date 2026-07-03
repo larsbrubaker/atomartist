@@ -72,12 +72,12 @@ pub fn build_app(
             .with_overlay_sink(move |dialog, close_flag| {
                 sink_handle.set(dialog, close_flag);
             })
-            // File-drop hook: when the user drags `.stl` / `.obj` /
-            // `.3mf` onto the canvas, import the file as a project
-            // asset and spawn a MeshNode at the drop position.
-            // Non-mesh extensions are ignored silently for now —
-            // future asset-backed nodes (image, vector, …) can be
-            // routed here once they exist.
+            // File-drop hook: meshes (`.stl` / `.obj` / `.3mf`) spawn
+            // a MeshNode at the drop position; scene formats (`.mcx`,
+            // `.atmr`) import into the current graph like File →
+            // Import. Other extensions are ignored silently — future
+            // asset-backed nodes (image, vector, …) can be routed
+            // here once they exist.
             .with_file_drop_handler(move |paths, canvas_pos| {
                 for path in paths {
                     let ext = path
@@ -85,12 +85,16 @@ pub fn build_app(
                         .and_then(|e| e.to_str())
                         .map(|s| s.to_ascii_lowercase())
                         .unwrap_or_default();
-                    if !matches!(ext.as_str(), "stl" | "obj" | "3mf") {
-                        continue;
-                    }
-                    if let Err(e) =
-                        drop_state.import_mesh_file(path.as_path(), canvas_pos)
-                    {
+                    let result = match ext.as_str() {
+                        "stl" | "obj" | "3mf" => drop_state
+                            .import_mesh_file(path.as_path(), canvas_pos)
+                            .map(|_| ()),
+                        "mcx" | "atmr" => drop_state
+                            .import_scene_file(path.as_path())
+                            .map(|_| ()),
+                        _ => continue,
+                    };
+                    if let Err(e) = result {
                         eprintln!("drop import failed: {}", e);
                     }
                 }
@@ -228,6 +232,9 @@ pub fn fresh_state_with_starter_graph() -> AppState {
         output
     };
     state.set_display_node(Some(display_target));
+    // The starter pipeline is the app's clean launch state — don't let
+    // it count as "unsaved changes" the moment the window opens.
+    state.mark_saved_baseline();
     state.evaluate_now();
     state
 }
