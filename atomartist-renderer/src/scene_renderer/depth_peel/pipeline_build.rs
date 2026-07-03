@@ -11,10 +11,8 @@ use super::shaders::{
 };
 use crate::scene_renderer::opaque_pass::vertex_layouts;
 
-// Match `super::DUAL_DEPTH_FORMAT`. Half-float is the largest format
-// `wgpu` guarantees `Max`-blend support on without a backend-specific
-// feature flag.
-const DUAL_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+use super::dual_depth_format;
+
 const ACCUM_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 pub(super) fn build_init_pipeline(
@@ -84,7 +82,7 @@ pub(super) fn build_init_pipeline(
             module: &shader,
             entry_point: Some("fs"),
             targets: &[Some(wgpu::ColorTargetState {
-                format: DUAL_DEPTH_FORMAT,
+                format: dual_depth_format(device),
                 blend: Some(max_blend()),
                 write_mask: wgpu::ColorWrites::RED | wgpu::ColorWrites::GREEN,
             })],
@@ -174,7 +172,7 @@ pub(super) fn build_peel_pipeline(
             entry_point: Some("fs"),
             targets: &[
                 Some(wgpu::ColorTargetState {
-                    format: DUAL_DEPTH_FORMAT,
+                    format: dual_depth_format(device),
                     blend: Some(max_blend()),
                     write_mask: wgpu::ColorWrites::RED | wgpu::ColorWrites::GREEN,
                 }),

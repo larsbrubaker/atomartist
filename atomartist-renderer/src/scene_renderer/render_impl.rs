@@ -258,7 +258,16 @@ impl WgpuCustomRender for WgpuSceneRenderer {
             material_specular: to_vec4(self.material_specular),
             base_color: self.base_color,
             params: [self.shininess, 0.0, 0.0, 0.0],
-            resolution: [fb_w as f32, fb_h as f32, 0.0, 0.0],
+            // `resolution.z` carries the dual-peel discard bias, paired
+            // with the depth format the device supports (1e-5 for 32-bit
+            // depth, 1e-3 for the half-float fallback). The opaque /
+            // outline / gizmo shaders ignore `.z`.
+            resolution: [
+                fb_w as f32,
+                fb_h as f32,
+                super::depth_peel::peel_bias(ctx.device),
+                0.0,
+            ],
         };
         s.opaque.write_scene_uniforms(ctx.queue, &uniforms);
         // Suppress an unused warning until the cast_slice import is

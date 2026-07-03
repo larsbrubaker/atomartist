@@ -34,9 +34,17 @@ impl Gpu {
         }))
         .expect("request adapter");
 
+        // Enable 32-bit-float blending when the adapter offers it: the
+        // dual-peel chain stores depth in a blendable float target, and
+        // half-float can't separate perspective-compressed transparent
+        // layers (they collapse into one bias band and blend in draw
+        // order — painter's algorithm). Requested only when available so
+        // the app still starts on adapters without it (falling back to
+        // half-float depth).
+        let float32_blend = adapter.features() & wgpu::Features::FLOAT32_BLENDABLE;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("atomartist-native-wgpu"),
-            required_features: wgpu::Features::empty(),
+            required_features: float32_blend,
             required_limits: wgpu::Limits::default(),
             memory_hints: wgpu::MemoryHints::Performance,
             experimental_features: wgpu::ExperimentalFeatures::default(),

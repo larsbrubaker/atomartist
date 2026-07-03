@@ -29,9 +29,10 @@
 //!    The output goes straight into the HDR scene composite that the
 //!    renderer box-downsamples to the widget rect.
 //!
-//! The shader-side discard tolerance (`PEEL_BIAS = 1e-5`) is identical
-//! to MatterCAD's `DepthPeelBias`, so iteration-count behaviour is
-//! frame-for-frame equivalent.
+//! The shader-side discard tolerance is the `u.resolution.z` uniform,
+//! set per-frame by the renderer to match the dual-depth precision:
+//! `1e-5` with 32-bit depth (identical to MatterCAD's `DepthPeelBias`),
+//! `1e-3` with the half-float fallback.
 
 /// Uniform layout shared by the init + peel passes. `mvp` projects
 /// per-vertex positions; `resolution` lets the fragment shader recover
@@ -41,7 +42,7 @@
 pub const DUAL_DEPTH_INIT_SHADER: &str = r#"
 struct U {
     mvp: mat4x4<f32>,
-    resolution: vec4<f32>, // xy = pixel size, zw = pad
+    resolution: vec4<f32>, // xy = pixel size, z = peel bias, w = pad
 };
 
 // Per-body uniform — same layout as the opaque shader's `B` block,
@@ -86,17 +87,16 @@ fn vs(
 }
 
 // Discard threshold for "this fragment's z is below the opaque-pass z"
-// and "this fragment's z matches the slab boundary". Sized for the
-// `Rgba16Float` dual-depth precision floor (~5e-4 in [0,1] NDC) so
-// half-float rounding can't accidentally classify a near-slab fragment
-// as inside the slab.
-const PEEL_BIAS: f32 = 1e-3;
+// and "this fragment's z matches the slab boundary" — the `u.resolution.z`
+// uniform. Sized by the renderer to the dual-depth precision: 1e-5 with
+// 32-bit depth, 1e-3 with the half-float fallback (whose ~5e-4 rounding
+// near z=1 would otherwise misclassify near-slab fragments).
 
 @fragment
 fn fs(in: VOut) -> @location(0) vec4<f32> {
     let pixel = vec2<i32>(clamp(in.clip.xy, vec2<f32>(0.0), u.resolution.xy - vec2<f32>(1.0)));
     let opaque_z = textureLoad(opaque_depth_color, pixel, 0).r;
-    if (opaque_z < in.clip.z - PEEL_BIAS) {
+    if (opaque_z < in.clip.z - u.resolution.z) {
         discard;
     }
     // Write (-z, z, 0, 0). The pipeline uses Max blending on RG so the
@@ -132,7 +132,7 @@ struct U {
     material_specular: vec4<f32>,
     base_color: vec4<f32>,    // fallback only — body colour preferred
     params: vec4<f32>,        // x = shininess
-    resolution: vec4<f32>,    // xy = pixel size
+    resolution: vec4<f32>,    // xy = pixel size, z = peel bias
 };
 
 struct B {
@@ -184,7 +184,6 @@ struct PeelOut {
 
 // See the matching constant in `DUAL_DEPTH_INIT_SHADER` for the
 // rationale — sized for `Rgba16Float` dual-depth precision.
-const PEEL_BIAS: f32 = 1e-3;
 
 fn srgb_to_linear(srgb: vec3<f32>) -> vec3<f32> {
     let low = srgb / 12.92;
@@ -238,7 +237,7 @@ fn fs(in: VOut) -> PeelOut {
 
     let pixel = vec2<i32>(clamp(in.clip.xy, vec2<f32>(0.0), u.resolution.xy - vec2<f32>(1.0)));
     let opaque_z = textureLoad(opaque_depth_color, pixel, 0).r;
-    if (opaque_z < in.clip.z - PEEL_BIAS) {
+    if (opaque_z < in.clip.z - u.resolution.z) {
         discard;
     }
 
@@ -252,11 +251,11 @@ fn fs(in: VOut) -> PeelOut {
     out.front_color = vec4<f32>(0.0);
     out.back_color = vec4<f32>(0.0);
 
-    if (cur_z + PEEL_BIAS < front_z || cur_z - PEEL_BIAS > back_z) {
+    if (cur_z + u.resolution.z < front_z || cur_z - u.resolution.z > back_z) {
         discard;
     }
 
-    if (cur_z - PEEL_BIAS > front_z && cur_z + PEEL_BIAS < back_z) {
+    if (cur_z - u.resolution.z > front_z && cur_z + u.resolution.z < back_z) {
         // Fragment lies strictly inside the slab — keep it for the
         // next iteration by expanding `dst_dual_depth` to include it.
         out.depth_range = vec4<f32>(-cur_z, cur_z, 0.0, 0.0);
@@ -266,7 +265,7 @@ fn fs(in: VOut) -> PeelOut {
     // Per-vertex colour (always populated — see the matching note
     // in the opaque shader's `fs`) drives the surface base colour.
     let shaded = shade(in.v_color, nrm);
-    if (abs(cur_z - front_z) <= PEEL_BIAS) {
+    if (abs(cur_z - front_z) <= u.resolution.z) {
         // Front-layer hit: premultiply (per MatterCAD's UnderBlend).
         out.front_color = vec4<f32>(shaded.rgb * shaded.a, shaded.a);
     } else {

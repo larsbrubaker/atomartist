@@ -63,18 +63,39 @@ pub const fn iteration_count(layers: i32) -> u32 {
     }
 }
 
-/// `Rgba16Float` was picked over `Rgba32Float` because the dual-peel
-/// chain runs hardware `Max` blending on these targets, and wgpu only
-/// guarantees blending support for ≤16-bit float formats. Enabling
-/// `FLOAT32_BLENDABLE` would be a per-adapter feature flag we can't
-/// promise on the web backend, so we stick with half-float.
+/// Format of the `(-frontZ, backZ)` dual-depth ping-pong target, which
+/// the peel chain `Max`-blends. **`Rgba32Float` when the device can
+/// blend 32-bit float, else `Rgba16Float`.**
 ///
-/// Precision implications: half-float in the `[0, 1]` NDC range has
-/// ~2¯¹¹ ≈ 5e-4 spacing. The peel discard threshold (`PEEL_BIAS` in
-/// `depth_peel::shaders`) is sized to ~1e-3 to absorb this rounding
-/// noise — comfortably below the ~0.1% depth-range visual noise floor
-/// for any normal viewport scene.
-const DUAL_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+/// Precision is the whole ballgame here. A perspective projection packs
+/// the scene's depth into a thin sliver near NDC z=1, where half-float
+/// has only ~2⁻¹¹ ≈ 5e-4 spacing — coarser than the gap between a solid
+/// object's overlapping surfaces. Those surfaces then collapse into one
+/// [`peel_bias`] band and blend in draw order (painter's algorithm)
+/// instead of being peeled by depth. 32-bit float (~1e-7 near z=1)
+/// separates them, matching MatterCAD's `R32G32_Float`. wgpu gates
+/// 32-bit-float blending behind [`wgpu::Features::FLOAT32_BLENDABLE`]
+/// (`EXT_float_blend` on the web backend), so we use it only when the
+/// device advertised it and fall back to half-float otherwise.
+pub(super) fn dual_depth_format(device: &wgpu::Device) -> wgpu::TextureFormat {
+    if device.features().contains(wgpu::Features::FLOAT32_BLENDABLE) {
+        wgpu::TextureFormat::Rgba32Float
+    } else {
+        wgpu::TextureFormat::Rgba16Float
+    }
+}
+
+/// Peel discard threshold, paired with [`dual_depth_format`]: `1e-5`
+/// with 32-bit depth (matches MatterCAD's `DepthPeelBias`), `1e-3` with
+/// the half-float fallback to absorb its coarser rounding. Threaded to
+/// the shaders through the uniform `resolution.z` slot.
+pub(super) fn peel_bias(device: &wgpu::Device) -> f32 {
+    if device.features().contains(wgpu::Features::FLOAT32_BLENDABLE) {
+        1.0e-5
+    } else {
+        1.0e-3
+    }
+}
 
 /// HDR accumulation format — matches MatterCAD's
 /// `DXGI_FORMAT_R16G16B16A16_FLOAT` so blend math behaves the same.
@@ -218,7 +239,7 @@ fn alloc_dual_depth(device: &wgpu::Device, w: u32, h: u32, slot: usize) -> wgpu:
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: DUAL_DEPTH_FORMAT,
+        format: dual_depth_format(device),
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     })

@@ -26,9 +26,13 @@ fn headless() -> Option<(wgpu::Device, wgpu::Queue)> {
         force_fallback_adapter: false,
     }))
     .ok()?;
+    eprintln!(
+        "adapter FLOAT32_BLENDABLE supported = {}",
+        adapter.features().contains(wgpu::Features::FLOAT32_BLENDABLE)
+    );
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("atomartist-peel-readback-test"),
-        required_features: wgpu::Features::empty(),
+        required_features: wgpu::Features::FLOAT32_BLENDABLE,
         required_limits: wgpu::Limits::default(),
         memory_hints: wgpu::MemoryHints::Performance,
         experimental_features: wgpu::ExperimentalFeatures::default(),
@@ -79,7 +83,9 @@ fn render_layers(
     h: u32,
     layers: &[(f32, f32)],
 ) -> Vec<u8> {
-    render_layers_proj(device, queue, w, h, identity(), 1.0, [0.0, 0.0, 1.0], true, layers)
+    let colored: Vec<(f32, f32, [f32; 3])> =
+        layers.iter().map(|&(z, a)| (z, a, [1.0, 1.0, 1.0])).collect();
+    render_layers_proj(device, queue, w, h, identity(), 1.0, [0.0, 0.0, 1.0], true, &colored)
 }
 
 /// Like [`render_layers`] but with an explicit projection matrix and
@@ -97,7 +103,7 @@ fn render_layers_proj(
     extent: f32,
     normal: [f32; 3],
     ambient_only: bool,
-    layers: &[(f32, f32)],
+    layers: &[(f32, f32, [f32; 3])],
 ) -> Vec<u8> {
     let mut pipes = DualPeelPipelines::new(device, OUT_FORMAT);
     let targets = DualPeelTargets::new(device, w, h, OUT_FORMAT);
@@ -123,11 +129,11 @@ fn render_layers_proj(
     let mut cols: Vec<f32> = Vec::new();
     let mut idx: Vec<u32> = Vec::new();
     let e = extent;
-    for (i, &(z, alpha)) in layers.iter().enumerate() {
+    for (i, &(z, alpha, rgb)) in layers.iter().enumerate() {
         let base = (i * 3) as u32;
         for &(x, y) in &[(-e, -e), (3.0 * e, -e), (-e, 3.0 * e)] {
             verts.extend_from_slice(&[x, y, z, normal[0], normal[1], normal[2]]);
-            cols.extend_from_slice(&[1.0, 1.0, 1.0, alpha]);
+            cols.extend_from_slice(&[rgb[0], rgb[1], rgb[2], alpha]);
         }
         idx.extend_from_slice(&[base, base + 1, base + 2]);
     }
@@ -205,7 +211,7 @@ fn render_layers_proj(
             material_specular: [0.0; 4],
             base_color: [1.0, 1.0, 1.0, 1.0],
             params: [1.0, 0.0, 0.0, 0.0],
-            resolution: [w as f32, h as f32, 0.0, 0.0],
+            resolution: [w as f32, h as f32, super::peel_bias(device), 0.0],
         }
     } else {
         PeelUniforms {
@@ -222,7 +228,7 @@ fn render_layers_proj(
             material_specular: [0.0; 4],
             base_color: [1.0, 1.0, 1.0, 1.0],
             params: [1.0, 0.0, 0.0, 0.0],
-            resolution: [w as f32, h as f32, 0.0, 0.0],
+            resolution: [w as f32, h as f32, super::peel_bias(device), 0.0],
         }
     };
 
@@ -410,7 +416,8 @@ fn perspective_depth_layers_do_not_splotch() {
     let proj = glam::Mat4::perspective_rh(45.0_f32.to_radians(), 1.0, 0.1, 100.0)
         .to_cols_array();
     // Eight shells at view-space z −5 .. −12 (camera looks down −z).
-    let layers: Vec<(f32, f32)> = (0..8).map(|i| (-5.0 - i as f32, 0.5)).collect();
+    let layers: Vec<(f32, f32, [f32; 3])> =
+        (0..8).map(|i| (-5.0 - i as f32, 0.5, [1.0, 1.0, 1.0])).collect();
     let px = render_layers_proj(&device, &queue, w, h, proj, 60.0, [0.0, 0.0, 1.0], true, &layers);
     let c = center(&px, w, h);
     eprintln!("perspective 8-shell centre pixel = {c:?}");
@@ -445,10 +452,10 @@ fn back_face_is_lit_like_front() {
     let proj = glam::Mat4::perspective_rh(45.0_f32.to_radians(), 1.0, 0.1, 100.0)
         .to_cols_array();
     let front = render_layers_proj(
-        &device, &queue, w, h, proj, 60.0, [0.0, 0.0, 1.0], false, &[(-5.0, 0.5)],
+        &device, &queue, w, h, proj, 60.0, [0.0, 0.0, 1.0], false, &[(-5.0, 0.5, [1.0, 1.0, 1.0])],
     );
     let back = render_layers_proj(
-        &device, &queue, w, h, proj, 60.0, [0.0, 0.0, -1.0], false, &[(-5.0, 0.5)],
+        &device, &queue, w, h, proj, 60.0, [0.0, 0.0, -1.0], false, &[(-5.0, 0.5, [1.0, 1.0, 1.0])],
     );
     let (cf, cb) = (center(&front, w, h), center(&back, w, h));
     eprintln!("front-face lit = {cf:?}   back-face lit = {cb:?}");
@@ -461,6 +468,53 @@ fn back_face_is_lit_like_front() {
         "back face must shade like the front (two-sided lighting); got \
          front {cf:?} vs back {cb:?} — a dark back face is the transparent \
          mesh's dark/bright patch failure",
+    );
+}
+
+/// THE painter's-algorithm reproducer. A near RED layer and a far BLUE
+/// layer, with BLUE drawn first (draw-order ≠ depth-order). Depth-correct
+/// peeling always puts the near red in front → the pixel is red-dominant
+/// regardless of draw order. If the two layers fall inside one `PEEL_BIAS`
+/// band (as a perspective-compressed solid does with our half-float
+/// depth), the peel can't separate them and they blend in DRAW order →
+/// the first-drawn far blue wins → blue-dominant. That draw-order result
+/// is exactly the "painter's algorithm" the elephant shows.
+///
+/// The well-separated control proves the harness sees red-in-front; the
+/// tightly-spaced case is the failure.
+#[test]
+fn near_layer_wins_regardless_of_draw_order() {
+    let Some((device, queue)) = headless() else {
+        eprintln!("near_layer_wins_regardless_of_draw_order: no wgpu adapter, skipping");
+        return;
+    };
+    let (w, h) = (16u32, 16u32);
+    let red = [1.0, 0.0, 0.0];
+    let blue = [0.0, 0.0, 1.0];
+    let n = [0.0, 0.0, 1.0];
+    // Draw order is [far-blue, near-red]; NDC z: smaller = nearer.
+    let separated = render_layers_proj(
+        &device, &queue, w, h, identity(), 1.0, n, true,
+        &[(0.70, 0.5, blue), (0.30, 0.5, red)],
+    );
+    let cs = center(&separated, w, h);
+    eprintln!("separated (control) = {cs:?}");
+    assert!(cs[0] > cs[2], "control: near red must be in front, got {cs:?}");
+
+    // Same, but the two layers are 5e-5 apart — BELOW half-float depth
+    // precision near z=0.5 (ULP ≈ 4.9e-4). In `Rgba16Float` they collapse
+    // to one bucket and no bias can separate them; only 32-bit depth can.
+    let packed = render_layers_proj(
+        &device, &queue, w, h, identity(), 1.0, n, true,
+        &[(0.50005, 0.5, blue), (0.50000, 0.5, red)],
+    );
+    let cp = center(&packed, w, h);
+    eprintln!("packed (within bias) = {cp:?}");
+    assert!(
+        cp[0] > cp[2],
+        "near red must still win when layers are close in depth; got {cp:?} \
+         — blue-dominant means the peel fell back to draw-order (painter's) \
+         because the layers landed inside one PEEL_BIAS band",
     );
 }
 

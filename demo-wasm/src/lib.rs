@@ -162,10 +162,16 @@ async fn init_wgpu() -> Result<(), String> {
                 .to_string()
         })?;
 
+    // Enable 32-bit-float blending when the browser exposes it
+    // (`EXT_float_blend`, widely available on WebGL2/WebGPU). The
+    // dual-peel chain needs it to separate perspective-compressed
+    // transparent layers by depth; without it we fall back to
+    // half-float depth. Requested only when present so init never fails.
+    let float32_blend = adapter.features() & wgpu::Features::FLOAT32_BLENDABLE;
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor {
             label: Some("atomartist-wasm"),
-            required_features: wgpu::Features::empty(),
+            required_features: float32_blend,
             required_limits: wgpu::Limits::default(),
             memory_hints: wgpu::MemoryHints::Performance,
             experimental_features: wgpu::ExperimentalFeatures::default(),
