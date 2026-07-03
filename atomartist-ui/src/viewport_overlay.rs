@@ -617,21 +617,30 @@ fn add_bottom_row(overlay: &mut ViewportOverlay, state: &AppState, font: &Arc<Fo
     // between view_shaded.png / view_polygons.png when the user
     // picks a row.
     {
+        // Order + labels mirror MatterCAD's `ViewStyleButton` menu:
+        // Shaded, Outlines (default), Non-Manifold, Polygons, Overhang.
         let items = vec![
             DropdownItem { label: "Shaded".into(), value: RenderStyle::Shaded },
-            DropdownItem { label: "Wireframe".into(), value: RenderStyle::Wireframe },
+            DropdownItem { label: "Outlines".into(), value: RenderStyle::Outlines },
+            DropdownItem { label: "Non-Manifold".into(), value: RenderStyle::NonManifold },
+            DropdownItem { label: "Polygons".into(), value: RenderStyle::Polygons },
+            DropdownItem { label: "Overhang".into(), value: RenderStyle::Overhang },
         ];
         let drop = CircularDropdown::new_with_image(
             IconKind::Shade,
-            Some(MatterCadIcon::ViewShaded),
+            Some(MatterCadIcon::ViewOutlines),
             items,
             state.render_style.clone(),
             font.clone(),
         )
         .with_value_to_icon(|style: &RenderStyle| {
+            // MatterCAD reuses view_polygons.png for Non-Manifold.
             Some(match style {
                 RenderStyle::Shaded => MatterCadIcon::ViewShaded,
-                RenderStyle::Wireframe => MatterCadIcon::ViewPolygons,
+                RenderStyle::Outlines => MatterCadIcon::ViewOutlines,
+                RenderStyle::NonManifold => MatterCadIcon::ViewPolygons,
+                RenderStyle::Polygons => MatterCadIcon::ViewPolygons,
+                RenderStyle::Overhang => MatterCadIcon::ViewOverhang,
             })
         });
         overlay.add_below_cube(

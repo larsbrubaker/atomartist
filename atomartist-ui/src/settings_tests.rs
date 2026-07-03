@@ -21,7 +21,7 @@ fn non_default_values_round_trip() {
         perspective: false,
         turntable: false,
         show_bed: false,
-        render_style: RenderStyle::Wireframe,
+        render_style: RenderStyle::Overhang,
         snap_amount: 0.25,
         main_window: MainWindowState {
             x: 250,

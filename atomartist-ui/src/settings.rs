@@ -490,18 +490,24 @@ fn parse_bool(s: &str) -> Option<bool> {
 fn render_style_to_token(s: RenderStyle) -> &'static str {
     match s {
         RenderStyle::Shaded => "Shaded",
-        RenderStyle::Wireframe => "Wireframe",
+        RenderStyle::Outlines => "Outlines",
+        RenderStyle::NonManifold => "NonManifold",
+        RenderStyle::Polygons => "Polygons",
+        RenderStyle::Overhang => "Overhang",
     }
 }
 
 fn render_style_from_token(s: &str) -> Option<RenderStyle> {
     match s {
         "Shaded" | "shaded" => Some(RenderStyle::Shaded),
-        "Wireframe" | "wireframe" | "Polygons" | "polygons" => Some(RenderStyle::Wireframe),
-        // Settings files written before the `OutlineOnly` variant was
-        // removed may contain the old token — fall back to Shaded so
-        // upgrades stay seamless.
-        "Outlines" | "outlines" | "Outline" | "OutlineOnly" => Some(RenderStyle::Shaded),
+        "Outlines" | "outlines" | "Outline" | "OutlineOnly" => Some(RenderStyle::Outlines),
+        "NonManifold" | "nonmanifold" | "Non-Manifold" => Some(RenderStyle::NonManifold),
+        "Polygons" | "polygons" => Some(RenderStyle::Polygons),
+        "Overhang" | "overhang" | "Overhangs" => Some(RenderStyle::Overhang),
+        // The deprecated software `Wireframe` mode maps to Polygons —
+        // its full-edge overlay is the closest surviving view. Keeps
+        // settings files written before the render-modes port loading.
+        "Wireframe" | "wireframe" => Some(RenderStyle::Polygons),
         _ => None,
     }
 }

@@ -50,6 +50,7 @@ pub mod opaque_pass;
 mod opaque_shaders;
 pub mod post_outline;
 mod render_impl;
+pub mod render_modes;
 mod timings;
 mod util;
 
@@ -62,24 +63,65 @@ pub use gizmo_pass::{GizmoLineSet, GizmoTriangleSet};
 use opaque_pass::{OpaquePipelines, Vertex};
 use post_outline::{OutlinePipelines, OutlineTargets};
 
-/// Render-style picker beneath the tumble cube.  Drives the surface
-/// pipeline used by [`WgpuSceneRenderer`] so the user can compare a
-/// shaded model with a wireframe-only or outline-only view, matching
-/// MatterCAD's `ViewStyleButton` choices without the printer-specific
-/// modes.
+/// Render-style picker beneath the tumble cube. Mirrors MatterCAD's
+/// `ViewStyleButton` / `RenderTypes` choices (minus the printer-only
+/// `Hidden` / deprecated `Wireframe`): every mode draws the shaded
+/// surface; the three edge modes overlay a wireframe on top, and
+/// Overhang recolours the surface by face slope.
+///
+/// See [`render_modes`] for the pure CPU analysis behind the overlays
+/// and [`RenderStyle::edge_kind`] / [`RenderStyle::is_overhang`] for
+/// how the renderer dispatches each mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RenderStyle {
-    /// Default Blinn-Phong shaded surface.
+    /// Blinn-Phong shaded surface, no overlay.
     Shaded,
-    /// Software wireframe — falls back to the existing CPU edge path.
-    /// Disables the wgpu fill pass so the 2-D viewport draws the
-    /// per-triangle edges from `Viewport3dWidget::draw_mesh`.
-    Wireframe,
+    /// Shaded surface + feature-edge wireframe (adjacent faces > 45°).
+    Outlines,
+    /// Shaded surface + non-manifold / boundary edges drawn red.
+    NonManifold,
+    /// Shaded surface + every geometric edge (full wireframe).
+    Polygons,
+    /// Surface recoloured cyan→red by world-space face slope (FDM
+    /// overhang preview). No wireframe overlay.
+    Overhang,
 }
 
 impl Default for RenderStyle {
     fn default() -> Self {
-        Self::Shaded
+        // MatterCAD's verified default. The whole point of the render-
+        // modes port was to land Outlines as the out-of-box view.
+        Self::Outlines
+    }
+}
+
+impl RenderStyle {
+    /// The edge overlay this mode draws over the shaded surface, or
+    /// `None` for Shaded / Overhang. Matches MatterCAD's
+    /// `ShouldDrawWireframeOverlay`.
+    pub fn edge_kind(self) -> Option<render_modes::EdgeKind> {
+        match self {
+            RenderStyle::Outlines => Some(render_modes::EdgeKind::Feature),
+            RenderStyle::NonManifold => Some(render_modes::EdgeKind::NonManifold),
+            RenderStyle::Polygons => Some(render_modes::EdgeKind::All),
+            RenderStyle::Shaded | RenderStyle::Overhang => None,
+        }
+    }
+
+    /// True when the surface's per-vertex colour is the overhang ramp
+    /// rather than the body tint.
+    pub fn is_overhang(self) -> bool {
+        matches!(self, RenderStyle::Overhang)
+    }
+
+    /// RGBA colour for this mode's edge overlay. Feature / all edges
+    /// use MatterCAD's `darkWireframe` (#3334 → dark grey); non-manifold
+    /// edges are drawn red, matching the shader's edge-class-2 branch.
+    pub fn edge_color(self) -> [f32; 4] {
+        match self {
+            RenderStyle::NonManifold => [1.0, 0.0, 0.0, 1.0],
+            _ => [0.2, 0.2, 0.2, 1.0],
+        }
     }
 }
 
@@ -135,6 +177,20 @@ pub struct BodyGpu {
     /// Vertex count — used to size the colour-fill when the source
     /// body lacks per-vertex data.
     pub vert_count: u32,
+    /// Render-mode fingerprint the mode-dependent buffers (`cbuf`
+    /// when Overhang, `edge_vbuf`) were built for. Quaternary cache
+    /// key: switching render style — or, in Overhang, rotating the
+    /// body — rolls this and rebuilds the colour + edge buffers while
+    /// leaving the geometry VBO/IBO untouched. See [`variant_key`].
+    pub variant_key: u64,
+    /// Cached local-space edge segments for the active edge mode
+    /// (Outlines / NonManifold / Polygons), as a `LineList` vertex
+    /// buffer. `None` for Shaded / Overhang or when the mesh has no
+    /// qualifying edges. Drawn over the shaded surface through the
+    /// gizmo line pipeline (see [`render_impl`]).
+    pub edge_vbuf: Option<wgpu::Buffer>,
+    /// Vertex count for `edge_vbuf` (two per segment).
+    pub edge_count: u32,
     /// True when the body's resolved colour is fully opaque (alpha ≈ 1).
     /// Opaque bodies render through the shaded, depth-tested opaque pass
     /// ([`OpaquePipelines::draw_body`]); only translucent bodies go
@@ -370,7 +426,7 @@ impl WgpuSceneRenderer {
             outline_color: [1.0, 0.55, 0.10, 1.0],
             outline_width: 0.05,
             outline_body_index: None,
-            render_style: RenderStyle::Shaded,
+            render_style: RenderStyle::default(),
             gizmo_lines: Vec::new(),
             gizmo_triangles: Vec::new(),
         }
@@ -528,6 +584,7 @@ impl WgpuSceneRenderer {
         queue: &wgpu::Queue,
     ) -> bool {
         let bodies = self.bodies.clone();
+        let render_style = self.render_style;
         let s = match &mut self.state {
             Some(s) => s,
             None => return false,
@@ -550,16 +607,19 @@ impl WgpuSceneRenderer {
                 .map(|v| v.as_ptr() as usize)
                 .unwrap_or(0);
             let color_q = pack_color_q(body.color);
+            let variant = variant_key(render_style, &body.matrix);
 
-            // Reuse an existing cache entry with matching pointers
-            // AND matching tint (the tint participates in the
-            // cbuf fill when there's no per-vertex overlay).
+            // Reuse an existing cache entry with matching pointers,
+            // tint AND render-mode fingerprint (the tint participates
+            // in the cbuf fill when there's no per-vertex overlay; the
+            // variant guards the mode-dependent cbuf/edge buffers).
             let mut reused = false;
             for (i, prev) in s.bodies_gpu.iter().enumerate() {
                 if !taken[i]
                     && prev.mesh_ptr == mesh_ptr
                     && prev.vertex_colors_ptr == vc_ptr
                     && prev.body_color_q == color_q
+                    && prev.variant_key == variant
                 {
                     taken[i] = true;
                     let clone = BodyGpu {
@@ -571,6 +631,9 @@ impl WgpuSceneRenderer {
                         cbuf: prev.cbuf.clone(),
                         index_count: prev.index_count,
                         vert_count: prev.vert_count,
+                        variant_key: prev.variant_key,
+                        edge_vbuf: prev.edge_vbuf.clone(),
+                        edge_count: prev.edge_count,
                         opaque: prev.opaque,
                     };
                     new_cache.push(clone);
@@ -612,22 +675,28 @@ impl WgpuSceneRenderer {
                 usage: wgpu::BufferUsages::INDEX,
             });
 
-            // Colour VBO — per-vertex when the source body has one,
-            // otherwise fill with the body's uniform colour. See the
-            // `BodyGpu` doc for why we always allocate this rather
-            // than gating on `has_vertex_colors`.
-            let cbuf_data: Vec<f32> = match body.vertex_colors.as_ref() {
-                Some(colors) if colors.len() == n_verts * 4 => (**colors).clone(),
-                _ => {
-                    // Either no per-vertex overlay OR length mismatch
-                    // (defensive — a mis-sized overlay falls back to
-                    // the uniform tint rather than risking a buffer
-                    // overrun in the shader).
-                    let mut v = Vec::with_capacity(n_verts * 4);
-                    for _ in 0..n_verts {
-                        v.extend_from_slice(&body.color);
+            // Colour VBO. In Overhang mode the surface is recoloured by
+            // world-space face slope (the shader still lights it), so
+            // the cbuf carries the overhang ramp instead of the tint.
+            // Otherwise: per-vertex overlay when the source body has
+            // one, else the body's uniform colour. See the `BodyGpu`
+            // doc for why we always allocate this.
+            let cbuf_data: Vec<f32> = if render_style.is_overhang() {
+                render_modes::overhang_colors(mesh, &body.matrix)
+            } else {
+                match body.vertex_colors.as_ref() {
+                    Some(colors) if colors.len() == n_verts * 4 => (**colors).clone(),
+                    _ => {
+                        // Either no per-vertex overlay OR length mismatch
+                        // (defensive — a mis-sized overlay falls back to
+                        // the uniform tint rather than risking a buffer
+                        // overrun in the shader).
+                        let mut v = Vec::with_capacity(n_verts * 4);
+                        for _ in 0..n_verts {
+                            v.extend_from_slice(&body.color);
+                        }
+                        v
                     }
-                    v
                 }
             };
             let cbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -635,6 +704,25 @@ impl WgpuSceneRenderer {
                 contents: cast_slice(&cbuf_data),
                 usage: wgpu::BufferUsages::VERTEX,
             });
+
+            // Edge overlay VBO — built once per (mesh, mode). Empty for
+            // Shaded / Overhang or when the mesh has no qualifying edges.
+            let (edge_vbuf, edge_count) = match render_style.edge_kind() {
+                Some(kind) => {
+                    let segs = render_modes::edges_for(mesh, kind);
+                    if segs.is_empty() {
+                        (None, 0)
+                    } else {
+                        let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("atomartist body edge vb"),
+                            contents: cast_slice(&segs),
+                            usage: wgpu::BufferUsages::VERTEX,
+                        });
+                        (Some(buf), segs.len() as u32)
+                    }
+                }
+                None => (None, 0),
+            };
 
             new_cache.push(BodyGpu {
                 mesh_ptr,
@@ -645,6 +733,9 @@ impl WgpuSceneRenderer {
                 cbuf,
                 index_count: mesh.tri_verts.len() as u32,
                 vert_count: n_verts as u32,
+                variant_key: variant,
+                edge_vbuf,
+                edge_count,
                 opaque: is_opaque_color(body.color),
             });
         }
@@ -694,6 +785,26 @@ fn is_opaque_color(color: [f32; 4]) -> bool {
         color
     };
     resolved[3] >= OPAQUE_ALPHA_THRESHOLD
+}
+
+/// Fingerprint of the render mode for the body cache. Rolls whenever
+/// the selected [`RenderStyle`] changes so the mode-dependent buffers
+/// (edge overlay, and the Overhang cbuf) rebuild. In Overhang the
+/// surface colour depends on the body's world orientation, so the
+/// matrix is folded in too — rotating the body reramps the overhang;
+/// the other modes ignore the matrix (their edges are local-space and
+/// the tint is orientation-independent).
+fn variant_key(style: RenderStyle, matrix: &[f32; 16]) -> u64 {
+    // `+ 1` so the Shaded discriminant (0) can't collide with a
+    // freshly-zeroed key.
+    let mut k = style as u64 + 1;
+    if style.is_overhang() {
+        for &f in matrix {
+            let q = (f * 1e4).round() as i64 as u64;
+            k = k.wrapping_mul(0x100000001B3) ^ q;
+        }
+    }
+    k
 }
 
 /// Quantise an RGBA colour to a 32-bit packed key — 8 bits per

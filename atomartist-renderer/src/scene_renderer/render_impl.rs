@@ -16,7 +16,7 @@ use super::opaque_pass::Uniforms;
 use super::post_outline::{self, OutlineUniforms};
 use super::timings::{elapsed_ms, log_scene_timings, SceneTimings};
 use super::util::normalize3;
-use super::{RenderStyle, WgpuSceneRenderer};
+use super::WgpuSceneRenderer;
 
 /// Cache key for the bed-shadow chain. Hashes mesh pointer + matrix
 /// per body so a drag (mesh ptr unchanged, matrix shifts) rolls the
@@ -315,7 +315,10 @@ impl WgpuCustomRender for WgpuSceneRenderer {
         let bed_composite_ms = elapsed_ms(t_bed_composite);
 
         // ── Pass 1: opaque scene — bed + mesh-depth-only ─────────
-        let draw_surface = self.render_style == RenderStyle::Shaded;
+        // Every render mode draws the shaded surface — the edge modes
+        // overlay a wireframe on top of it and Overhang recolours it
+        // (via the cbuf), matching MatterCAD's `ShouldRenderFilledSurface`
+        // (true for all modes except the dropped Hidden / Wireframe).
         {
             let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("atomartist scene opaque"),
@@ -362,7 +365,7 @@ impl WgpuCustomRender for WgpuSceneRenderer {
                 let bed_z = self.bed_render_z();
                 s.bed.draw_bed(ctx.queue, &mut pass, mvp, bed_z);
             }
-            if draw_surface {
+            {
                 // ONLY opaque bodies render here — fully shaded, colour +
                 // depth, depth-tested like any normal solid mesh. This
                 // depth is the "opaque depth" the peel discards behind.
@@ -400,22 +403,19 @@ impl WgpuCustomRender for WgpuSceneRenderer {
         // uniform slot, so the peel reads each translucent body's own
         // model / colour.
         let t_peel = web_time::Instant::now();
-        let body_handles: Vec<BodyDrawHandle> = if draw_surface {
-            s.bodies_gpu
-                .iter()
-                .enumerate()
-                .filter(|(_, b)| b.index_count > 0 && !b.opaque)
-                .map(|(i, b)| BodyDrawHandle {
-                    vbuf: &b.vbuf,
-                    ibuf: &b.ibuf,
-                    cbuf: &b.cbuf,
-                    index_count: b.index_count,
-                    body_index: i as u32,
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let body_handles: Vec<BodyDrawHandle> = s
+            .bodies_gpu
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.index_count > 0 && !b.opaque)
+            .map(|(i, b)| BodyDrawHandle {
+                vbuf: &b.vbuf,
+                ibuf: &b.ibuf,
+                cbuf: &b.cbuf,
+                index_count: b.index_count,
+                body_index: i as u32,
+            })
+            .collect();
         let peel_uniforms: PeelUniforms = uniforms;
         let iterations = iteration_count(DEFAULT_LAYERS as i32);
         s.dual_peel.execute_chain(
@@ -440,9 +440,9 @@ impl WgpuCustomRender for WgpuSceneRenderer {
         // to the same ID texture — lands in a follow-up. The
         // outline pipeline needs the same body-uniform binding as
         // opaque + peel before it can iterate bodies.
-        let want_outline = self.outline_enabled
-            && self.render_style == RenderStyle::Shaded
-            && !s.bodies_gpu.is_empty();
+        // Selection outline shows in every render mode (MatterCAD rims
+        // the selected body regardless of view style).
+        let want_outline = self.outline_enabled && !s.bodies_gpu.is_empty();
         if want_outline {
             // Pick the body to outline: host-supplied index (matches
             // the body whose origin == active selection), or the
@@ -492,6 +492,40 @@ impl WgpuCustomRender for WgpuSceneRenderer {
                     (fb_w, fb_h),
                 );
             }
+        }
+
+        // ── Pass 2.55: render-mode edge overlays ─────────────────────────
+        //
+        // Outlines / NonManifold / Polygons draw a wireframe over the
+        // shaded surface (Overhang / Shaded have no `edge_vbuf`). The
+        // segments are cached local-space in each `BodyGpu` and drawn
+        // depth-tested through the gizmo solid pipeline so occluded
+        // edges hide behind the surface — the same result MatterCAD
+        // gets by classifying edges inside the surface shader. The
+        // colour is per-mode (`edge_color`): dark grey for feature /
+        // all edges, red for non-manifold.
+        let edge_color = self.render_style.edge_color();
+        for (i, body) in s.bodies_gpu.iter().enumerate() {
+            let edge_vbuf = match &body.edge_vbuf {
+                Some(b) => b,
+                None => continue,
+            };
+            // Same body-matrix seam as the opaque / outline passes:
+            // fold the body's live model matrix into the MVP so the
+            // wireframe tracks the body as it's transformed.
+            let model = Mat4::from_cols_array(&outline_model_matrix(&self.bodies, i));
+            let emvp = (proj * view * model).to_cols_array();
+            s.gizmo_pipelines.execute_lines_buffer(
+                ctx.device,
+                ctx.encoder,
+                edge_vbuf,
+                body.edge_count,
+                edge_color,
+                emvp,
+                scene_view,
+                scene_depth_view,
+                (fb_w, fb_h),
+            );
         }
 
         // ── Pass 2.6: gizmos ─────────────────────────────────────────────

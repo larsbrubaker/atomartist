@@ -248,6 +248,73 @@ impl GizmoLinePipelines {
         }
     }
 
+    /// Draw a pre-built `LineList` vertex buffer through the
+    /// depth-tested solid pipeline — the path the render-mode edge
+    /// overlays (Outlines / NonManifold / Polygons) take. Unlike
+    /// [`execute`] the vertex buffer is owned by the caller (cached
+    /// per body in [`super::super::BodyGpu`]) so a large wireframe
+    /// isn't re-uploaded every frame; only the tiny uniform is
+    /// created here.
+    ///
+    /// Always depth-tested against `scene_depth_view` so occluded edges
+    /// hide behind the shaded surface, matching MatterCAD's in-shader
+    /// wireframe (drawn as part of the surface pass).
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_lines_buffer(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        vbuf: &wgpu::Buffer,
+        vertex_count: u32,
+        color: [f32; 4],
+        mvp: [f32; 16],
+        sample_view: &wgpu::TextureView,
+        scene_depth_view: &wgpu::TextureView,
+        viewport: (u32, u32),
+    ) {
+        if vertex_count == 0 {
+            return;
+        }
+        let (w, h) = viewport;
+        use wgpu::util::DeviceExt;
+        let u = GizmoLineUniforms { mvp, color };
+        let ub = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("atomartist edge line ub"),
+            contents: bytemuck::bytes_of(&u),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let bg = self.build_bind_group(device, &ub);
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("atomartist edge lines"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: sample_view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: scene_depth_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_viewport(0.0, 0.0, w as f32, h as f32, 0.0, 1.0);
+        pass.set_scissor_rect(0, 0, w, h);
+        pass.set_pipeline(&self.solid_pipeline);
+        pass.set_bind_group(0, &bg, &[]);
+        pass.set_vertex_buffer(0, vbuf.slice(..));
+        pass.draw(0..vertex_count, 0..1);
+    }
+
     /// Filled-triangle counterpart of [`execute`]. Same uniform layout
     /// and per-set scratch buffers; routes the draw through the
     /// TriangleList pipelines with back-face culling.
