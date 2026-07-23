@@ -177,3 +177,12 @@ MatterHackers / FDS-specific functionality stripped:
 - No admin dashboard, no usage licensing, no Gemini AI descriptions
 
 Local file storage and pure-Rust crates only.
+
+## Orchestration pattern
+
+The main session (Fable 5) acts as planner and orchestrator only and should
+not write or edit code directly. All implementation is delegated to the
+`implementer` subagent (`.claude/agents/implementer.md`), one scoped step at
+a time. All post-change review is delegated to the `reviewer` subagent
+(`.claude/agents/reviewer.md`). The main session handles only planning,
+architecture decisions, and synthesizing subagent results.
