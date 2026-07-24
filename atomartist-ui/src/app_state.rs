@@ -23,12 +23,41 @@ use atomartist_renderer::{
     CameraPoseAnimation, OrbitCamera, ProjectionAnimation, RenderStyle, ViewportTool,
 };
 
+/// One drilled-in editing level on the component-navigation stack.
+///
+/// When the user double-clicks a component node the UI pushes an
+/// `EditLevel` naming the template being edited and holding a **fresh**
+/// undo stack — component-edit history is scoped to the level and dropped
+/// when the user exits (a v1 simplification; see
+/// [`AppState::exit_to`]). The root graph keeps the long-lived undo stack
+/// on `AppState::undo`.
+#[derive(Clone)]
+pub struct EditLevel {
+    /// Human-readable component name (the def's `display_name`) — the
+    /// breadcrumb label for the next step.
+    pub label: String,
+    /// The component's registered `type_id`, for breadcrumb / diagnostics.
+    pub type_id: String,
+    /// The live template graph being edited in place (shared with every
+    /// instance's `SubgraphNodeDef`).
+    pub graph: Arc<Mutex<Graph>>,
+    /// Undo stack scoped to this level's edits — discarded on exit.
+    pub undo: Arc<Mutex<UndoBuffer>>,
+}
+
 /// Top-level state passed by reference into every UI widget that mutates
 /// the graph or reads evaluation results.
 pub struct AppState {
     pub graph: Arc<Mutex<Graph>>,
     pub registry: Arc<NodeRegistry>,
     pub undo: Arc<Mutex<UndoBuffer>>,
+    /// Component drill-in stack. Empty = editing the root graph; each
+    /// pushed [`EditLevel`] redirects the node-canvas model + its undo
+    /// stack to the component template on top. The 3-D viewport and the
+    /// evaluator always stay on the root graph. Shared via `Arc` so the
+    /// `AppStateModel` clone and the breadcrumb widget observe the same
+    /// stack.
+    pub edit_stack: Arc<Mutex<Vec<EditLevel>>>,
     /// Most recently computed output geometry (for the 3D viewport).
     /// Carries the mesh **plus** the per-node `matrix` and `color`
     /// pulled forward from upstream (see
@@ -140,6 +169,7 @@ impl AppState {
             graph: Arc::new(Mutex::new(graph)),
             registry: Arc::new(registry),
             undo: Arc::new(Mutex::new(UndoBuffer::new())),
+            edit_stack: Arc::new(Mutex::new(Vec::new())),
             last_mesh_output: Arc::new(Mutex::new(None)),
             viewport_dirty: Arc::new(AtomicBool::new(false)),
             eval_ticket: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -177,7 +207,18 @@ impl AppState {
 
     /// True when the live graph differs from the last clean baseline.
     /// Drives the "discard changes?" prompts.
+    ///
+    /// The change tracker only compares the *root* graph against its
+    /// baseline, so template edits made while drilled into a component
+    /// (`edit_depth() > 0`) are invisible to it — File > New/Open would
+    /// skip the confirm prompt and `edit_stack.clear()` would silently
+    /// discard those component edits. Until per-template tracking exists,
+    /// we take the coarse-but-safe route: any active drill-in reports
+    /// unsaved changes, so a user mid-edit always gets the prompt.
     pub fn has_unsaved_changes(&self) -> bool {
+        if self.edit_depth() > 0 {
+            return true;
+        }
         let graph = self.graph.lock().unwrap();
         self.change_tracker.lock().unwrap().has_unsaved_changes(&graph)
     }
@@ -323,7 +364,8 @@ impl AppState {
                 .zip(values.iter())
                 .map(|(n, v)| (std::sync::Arc::<str>::from(*n), v.clone()))
                 .collect();
-            let cmd = ChangePropsCmd::new(self.graph.clone(), id, props);
+            let cmd = ChangePropsCmd::new(self.graph.clone(), id, props)
+                .with_registry(self.registry.clone());
             self.undo.lock().unwrap().add_and_do(Box::new(cmd));
         }
         self.schedule_evaluate();
@@ -357,7 +399,8 @@ impl AppState {
             })
         };
         if !coalesced {
-            let cmd = ChangePropertyCmd::new(self.graph.clone(), id, name, value);
+            let cmd = ChangePropertyCmd::new(self.graph.clone(), id, name, value)
+                .with_registry(self.registry.clone());
             self.undo.lock().unwrap().add_and_do(Box::new(cmd));
         }
     }
@@ -406,25 +449,47 @@ impl EvalTask {
     /// would always paint the new() default tint regardless of what
     /// the user set on the node.
     fn pick_display_mesh(&self, g: &Graph) -> Option<Arc<Geometry3d>> {
-        // Look up any Geometry3d cached output on the node — socket
-        // names vary across node types (`"out"` for primitives,
-        // `"Geometry"` for Extrude). Picking by type is more robust
-        // than picking by a hard-coded name.
-        let first_geometry = |n: &atomartist_lib::graph::node::NodeInstance| {
-            n.cached_outputs.values().find_map(|v| match v {
-                PortValue::Geometry3d(g) => Some(g.clone()),
-                _ => None,
-            })
+        // Resolve the geometry a node contributes to the viewport. The
+        // Output node exposes its merged group on a socket explicitly
+        // named `__display__` (the concatenation of every connected
+        // body) *alongside* per-input pass-through Geometry3d outputs, so
+        // we prefer `__display__` by name and only fall back to "first
+        // Geometry3d output" for single-output primitives used as an
+        // explicit preview target. The old code picked "first Geometry3d
+        // cached output" unconditionally; because `cached_outputs` is a
+        // HashMap, that could return one single-body pass-through instead
+        // of the full merge — so a second body wired into Output never
+        // showed. Selecting by name makes multi-body Output deterministic.
+        let display_geometry = |n: &atomartist_lib::graph::node::NodeInstance| {
+            n.outputs
+                .iter()
+                .find(|s| s.name.as_ref() == "__display__")
+                .and_then(|s| n.cached_outputs.get(&s.uid))
+                .or_else(|| {
+                    n.cached_outputs
+                        .values()
+                        .find(|v| matches!(v, PortValue::Geometry3d(_)))
+                })
+                .and_then(|v| match v {
+                    PortValue::Geometry3d(g) => Some(g.clone()),
+                    _ => None,
+                })
+        };
+        let non_empty = |m: &Arc<Geometry3d>| {
+            !(m.is_empty()
+                || m.iter()
+                    .all(|b| atomartist_lib::geometry::num_tris(&b.mesh) == 0))
         };
 
-        // Explicit user override: clicking a node sets `display_node`,
-        // which pins the viewport to that node's first geometry
-        // regardless of whether anything is wired to Output. Useful
-        // for "preview just this node" while building.
+        // Explicit programmatic override: an app / test may pin a specific
+        // node's geometry via `set_display_node` (the starter graph pins
+        // the Output node). Canvas selection deliberately does NOT drive
+        // this — see `AppStateModel::on_primary_selection_changed` — so an
+        // unconnected primitive never renders just because it is selected.
         let display_id = *self.display_node.lock().unwrap();
         if let Some(id) = display_id {
-            if let Some(n) = g.get(id) {
-                if let Some(m) = first_geometry(n) {
+            if let Some(m) = g.get(id).and_then(display_geometry) {
+                if non_empty(&m) {
                     return Some(m);
                 }
             }
@@ -433,28 +498,16 @@ impl EvalTask {
         // Default: only render what's wired into the Output node. An
         // unconnected primitive sitting on the canvas is "not
         // outputting" and should NOT show in the viewport — matches
-        // NodeDesigner / MatterCAD semantics. The Output node's
-        // synthetic `__display__` socket carries the merged geometry
-        // of everything wired into its input slots; an empty Output
-        // (no connections, or zero-tri merged mesh) returns `None` so
-        // the viewport renders nothing.
+        // NodeDesigner / MatterCAD semantics. An empty Output (no
+        // connections, or a zero-tri merged mesh) returns `None` so the
+        // viewport renders nothing.
         let output_node = g.nodes().find(|n| n.type_id.as_ref() == "Output")?;
-        let display_geom = output_node.cached_outputs.values().find_map(|v| match v {
-            PortValue::Geometry3d(g) => Some(g.clone()),
-            _ => None,
-        })?;
-        // Multi-body group: keep the geometry when at least one body
-        // has triangles. An Output node wired to nothing produces an
-        // empty bodies vec, which collapses to `None` here so the
-        // viewport draws nothing.
-        if display_geom.is_empty()
-            || display_geom
-                .iter()
-                .all(|b| atomartist_lib::geometry::num_tris(&b.mesh) == 0)
-        {
-            return None;
+        let display_geom = display_geometry(output_node)?;
+        if non_empty(&display_geom) {
+            Some(display_geom)
+        } else {
+            None
         }
-        Some(display_geom)
     }
 }
 
@@ -464,6 +517,7 @@ impl Clone for AppState {
             graph: self.graph.clone(),
             registry: self.registry.clone(),
             undo: self.undo.clone(),
+            edit_stack: self.edit_stack.clone(),
             last_mesh_output: self.last_mesh_output.clone(),
             viewport_dirty: self.viewport_dirty.clone(),
             eval_ticket: self.eval_ticket.clone(),

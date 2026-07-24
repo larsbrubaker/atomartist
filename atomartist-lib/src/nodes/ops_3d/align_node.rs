@@ -20,12 +20,29 @@ use crate::geometry::{bounds, Body, Geometry3d};
 use crate::graph::node::{matmul4x4, PortValue};
 use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    compose_with_upstream, op_props, EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs,
-    NodeRegistry, PropDef,
+    compose_with_upstream, EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs,
+    NodeRegistry, ParamSet, PropDef,
 };
 use crate::socket_types::SocketType;
 
 pub struct AlignNode;
+
+/// The Align node's parameter schema. Uses the [`ParamSet::op`] preseed
+/// for the shared `color` (INHERIT default, socket `Color`) + `matrix`
+/// params, but marks `matrix` `no_socket`: Align composes its own
+/// alignment translation into `Body.matrix`, so wiring an op `matrix`
+/// input would be a silent no-op. The three anchor params follow on
+/// capitalized `Align X/Y/Z` sockets.
+fn params() -> ParamSet {
+    ParamSet::op()
+        .no_socket() // `matrix`: property-only; Align builds its own.
+        .number("align_x", "Align X", 0.0, -1.0..=1.0)
+        .socket_named("Align X")
+        .number("align_y", "Align Y", -1.0, -1.0..=1.0)
+        .socket_named("Align Y")
+        .number("align_z", "Align Z", 0.0, -1.0..=1.0)
+        .socket_named("Align Z")
+}
 
 impl NodeDef for AlignNode {
     fn type_id(&self) -> &'static str { "Align" }
@@ -33,21 +50,16 @@ impl NodeDef for AlignNode {
     fn category(&self) -> &'static str { "Operations 3D" }
 
     fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
-        InstanceTemplate::builder(alloc)
-            .input("input", SocketType::Geometry3d)
+        params()
+            .mint_sockets(
+                InstanceTemplate::builder(alloc).input("input", SocketType::Geometry3d),
+            )
             .output("out", SocketType::Geometry3d)
             .build()
     }
 
     fn properties(&self) -> Vec<PropDef> {
-        let tail = vec![
-            PropDef::new("align_x", PortValue::Number(0.0)).with_range(-1.0, 1.0),
-            PropDef::new("align_y", PortValue::Number(-1.0)).with_range(-1.0, 1.0),
-            PropDef::new("align_z", PortValue::Number(0.0)).with_range(-1.0, 1.0),
-        ];
-        let mut p = op_props();
-        p.extend(tail);
-        p
+        params().prop_defs()
     }
 
     fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
@@ -79,9 +91,11 @@ impl NodeDef for AlignNode {
                 return Ok(o);
             }
         };
-        let ax = ctx.properties.number("align_x", 0.0) as f32;
-        let ay = ctx.properties.number("align_y", -1.0) as f32;
-        let az = ctx.properties.number("align_z", 0.0) as f32;
+        let ps = params();
+        let rd = ps.reader(ctx);
+        let ax = rd.number("align_x") as f32;
+        let ay = rd.number("align_y") as f32;
+        let az = rd.number("align_z") as f32;
         let anchor_x = (mn[0] + mx[0]) * 0.5 + ax * (mx[0] - mn[0]) * 0.5;
         let anchor_y = (mn[1] + mx[1]) * 0.5 + ay * (mx[1] - mn[1]) * 0.5;
         let anchor_z = (mn[2] + mx[2]) * 0.5 + az * (mx[2] - mn[2]) * 0.5;

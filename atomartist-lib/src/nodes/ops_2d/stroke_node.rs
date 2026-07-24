@@ -11,11 +11,18 @@ use crate::geometry::path2d::CrossSection;
 use crate::graph::node::PortValue;
 use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeRegistry, PropDef,
+    EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeRegistry, ParamSet, PropDef,
 };
 use crate::socket_types::SocketType;
 
 pub struct StrokeNode;
+
+/// The Stroke node's `width` parameter — the single source from which its
+/// optional socket, property row, and `evaluate` read all derive. The
+/// required `input` Path2d socket is minted separately (it leads).
+fn params() -> ParamSet {
+    ParamSet::new().number("width", "Width", 1.0, 0.001..=1000.0)
+}
 
 impl NodeDef for StrokeNode {
     fn type_id(&self) -> &'static str { "Stroke" }
@@ -23,16 +30,16 @@ impl NodeDef for StrokeNode {
     fn category(&self) -> &'static str { "Operations 2D" }
 
     fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
-        InstanceTemplate::builder(alloc)
-            .input("input", SocketType::Path2d)
+        params()
+            .mint_sockets(
+                InstanceTemplate::builder(alloc).input("input", SocketType::Path2d),
+            )
             .output("out", SocketType::Path2d)
             .build()
     }
 
     fn properties(&self) -> Vec<PropDef> {
-        vec![
-            PropDef::new("width", PortValue::Number(1.0)).with_range(0.001, 1000.0),
-        ]
+        params().prop_defs()
     }
 
     fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
@@ -43,7 +50,7 @@ impl NodeDef for StrokeNode {
                 "Stroke: expected Path2d, got {:?}", other.socket_type()
             ))),
         };
-        let w = ctx.properties.number("width", 1.0).max(1e-6);
+        let w = params().reader(ctx).number("width").max(1e-6);
         let outer: CrossSection = input.offset(w * 0.5);
         let inner: CrossSection = input.offset(-w * 0.5);
         let ring = outer.difference(&inner);

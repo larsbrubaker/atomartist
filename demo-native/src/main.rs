@@ -639,7 +639,7 @@ fn main() {
                     } else if app.wants_draw() {
                         window.request_redraw();
                     } else {
-                        let animation_deadline = agg_gui::animation::take_next_draw_deadline();
+                        let animation_deadline = agg_gui::animation::peek_next_draw_deadline();
                         let widget_deadline = app.next_draw_deadline();
                         let next_deadline = match (animation_deadline, widget_deadline) {
                             (Some(a), Some(b)) => Some(a.min(b)),

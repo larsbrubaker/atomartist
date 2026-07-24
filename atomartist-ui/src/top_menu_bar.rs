@@ -20,30 +20,8 @@ use agg_gui::{
 
 use crate::app_state::AppState;
 use crate::debug_windows::DebugWindowHandles;
+use crate::fa;
 use crate::menu_actions::handle_action;
-
-mod bi {
-    pub const ARROW_CLOCKWISE: char = '\u{f116}';
-    pub const ARROW_COUNTERCLOCKWISE: char = '\u{f117}';
-    pub const ARROWS_ANGLE_EXPAND: char = '\u{f14a}';
-    pub const BOOK: char = '\u{f194}';
-    pub const BOX: char = '\u{f1c8}';
-    pub const BOX_ARROW_UP_RIGHT: char = '\u{f1c5}';
-    pub const BOX_ARROW_IN_DOWN: char = '\u{f1bb}';
-    pub const BOX_SEAM: char = '\u{f1c7}';
-    pub const BUG: char = '\u{f2a3}';
-    pub const CALCULATOR: char = '\u{f1e0}';
-    pub const FILE_PLUS: char = '\u{f3ab}';
-    pub const FLOPPY: char = '\u{f7d8}';
-    pub const FOLDER2_OPEN: char = '\u{f3d8}';
-    pub const INFO_CIRCLE: char = '\u{f431}';
-    pub const PLUG: char = '\u{f4f7}';
-    pub const PLUS_CIRCLE: char = '\u{f4fa}';
-    pub const SPEEDOMETER: char = '\u{f55a}';
-    pub const SUN: char = '\u{f5a2}';
-    pub const TRASH: char = '\u{f5de}';
-    pub const VECTOR_PEN: char = '\u{f604}';
-}
 
 /// User's answer to the "you have unsaved changes" prompt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,23 +84,23 @@ fn compose_menus(state: &AppState) -> Vec<TopMenu> {
             vec![
                 MenuEntry::Item(
                     MenuItem::action("Undo", "edit.undo")
-                        .icon(bi::ARROW_COUNTERCLOCKWISE)
+                        .icon(fa::UNDO)
                         .shortcut("Ctrl+Z"),
                 ),
                 MenuEntry::Item(
                     MenuItem::action("Redo", "edit.redo")
-                        .icon(bi::ARROW_CLOCKWISE)
+                        .icon(fa::REDO)
                         .shortcut("Ctrl+Y"),
                 ),
                 MenuEntry::Separator,
                 MenuEntry::Item(
                     MenuItem::action("Delete Selected", "edit.delete")
-                        .icon(bi::TRASH)
+                        .icon(fa::TRASH)
                         .shortcut("Del"),
                 ),
                 MenuEntry::Item(
                     MenuItem::action("Select All", "edit.select_all")
-                        .icon(bi::ARROWS_ANGLE_EXPAND)
+                        .icon(fa::EXPAND)
                         .shortcut("Ctrl+A"),
                 ),
             ],
@@ -131,9 +109,9 @@ fn compose_menus(state: &AppState) -> Vec<TopMenu> {
         TopMenu::new(
             "Help",
             vec![
-                MenuEntry::Item(MenuItem::action("Documentation", "help.docs").icon(bi::BOOK)),
-                MenuEntry::Item(MenuItem::action("License", "help.license").icon(bi::INFO_CIRCLE)),
-                MenuEntry::Item(MenuItem::action("About", "help.about").icon(bi::INFO_CIRCLE)),
+                MenuEntry::Item(MenuItem::action("Documentation", "help.docs").icon(fa::BOOK)),
+                MenuEntry::Item(MenuItem::action("License", "help.license").icon(fa::INFO_CIRCLE)),
+                MenuEntry::Item(MenuItem::action("About", "help.about").icon(fa::INFO_CIRCLE)),
             ],
         ),
         // "Add Node" lists every registered node type, grouped by category.
@@ -174,17 +152,17 @@ fn build_file_entries(state: &AppState) -> Vec<MenuEntry> {
     ];
 
     vec![
-        MenuEntry::Item(MenuItem::action("New", "file.new").icon(bi::FILE_PLUS)),
-        MenuEntry::Item(MenuItem::action("Open\u{2026}", "file.open").icon(bi::FOLDER2_OPEN)),
-        MenuEntry::Item(MenuItem::submenu("Open Recent", recent_submenu).icon(bi::FOLDER2_OPEN)),
+        MenuEntry::Item(MenuItem::action("New", "file.new").icon(fa::FILE_NEW)),
+        MenuEntry::Item(MenuItem::action("Open\u{2026}", "file.open").icon(fa::FOLDER_OPEN)),
+        MenuEntry::Item(MenuItem::submenu("Open Recent", recent_submenu).icon(fa::FOLDER_OPEN)),
         MenuEntry::Separator,
-        MenuEntry::Item(MenuItem::action("Save", "file.save").icon(bi::FLOPPY)),
-        MenuEntry::Item(MenuItem::action("Save As\u{2026}", "file.save_as").icon(bi::FLOPPY)),
+        MenuEntry::Item(MenuItem::action("Save", "file.save").icon(fa::SAVE)),
+        MenuEntry::Item(MenuItem::action("Save As\u{2026}", "file.save_as").icon(fa::SAVE)),
         MenuEntry::Separator,
         MenuEntry::Item(
-            MenuItem::action("Import\u{2026}", "file.import").icon(bi::BOX_ARROW_IN_DOWN),
+            MenuItem::action("Import\u{2026}", "file.import").icon(fa::IMPORT),
         ),
-        MenuEntry::Item(MenuItem::submenu("Export", export_submenu).icon(bi::BOX_ARROW_UP_RIGHT)),
+        MenuEntry::Item(MenuItem::submenu("Export", export_submenu).icon(fa::EXPORT)),
     ]
 }
 
@@ -198,19 +176,19 @@ fn build_view_entries(state: &AppState) -> Vec<MenuEntry> {
     let theme_submenu = vec![
         MenuEntry::Item(
             MenuItem::action("Light", "view.theme.light")
-                .icon(bi::SUN)
+                .icon(fa::SUN)
                 .radio(theme == ThemePreference::Light)
                 .keep_open(),
         ),
         MenuEntry::Item(
             MenuItem::action("Dark", "view.theme.dark")
-                .icon(bi::SUN)
+                .icon(fa::SUN)
                 .radio(theme == ThemePreference::Dark)
                 .keep_open(),
         ),
         MenuEntry::Item(
             MenuItem::action("System", "view.theme.system")
-                .icon(bi::SUN)
+                .icon(fa::SUN)
                 .radio(theme == ThemePreference::System)
                 .keep_open(),
         ),
@@ -234,19 +212,19 @@ fn build_view_entries(state: &AppState) -> Vec<MenuEntry> {
                 "Debug",
                 vec![
                     MenuEntry::Item(
-                        MenuItem::action("Inspector", "view.debug.inspector").icon(bi::BUG),
+                        MenuItem::action("Inspector", "view.debug.inspector").icon(fa::BUG),
                     ),
                     MenuEntry::Item(
                         MenuItem::action("Performance Graph", "view.debug.performance")
-                            .icon(bi::SPEEDOMETER),
+                            .icon(fa::TACHOMETER),
                     ),
                 ],
             )
-            .icon(bi::BUG),
+            .icon(fa::BUG),
         ),
         MenuEntry::Separator,
-        MenuEntry::Item(MenuItem::submenu("Theme", theme_submenu).icon(bi::SUN)),
-        MenuEntry::Item(MenuItem::submenu("Color", accent_submenu).icon(bi::SUN)),
+        MenuEntry::Item(MenuItem::submenu("Theme", theme_submenu).icon(fa::SUN)),
+        MenuEntry::Item(MenuItem::submenu("Color", accent_submenu).icon(fa::SUN)),
     ]
 }
 
@@ -264,7 +242,7 @@ fn build_add_node_entries(state: &AppState) -> Vec<MenuEntry> {
                 MenuEntry::Item(MenuItem::action(
                     d.display_name(),
                     format!("add.{}", d.type_id()),
-                ).icon(bi::PLUS_CIRCLE))
+                ).icon(fa::PLUS_CIRCLE))
             })
             .collect();
         let submenu = match category_icon(cat) {
@@ -278,12 +256,13 @@ fn build_add_node_entries(state: &AppState) -> Vec<MenuEntry> {
 
 fn category_icon(category: &str) -> Option<char> {
     match category {
-        "Primitives 2D" | "Operations 2D" => Some(bi::VECTOR_PEN),
-        "Primitives 3D" => Some(bi::BOX),
-        "Operations 3D" => Some(bi::ARROWS_ANGLE_EXPAND),
-        "Mesh" => Some(bi::BOX_SEAM),
-        "Math" => Some(bi::CALCULATOR),
-        "Output" => Some(bi::PLUG),
+        "Primitives 2D" | "Operations 2D" => Some(fa::PENCIL),
+        "Primitives 3D" => Some(fa::CUBE),
+        "Operations 3D" => Some(fa::EXPAND),
+        "Mesh" => Some(fa::CUBES),
+        "Math" => Some(fa::CALCULATOR),
+        "Input" => Some(fa::SLIDERS),
+        "Output" => Some(fa::PLUG),
         _ => None,
     }
 }

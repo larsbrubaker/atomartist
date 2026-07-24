@@ -16,7 +16,9 @@
 //!   - `evaluate` mirrors each connected input to its named output, and
 //!     additionally merges every `Geometry3d` input into a synthetic
 //!     `__display__` output so the 3D viewport's `pick_display_mesh`
-//!     finds it via the "first Geometry3d cached output" heuristic.
+//!     resolves it BY NAME (`__display__`). Legacy saves that predate
+//!     this socket fall back to the "first Geometry3d cached output"
+//!     heuristic.
 
 use std::sync::Arc;
 
@@ -30,8 +32,10 @@ use crate::registry::{
 use crate::socket_types::SocketType;
 
 /// Internal output-socket name carrying the merged display mesh. Never
-/// shown in the UI; the viewport picks it up via `pick_display_mesh`'s
-/// "first Geometry3d cached output" heuristic.
+/// shown in the UI; the viewport resolves it BY NAME — `pick_display_mesh`
+/// looks up the output socket called `__display__` and displays its cached
+/// group. Legacy saves lacking this socket fall back to the "first
+/// Geometry3d cached output" heuristic.
 const DISPLAY_OUTPUT_NAME: &str = "__display__";
 
 pub struct OutputNode;

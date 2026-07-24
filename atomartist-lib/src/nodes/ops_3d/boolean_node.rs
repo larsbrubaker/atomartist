@@ -16,12 +16,24 @@ use crate::geometry::mesh3d::{compute_flat_normals, NUM_PROP};
 use crate::graph::node::PortValue;
 use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    geometry_props, wrap_mesh, EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs,
-    NodeRegistry, PropDef,
+    wrap_mesh, EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeRegistry, ParamSet,
+    PropDef,
 };
 use crate::socket_types::SocketType;
 
 pub struct BooleanNode;
+
+/// The Boolean node's parameter schema. Shared `Color` / `Matrix` (via
+/// [`ParamSet::geometry`], resolved by [`wrap_mesh`]) lead; `operation`
+/// follows. `operation` is genuinely a **Number-encoded** enum (0 = Union,
+/// 1 = Difference, 2 = Intersection) — not an `EnumDropdown` string — so
+/// it stays a property-only `Number` to preserve saved-graph
+/// compatibility; there is no scalar socket type for it.
+fn params() -> ParamSet {
+    ParamSet::geometry()
+        .number("operation", "operation", 0.0, 0.0..=2.0)
+        .no_socket()
+}
 
 impl NodeDef for BooleanNode {
     fn type_id(&self) -> &'static str { "Boolean" }
@@ -29,21 +41,20 @@ impl NodeDef for BooleanNode {
     fn category(&self) -> &'static str { "Operations 3D" }
 
     fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
-        InstanceTemplate::builder(alloc)
-            .input("a", SocketType::Geometry3d)
-            .input("b", SocketType::Geometry3d)
+        // The two required geometry inputs lead; the schema params
+        // (Color / Matrix) follow. `operation` mints no socket.
+        params()
+            .mint_sockets(
+                InstanceTemplate::builder(alloc)
+                    .input("a", SocketType::Geometry3d)
+                    .input("b", SocketType::Geometry3d),
+            )
             .output("out", SocketType::Geometry3d)
             .build()
     }
 
     fn properties(&self) -> Vec<PropDef> {
-        let mut p = vec![
-            // Operation: 0 = Union, 1 = Difference, 2 = Intersection.
-            PropDef::new("operation", PortValue::Number(0.0)).with_range(0.0, 2.0),
-        ];
-        // Prepend color + matrix so they render as the first two rows.
-        let mut p = { let mut g = geometry_props(); g.extend(p); g };
-        p
+        params().prop_defs()
     }
 
     fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
@@ -61,7 +72,7 @@ impl NodeDef for BooleanNode {
                 "Boolean: input 'b' must be Geometry3d, got {:?}", other.socket_type()
             ))),
         };
-        let op_idx = ctx.properties.number("operation", 0.0).round() as i32;
+        let op_idx = params().reader(ctx).number("operation").round() as i32;
         let op = match op_idx {
             0 => OpType::Add,         // Union
             1 => OpType::Subtract,    // Difference (a - b)

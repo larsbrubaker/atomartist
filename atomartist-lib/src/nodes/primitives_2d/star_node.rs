@@ -8,11 +8,20 @@ use manifold_rust::linalg::Vec2;
 use crate::graph::node::PortValue;
 use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeRegistry, PropDef,
+    EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeRegistry, ParamSet, PropDef,
 };
 use crate::socket_types::SocketType;
 
 pub struct StarNode;
+
+/// The Star node's parameter schema — the single source from which its
+/// sockets, property rows, and `evaluate` reads all derive.
+fn params() -> ParamSet {
+    ParamSet::new()
+        .number("points", "Points", 5.0, 3.0..=64.0)
+        .number("outer_radius", "Outer Radius", 10.0, 0.001..=10_000.0)
+        .number("inner_radius", "Inner Radius", 4.0, 0.001..=10_000.0)
+}
 
 impl NodeDef for StarNode {
     fn type_id(&self) -> &'static str { "Star" }
@@ -20,23 +29,22 @@ impl NodeDef for StarNode {
     fn category(&self) -> &'static str { "Primitives 2D" }
 
     fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
-        InstanceTemplate::builder(alloc)
+        params()
+            .mint_sockets(InstanceTemplate::builder(alloc))
             .output("out", SocketType::Path2d)
             .build()
     }
 
     fn properties(&self) -> Vec<PropDef> {
-        vec![
-            PropDef::new("points", PortValue::Number(5.0)).with_range(3.0, 64.0),
-            PropDef::new("outer_radius", PortValue::Number(10.0)).with_range(0.001, 10_000.0),
-            PropDef::new("inner_radius", PortValue::Number(4.0)).with_range(0.001, 10_000.0),
-        ]
+        params().prop_defs()
     }
 
     fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
-        let n = ctx.properties.number("points", 5.0).round().clamp(3.0, 64.0) as usize;
-        let r_out = ctx.properties.number("outer_radius", 10.0);
-        let r_in = ctx.properties.number("inner_radius", 4.0).min(r_out);
+        let ps = params();
+        let rd = ps.reader(ctx);
+        let n = rd.number("points").round().clamp(3.0, 64.0) as usize;
+        let r_out = rd.number("outer_radius");
+        let r_in = rd.number("inner_radius").min(r_out);
         let total = n * 2;
         let mut contour = Vec::with_capacity(total);
         for i in 0..total {

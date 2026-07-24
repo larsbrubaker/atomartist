@@ -4,6 +4,7 @@
 //! that want to add custom nodes should call this first, then register their
 //! own types on top.
 
+pub mod input;
 pub mod io;
 pub mod math;
 pub mod mesh;
@@ -14,7 +15,7 @@ pub mod primitives_2d;
 pub mod primitives_3d;
 pub mod subgraph_node;
 
-pub use subgraph_node::{register_subgraph, SubgraphNodeDef};
+pub use subgraph_node::{register_subgraph, sync_instances_to_template, SubgraphNodeDef};
 
 use crate::registry::NodeRegistry;
 
@@ -27,6 +28,7 @@ pub fn register_all(reg: &mut NodeRegistry) {
     ops_2d::register_all(reg);
     ops_3d::register_all(reg);
     mesh::register_all(reg);
+    input::register_all(reg);
     math::register_all(reg);
     io::register_all(reg);
     output_node::register(reg);

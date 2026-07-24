@@ -214,10 +214,20 @@ impl UndoRedoCommand for MoveNodeCmd {
 /// overwritten.
 pub struct ChangePropertyCmd {
     graph: Arc<Mutex<Graph>>,
+    /// Optional registry — when present, the property write routes through
+    /// [`Graph::set_property_hooked`] so the type's `on_property_changed`
+    /// hook fires (retyping sockets, disconnecting now-incompatible
+    /// noodles). Absent → plain `set_property`, byte-for-byte the old
+    /// behavior. Mirrors [`ConnectCmd`], which likewise carries a registry.
+    registry: Option<Arc<NodeRegistry>>,
     pub id: NodeId,
     pub name: Arc<str>,
     new_value: Option<PortValue>,
     old_value: Option<PortValue>,
+    /// Noodles the property-changed hook disconnected because a retyped
+    /// socket became incompatible. Captured once (first non-empty) and
+    /// re-pushed on undo so the round-trip is lossless.
+    disconnected: Vec<Noodle>,
 }
 
 impl ChangePropertyCmd {
@@ -227,15 +237,57 @@ impl ChangePropertyCmd {
         name: impl Into<Arc<str>>,
         new_value: PortValue,
     ) -> Self {
-        Self { graph, id, name: name.into(), new_value: Some(new_value), old_value: None }
+        Self {
+            graph,
+            registry: None,
+            id,
+            name: name.into(),
+            new_value: Some(new_value),
+            old_value: None,
+            disconnected: Vec::new(),
+        }
+    }
+
+    /// Attach a registry so property changes fire the type's
+    /// `on_property_changed` hook. Without this the command behaves
+    /// exactly as before (no hook, no socket revalidation).
+    pub fn with_registry(mut self, registry: Arc<NodeRegistry>) -> Self {
+        self.registry = Some(registry);
+        self
     }
 
     /// Coalesce a mid-stroke property update into this command. Caller
     /// has verified the target id + name match.
     pub fn extend_into(&mut self, new_value: PortValue) {
-        let mut g = self.graph.lock().unwrap();
-        let _ = g.set_property(self.id, self.name.clone(), new_value.clone());
+        // Clone the Arc into a local so the lock guard doesn't hold a
+        // borrow of `self` — `apply` needs `&mut self`.
+        let graph = self.graph.clone();
+        let mut g = graph.lock().unwrap();
+        self.apply(&mut g, new_value.clone());
         self.new_value = Some(new_value);
+    }
+
+    /// Write `value` to the graph, routing through the hooked path when a
+    /// registry is present and stashing the first non-empty set of
+    /// hook-disconnected noodles for undo restoration.
+    ///
+    /// Assumption (a): coalescing via [`Self::extend_into`] assumes at most
+    /// one retype-transition per coalesced stroke — the first non-empty
+    /// drop set wins and later samples in the same stroke don't introduce a
+    /// second, different set of disconnections.
+    fn apply(&mut self, g: &mut Graph, value: PortValue) {
+        match &self.registry {
+            Some(reg) => {
+                if let Ok(disc) = g.set_property_hooked(self.id, self.name.clone(), value, reg) {
+                    if self.disconnected.is_empty() && !disc.is_empty() {
+                        self.disconnected = disc;
+                    }
+                }
+            }
+            None => {
+                let _ = g.set_property(self.id, self.name.clone(), value);
+            }
+        }
     }
 }
 
@@ -246,19 +298,30 @@ impl UndoRedoCommand for ChangePropertyCmd {
             Some(v) => v,
             None => return,
         };
-        let mut g = self.graph.lock().unwrap();
+        let graph = self.graph.clone();
+        let mut g = graph.lock().unwrap();
         // Only capture old_value on the FIRST do — coalesce + redo
         // cycles must preserve the pre-stroke baseline.
         if self.old_value.is_none() {
             self.old_value = g.get(self.id)
                 .and_then(|n| n.properties.get(&self.name).cloned());
         }
-        let _ = g.set_property(self.id, self.name.clone(), new_v);
+        self.apply(&mut g, new_v);
     }
     fn undo_it(&mut self) {
         if let Some(old) = self.old_value.clone() {
-            let mut g = self.graph.lock().unwrap();
-            let _ = g.set_property(self.id, self.name.clone(), old);
+            let graph = self.graph.clone();
+            let mut g = graph.lock().unwrap();
+            // Restore the old value first (re-firing the hook, which
+            // retypes sockets back to their compatible state), then
+            // re-attach any noodle the do-time retype disconnected.
+            self.apply(&mut g, old);
+            if self.registry.is_some() {
+                for n in &self.disconnected {
+                    g.noodles_mut().push(*n);
+                    g.mark_dirty_subtree(n.to.node);
+                }
+            }
         }
     }
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
@@ -275,8 +338,13 @@ impl UndoRedoCommand for ChangePropertyCmd {
 /// matching MatterCAD's single "Scale" undo entry.
 pub struct ChangePropsCmd {
     graph: Arc<Mutex<Graph>>,
+    /// See [`ChangePropertyCmd::registry`] — optional hook routing.
+    registry: Option<Arc<NodeRegistry>>,
     pub id: NodeId,
     props: Vec<PropSlot>,
+    /// Noodles the property-changed hook disconnected across the batch.
+    /// Captured once (first non-empty) and re-pushed on undo.
+    disconnected: Vec<Noodle>,
 }
 
 struct PropSlot {
@@ -297,7 +365,47 @@ impl ChangePropsCmd {
             .into_iter()
             .map(|(name, new_value)| PropSlot { name, new_value, old_value: None })
             .collect();
-        Self { graph, id, props }
+        Self { graph, registry: None, id, props, disconnected: Vec::new() }
+    }
+
+    /// Attach a registry so each property change fires the type's
+    /// `on_property_changed` hook. The hook fires once per changed
+    /// property, in the batch's slot order; disconnected noodles are
+    /// accumulated across the whole batch.
+    pub fn with_registry(mut self, registry: Arc<NodeRegistry>) -> Self {
+        self.registry = Some(registry);
+        self
+    }
+
+    /// Write one slot's value, routing through the hooked path when a
+    /// registry is present and *accumulating* every hook-disconnected
+    /// noodle across the batch for undo restoration.
+    ///
+    /// Accumulation (rather than first-non-empty-wins) matters when two
+    /// slots each retype a different socket and drop a different noodle:
+    /// undo must restore both, so we `extend` and de-dupe by noodle
+    /// identity instead of keeping only the first slot's drops.
+    ///
+    /// Assumption (b): undo-time revalidation assumes the type hooks are
+    /// symmetric — restoring the old property values reverses the retype
+    /// and drops nothing new. Under that assumption the extra `apply_slot`
+    /// calls from `undo_it`'s restores contribute no new disconnections,
+    /// so accumulating here is safe on both the do and undo paths.
+    fn apply_slot(&mut self, g: &mut Graph, name: Arc<str>, value: PortValue) {
+        match &self.registry {
+            Some(reg) => {
+                if let Ok(disc) = g.set_property_hooked(self.id, name, value, reg) {
+                    for n in disc {
+                        if !self.disconnected.contains(&n) {
+                            self.disconnected.push(n);
+                        }
+                    }
+                }
+            }
+            None => {
+                let _ = g.set_property(self.id, name, value);
+            }
+        }
     }
 
     /// Whether this command targets `id` with exactly the property
@@ -314,10 +422,21 @@ impl ChangePropsCmd {
     /// [`Self::matches`]; `values` pairs with the command's props by
     /// order.
     pub fn extend_into(&mut self, values: &[PortValue]) {
-        let mut g = self.graph.lock().unwrap();
-        for (slot, v) in self.props.iter_mut().zip(values) {
-            let _ = g.set_property(self.id, slot.name.clone(), v.clone());
-            slot.new_value = v.clone();
+        let graph = self.graph.clone();
+        let mut g = graph.lock().unwrap();
+        // Collect (name, value) first so `apply_slot` can take `&mut self`
+        // without also holding a borrow of `self.props`.
+        let updates: Vec<(Arc<str>, PortValue)> = self
+            .props
+            .iter_mut()
+            .zip(values)
+            .map(|(slot, v)| {
+                slot.new_value = v.clone();
+                (slot.name.clone(), v.clone())
+            })
+            .collect();
+        for (name, value) in updates {
+            self.apply_slot(&mut g, name, value);
         }
     }
 }
@@ -325,21 +444,42 @@ impl ChangePropsCmd {
 impl UndoRedoCommand for ChangePropsCmd {
     fn name(&self) -> &str { "Change Properties" }
     fn do_it(&mut self) {
-        let mut g = self.graph.lock().unwrap();
+        let graph = self.graph.clone();
+        let mut g = graph.lock().unwrap();
+        // Capture pre-stroke baselines + gather the writes, then apply —
+        // decoupled so `apply_slot`'s `&mut self` doesn't clash with the
+        // `self.props` iteration.
+        let mut updates: Vec<(Arc<str>, PortValue)> = Vec::with_capacity(self.props.len());
         for slot in &mut self.props {
             if slot.old_value.is_none() {
                 slot.old_value = g
                     .get(self.id)
                     .and_then(|n| n.properties.get(&slot.name).cloned());
             }
-            let _ = g.set_property(self.id, slot.name.clone(), slot.new_value.clone());
+            updates.push((slot.name.clone(), slot.new_value.clone()));
+        }
+        for (name, value) in updates {
+            self.apply_slot(&mut g, name, value);
         }
     }
     fn undo_it(&mut self) {
-        let mut g = self.graph.lock().unwrap();
-        for slot in self.props.iter_mut().rev() {
-            if let Some(old) = slot.old_value.clone() {
-                let _ = g.set_property(self.id, slot.name.clone(), old);
+        let graph = self.graph.clone();
+        let mut g = graph.lock().unwrap();
+        let restores: Vec<(Arc<str>, PortValue)> = self
+            .props
+            .iter()
+            .rev()
+            .filter_map(|slot| slot.old_value.clone().map(|old| (slot.name.clone(), old)))
+            .collect();
+        for (name, value) in restores {
+            self.apply_slot(&mut g, name, value);
+        }
+        // Re-attach any noodle the do-time retype disconnected, now that
+        // sockets are back to their old (compatible) types.
+        if self.registry.is_some() {
+            for n in &self.disconnected {
+                g.noodles_mut().push(*n);
+                g.mark_dirty_subtree(n.to.node);
             }
         }
     }
@@ -374,171 +514,5 @@ impl UndoRedoCommand for BatchCmd {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::graph::graph::Noodle;
-    use crate::graph::socket::SocketUidAlloc;
-    use crate::registry::{
-        EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs,
-    };
-    use crate::socket_types::SocketType;
-    use agg_gui::undo::UndoBuffer;
-
-    struct ConstNode;
-    impl NodeDef for ConstNode {
-        fn type_id(&self) -> &'static str { "Const" }
-        fn category(&self) -> &'static str { "Math" }
-        fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
-            InstanceTemplate::builder(alloc)
-                .output("out", SocketType::Number)
-                .build()
-        }
-        fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
-            let v = ctx.properties.number("value", 0.0);
-            let mut o = NodeOutputs::default();
-            o.set("out", PortValue::Number(v));
-            Ok(o)
-        }
-    }
-    struct TwoIn;
-    impl NodeDef for TwoIn {
-        fn type_id(&self) -> &'static str { "TwoIn" }
-        fn category(&self) -> &'static str { "Math" }
-        fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
-            InstanceTemplate::builder(alloc)
-                .input("a", SocketType::Number)
-                .output("out", SocketType::Number)
-                .build()
-        }
-        fn evaluate(&self, _ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
-            Ok(NodeOutputs::default())
-        }
-    }
-
-    fn setup() -> (Arc<Mutex<Graph>>, Arc<NodeRegistry>) {
-        let mut r = NodeRegistry::new();
-        r.register(ConstNode);
-        r.register(TwoIn);
-        (Arc::new(Mutex::new(Graph::new())), Arc::new(r))
-    }
-
-    #[test]
-    fn add_then_undo_leaves_graph_empty() {
-        let (g, _reg) = setup();
-        let id = g.lock().unwrap().allocate_id();
-        let node = NodeInstance::new(id, "Const", [0.0, 0.0]);
-        let mut cmd = AddNodeCmd::new(g.clone(), node);
-        cmd.do_it();
-        assert_eq!(g.lock().unwrap().node_count(), 1);
-        cmd.undo_it();
-        assert_eq!(g.lock().unwrap().node_count(), 0);
-        cmd.do_it();
-        assert_eq!(g.lock().unwrap().node_count(), 1, "redo restores");
-    }
-
-    /// The height drag's paired write: `height` + `matrix` land as ONE
-    /// command — mid-stroke samples coalesce into it, and a single
-    /// undo restores both pre-stroke values (MatterCAD's one "Scale"
-    /// undo entry).
-    #[test]
-    fn change_props_cmd_coalesces_and_undoes_both_values() {
-        let (g, reg) = setup();
-        let id = {
-            let mut graph = g.lock().unwrap();
-            let id = graph.add_new_node("Const", [0.0, 0.0], &reg).unwrap();
-            let _ = graph.set_property(id, "height", PortValue::Number(20.0));
-            let _ = graph.set_property(id, "matrix", PortValue::Matrix4x4([1.0; 16]));
-            id
-        };
-        let mut buf = UndoBuffer::new();
-        let mk = |h: f64, m: f32| -> Vec<(Arc<str>, PortValue)> {
-            vec![
-                (Arc::from("matrix"), PortValue::Matrix4x4([m; 16])),
-                (Arc::from("height"), PortValue::Number(h)),
-            ]
-        };
-        buf.add_and_do(Box::new(ChangePropsCmd::new(g.clone(), id, mk(25.0, 2.0))));
-
-        // Mid-stroke sample coalesces — still one undo entry.
-        let coalesced = buf.try_coalesce_last(|top| {
-            if let Some(cmd) = top.as_any_mut().downcast_mut::<ChangePropsCmd>() {
-                if cmd.matches(id, &["matrix", "height"]) {
-                    cmd.extend_into(&[
-                        PortValue::Matrix4x4([3.0; 16]),
-                        PortValue::Number(30.0),
-                    ]);
-                    return true;
-                }
-            }
-            false
-        });
-        assert!(coalesced, "same node + names must coalesce");
-
-        let read = |name: &str| g.lock().unwrap().get(id).unwrap().properties.get(name).cloned();
-        assert_eq!(read("height"), Some(PortValue::Number(30.0)));
-        assert_eq!(read("matrix"), Some(PortValue::Matrix4x4([3.0; 16])));
-
-        // ONE undo restores both pre-stroke values.
-        assert!(buf.can_undo());
-        buf.undo();
-        assert_eq!(read("height"), Some(PortValue::Number(20.0)), "undo restores height");
-        assert_eq!(read("matrix"), Some(PortValue::Matrix4x4([1.0; 16])), "undo restores matrix");
-        assert!(!buf.can_undo(), "the whole stroke was a single undo entry");
-
-        // Redo replays the final coalesced pair.
-        assert!(buf.can_redo());
-        buf.redo();
-        assert_eq!(read("height"), Some(PortValue::Number(30.0)));
-        assert_eq!(read("matrix"), Some(PortValue::Matrix4x4([3.0; 16])));
-    }
-
-    #[test]
-    fn undo_buffer_full_round_trip() {
-        let (g, reg) = setup();
-        let mut buf = UndoBuffer::new();
-        let (a, b) = {
-            let mut graph = g.lock().unwrap();
-            let a = graph.add_new_node("Const", [0.0, 0.0], &reg).unwrap();
-            let b = graph.add_new_node("TwoIn", [100.0, 0.0], &reg).unwrap();
-            (a, b)
-        };
-
-        let (out_a, in_a_b) = {
-            let graph = g.lock().unwrap();
-            let out_a = graph.get(a).unwrap().output_by_name("out").unwrap().uid;
-            let in_a_b = graph.get(b).unwrap().input_by_name("a").unwrap().uid;
-            (out_a, in_a_b)
-        };
-
-        buf.add_and_do(Box::new(ConnectCmd::new(
-            g.clone(),
-            reg.clone(),
-            Noodle::new(a, out_a, b, in_a_b),
-        )));
-
-        assert_eq!(g.lock().unwrap().node_count(), 2);
-        assert_eq!(g.lock().unwrap().noodle_count(), 1);
-
-        buf.undo();
-        assert_eq!(g.lock().unwrap().noodle_count(), 0);
-        buf.redo();
-        assert_eq!(g.lock().unwrap().noodle_count(), 1);
-    }
-
-    #[test]
-    fn change_property_undo_redo() {
-        let (g, _reg) = setup();
-        let id = g.lock().unwrap().allocate_id();
-        let mut node = NodeInstance::new(id, "Const", [0.0, 0.0]);
-        node.properties.insert(Arc::from("value"), PortValue::Number(2.0));
-        g.lock().unwrap().add_node(node).unwrap();
-
-        let mut cmd = ChangePropertyCmd::new(g.clone(), id, "value", PortValue::Number(7.0));
-        cmd.do_it();
-        let cur = g.lock().unwrap().get(id).unwrap().properties.get("value").cloned().unwrap();
-        assert_eq!(cur, PortValue::Number(7.0));
-        cmd.undo_it();
-        let cur = g.lock().unwrap().get(id).unwrap().properties.get("value").cloned().unwrap();
-        assert_eq!(cur, PortValue::Number(2.0));
-    }
-}
+#[path = "undo_commands_tests.rs"]
+mod tests;

@@ -251,12 +251,14 @@ impl Viewport3dWidget {
                 EventResult::Consumed
             }
             CameraDrag::Zooming { start_local, start_radius } => {
-                // Vertical drag distance maps to a multiplicative zoom in
-                // the same direction as MatterCAD's documented modifier
-                // path (drag up = zoom out, drag down = zoom in).
+                // Vertical drag distance maps to a multiplicative zoom.
+                // MatterCAD convention: drag UP = zoom IN, drag DOWN =
+                // zoom OUT. agg-gui screen Y is up, so a cursor-up drag
+                // has dy > 0; negating dy turns that into a shrinking
+                // radius (`factor < 1`), i.e. the camera dollies closer.
                 let dy = (pos.y - start_local.y) as f32;
                 // 200-pixel drag ≈ 2.7× zoom in either direction.
-                let factor = (dy * 0.005).exp();
+                let factor = (-dy * 0.005).exp();
                 let r = (*start_radius * factor).clamp(0.05, 10_000.0);
                 if r.is_finite() {
                     self.inputs.camera.lock().unwrap().radius = r;

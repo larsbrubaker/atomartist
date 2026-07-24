@@ -720,6 +720,37 @@ fn mouse_up_clears_drag_state() {
 /// inputs, and assert the flag the widget sees follows the host's
 /// writes — proves the toggle path doesn't get truncated when the
 /// widget moves out the inputs.
+/// Drag-zoom direction (MatterCAD convention): dragging the cursor
+/// UP must zoom IN — i.e. the orbit radius must DECREASE (camera moves
+/// closer). Because agg-gui screen Y is up, a cursor-up drag has
+/// dy > 0; the zoom mapping must turn that positive dy into a
+/// shrinking radius. Uses the modifier-only zoom path (Ctrl+Alt+Left)
+/// so the test doesn't depend on the active toolbar tool.
+#[test]
+fn drag_zoom_up_zooms_in() {
+    use agg_gui::Modifiers;
+    let inputs = empty_inputs();
+    let mut w = Viewport3dWidget::new(inputs);
+    let _ = w.layout(Size::new(400.0, 300.0));
+    let r0 = w.cam().radius;
+    let zoom_mods = Modifiers { ctrl: true, alt: true, ..Modifiers::default() };
+    let down = Point { x: 200.0, y: 150.0 };
+    // Screen Y is up, so a larger y is "cursor moved up".
+    let up = Point { x: 200.0, y: 250.0 };
+    fire(&mut w, Event::MouseDown { pos: down, button: MouseButton::Left, modifiers: zoom_mods });
+    assert!(
+        matches!(w.drag, CameraDrag::Zooming { .. }),
+        "Ctrl+Alt+Left must enter the zoom drag state, got {:?}",
+        w.drag,
+    );
+    fire(&mut w, Event::MouseMove { pos: up });
+    let r1 = w.cam().radius;
+    assert!(
+        r1 < r0,
+        "dragging the cursor up must zoom IN (radius shrinks): before {r0}, after {r1}",
+    );
+}
+
 #[test]
 fn show_bed_flag_round_trips_through_inputs() {
     let inputs = empty_inputs();

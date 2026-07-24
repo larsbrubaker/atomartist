@@ -9,6 +9,11 @@
 //! via the browser File API, and the path property records only the
 //! display name. Phase 10 wires that up; for now WASM reads return an
 //! empty mesh.
+//!
+//! Not migrated to the declarative `ParamSet` schema: this node mints no
+//! parameter input sockets (its `color` / `matrix` come from
+//! [`geometry_props`] as property-only rows, and `path` is a socket-less
+//! string prop), so there is no socket/property/reader triple to collapse.
 
 use std::sync::Arc;
 

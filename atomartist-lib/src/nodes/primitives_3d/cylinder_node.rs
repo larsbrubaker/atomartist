@@ -11,15 +11,14 @@
 //!
 //!   - The typed [`CylinderProps`] struct, deriving
 //!     [`bevy_reflect::Reflect`] so future inspector / form-driven UI
-//!     can iterate fields by type.
-//!   - The [`props_layout`] table pairs each field name with its
-//!     default `PortValue` and a [`NodeFieldAttrs`] describing the
-//!     editor, label, description, and advanced-mode visibility.
-//!
-//! `NodeDef::properties` is derived from `props_layout`; the field
-//! struct and the table are the **only** sources of schema truth,
-//! mirroring MatterCAD's `[Slider] / [Description] / [ReadOnly] /
-//! [HideFromEditor]` attribute pattern.
+//!     can iterate fields by type; it is a snapshot populated from the
+//!     [`params`] `ParamSet` reader.
+//!   - The [`params`] [`ParamSet`] — the single declarative source from
+//!     which the input sockets, property rows, and the socket-else-
+//!     property `evaluate` reads all derive. Editor / label / description
+//!     / advanced-mode visibility live on each param, mirroring
+//!     MatterCAD's `[Slider] / [Description] / [ReadOnly] /
+//!     [HideFromEditor]` attribute pattern.
 
 use std::sync::Arc;
 
@@ -29,10 +28,64 @@ use crate::geometry::{generate_cylinder, generate_cylinder_advanced};
 use crate::graph::node::PortValue;
 use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    geometry_props, wrap_mesh, EditorKind, EvalCtx, InstanceTemplate, NodeDef, NodeError,
-    NodeFieldAttrs, NodeOutputs, NodeRegistry, NumberAttrs, PropDef,
+    wrap_mesh, EditorKind, EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs,
+    NodeRegistry, ParamSet, PropDef,
 };
 use crate::socket_types::SocketType;
+
+/// The Cylinder node's parameter schema. Shared `Color` / `Matrix` (via
+/// [`ParamSet::geometry`], resolved by [`wrap_mesh`]) lead; the easy-mode
+/// dimensions, the `advanced` toggle + its read-only hint row, and the
+/// advanced-only taper / partial-revolve params follow. The `advanced`
+/// toggle and the hint row are property-only; every numeric field carries
+/// an optional capitalized socket. This mirrors NodeDesigner's Cylinder.
+fn params() -> ParamSet {
+    let def = CylinderProps::default();
+    ParamSet::geometry()
+        .number("diameter", "Diameter", def.diameter, 1.0..=400.0)
+        .ease_in(2.0)
+        .snap_grid()
+        .decimals(2)
+        .description("The width from one side to the opposite side.")
+        .socket_named("Diameter")
+        .number("height", "Height", def.height, 1.0..=400.0)
+        .ease_in(2.0)
+        .snap_grid()
+        .decimals(2)
+        .socket_named("Height")
+        .number("sides", "Sides", def.sides, 3.0..=360.0)
+        .integer()
+        .step(1.0)
+        .ease_in(2.0)
+        .description("The number of segments around the perimeter.")
+        .socket_named("Sides")
+        .bool_("advanced", "Advanced", def.advanced)
+        .no_socket()
+        .string(
+            "easy_mode_message",
+            "",
+            "You can switch to Advanced mode to get more cylinder options.",
+        )
+        .editor(EditorKind::StringReadOnly)
+        .no_socket()
+        .easy_only()
+        .number("diameter_top", "Diameter Top", def.diameter_top, 1.0..=400.0)
+        .ease_in(2.0)
+        .snap_grid()
+        .decimals(2)
+        .socket_named("Diameter Top")
+        .advanced()
+        .number("starting_angle", "Starting Angle", def.starting_angle, 0.0..=359.0)
+        .step(1.0)
+        .decimals(2)
+        .socket_named("Starting Angle")
+        .advanced()
+        .number("ending_angle", "Ending Angle", def.ending_angle, 1.0..=360.0)
+        .step(1.0)
+        .decimals(2)
+        .socket_named("Ending Angle")
+        .advanced()
+}
 
 /// Typed property struct for the Cylinder node — every field corresponds
 /// to one row in MatterCAD's property panel. Derives [`Reflect`] so the
@@ -84,134 +137,18 @@ impl CylinderProps {
     /// node's "socket-or-property" pattern so connection flow is
     /// consistent across every geometry-producing node.
     pub fn resolve(ctx: &EvalCtx) -> Self {
-        let def = Self::default();
-        let p = ctx.properties;
-        let num = |socket: &str, prop: &str, fallback: f64| match ctx.input_named(socket) {
-            PortValue::Number(n) => *n,
-            _ => p.number(prop, fallback),
-        };
+        let ps = params();
+        let r = ps.reader(ctx);
         Self {
-            diameter: num("Diameter", "diameter", def.diameter),
-            height: num("Height", "height", def.height),
-            sides: num("Sides", "sides", def.sides),
-            advanced: p.bool_("advanced", def.advanced),
-            diameter_top: num("Diameter Top", "diameter_top", def.diameter_top),
-            starting_angle: num("Starting Angle", "starting_angle", def.starting_angle),
-            ending_angle: num("Ending Angle", "ending_angle", def.ending_angle),
+            diameter: r.number("diameter"),
+            height: r.number("height"),
+            sides: r.number("sides"),
+            advanced: r.bool_("advanced"),
+            diameter_top: r.number("diameter_top"),
+            starting_angle: r.number("starting_angle"),
+            ending_angle: r.number("ending_angle"),
         }
     }
-}
-
-/// Layout table — one entry per editable field on [`CylinderProps`].
-/// Mirrors MatterCAD's `[Slider(...)]`, `[MaxDecimalPlaces(...)]`,
-/// `[Description(...)]`, and `[HideFromEditor]`-style attributes via the
-/// [`NodeFieldAttrs`] builder.
-fn props_layout() -> Vec<(&'static str, PortValue, NodeFieldAttrs)> {
-    let def = CylinderProps::default();
-    vec![
-        (
-            "diameter",
-            PortValue::Number(def.diameter),
-            NodeFieldAttrs::new()
-                .with_label("Diameter")
-                .with_description("The width from one side to the opposite side.")
-                .with_editor(EditorKind::Slider(
-                    NumberAttrs::with_range(1.0, 400.0)
-                        .with_ease_in(2.0)
-                        .with_snap_grid()
-                        .with_decimal_places(2),
-                ))
-                .bound_to("Diameter"),
-        ),
-        (
-            "height",
-            PortValue::Number(def.height),
-            NodeFieldAttrs::new()
-                .with_label("Height")
-                .with_editor(EditorKind::Slider(
-                    NumberAttrs::with_range(1.0, 400.0)
-                        .with_ease_in(2.0)
-                        .with_snap_grid()
-                        .with_decimal_places(2),
-                ))
-                .bound_to("Height"),
-        ),
-        (
-            "sides",
-            PortValue::Number(def.sides),
-            NodeFieldAttrs::new()
-                .with_label("Sides")
-                .with_description("The number of segments around the perimeter.")
-                .with_editor(EditorKind::Slider(
-                    NumberAttrs::with_range(3.0, 360.0)
-                        .integer()
-                        .with_step(1.0)
-                        .with_ease_in(2.0),
-                ))
-                .bound_to("Sides"),
-        ),
-        (
-            "advanced",
-            PortValue::Bool(def.advanced),
-            NodeFieldAttrs::new()
-                .with_label("Advanced")
-                .with_editor(EditorKind::Toggle),
-        ),
-        (
-            "easy_mode_message",
-            PortValue::StringVal(Arc::new(
-                "You can switch to Advanced mode to get more cylinder options.".to_string(),
-            )),
-            // Read-only string with no label — MatterCAD's
-            // `[ReadOnly][DisplayName("")]` combo on `EasyModeMessage`.
-            // Visible only when `advanced == false`; UI layer hides
-            // the row once the toggle flips on.
-            NodeFieldAttrs::new()
-                .with_label("")
-                .with_editor(EditorKind::StringReadOnly)
-                .easy_only(),
-        ),
-        (
-            "diameter_top",
-            PortValue::Number(def.diameter_top),
-            NodeFieldAttrs::new()
-                .with_label("Diameter Top")
-                .with_editor(EditorKind::Slider(
-                    NumberAttrs::with_range(1.0, 400.0)
-                        .with_ease_in(2.0)
-                        .with_snap_grid()
-                        .with_decimal_places(2),
-                ))
-                .bound_to("Diameter Top")
-                .advanced(),
-        ),
-        (
-            "starting_angle",
-            PortValue::Number(def.starting_angle),
-            NodeFieldAttrs::new()
-                .with_label("Starting Angle")
-                .with_editor(EditorKind::Slider(
-                    NumberAttrs::with_range(0.0, 359.0)
-                        .with_step(1.0)
-                        .with_decimal_places(2),
-                ))
-                .bound_to("Starting Angle")
-                .advanced(),
-        ),
-        (
-            "ending_angle",
-            PortValue::Number(def.ending_angle),
-            NodeFieldAttrs::new()
-                .with_label("Ending Angle")
-                .with_editor(EditorKind::Slider(
-                    NumberAttrs::with_range(1.0, 360.0)
-                        .with_step(1.0)
-                        .with_decimal_places(2),
-                ))
-                .bound_to("Ending Angle")
-                .advanced(),
-        ),
-    ]
 }
 
 pub struct CylinderNode;
@@ -222,44 +159,18 @@ impl NodeDef for CylinderNode {
     fn category(&self) -> &'static str { "Primitives 3D" }
 
     fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
-        // Every editable numeric / color / matrix property carries a
-        // matching optional input socket so any of them can be driven
-        // by an upstream connection — the same "socket-or-property"
-        // shape Extrude uses. The `advanced` toggle and the read-only
-        // `easy_mode_message` row stay property-only since they're
-        // UI controls, not data inputs.
-        InstanceTemplate::builder(alloc)
-            .input_with_label("Color", "Color", SocketType::Color, true)
-            .input_with_label("Matrix", "Matrix", SocketType::Matrix4x4, true)
-            .input_with_label("Diameter", "Diameter", SocketType::Number, true)
-            .input_with_label("Height", "Height", SocketType::Number, true)
-            .input_with_label("Sides", "Sides", SocketType::Number, true)
-            .input_with_label("Diameter Top", "Diameter Top", SocketType::Number, true)
-            .input_with_label("Starting Angle", "Starting Angle", SocketType::Number, true)
-            .input_with_label("Ending Angle", "Ending Angle", SocketType::Number, true)
+        // Every editable numeric / color / matrix param carries a matching
+        // optional input socket (the "socket-or-property" shape). The
+        // `advanced` toggle and the read-only `easy_mode_message` row are
+        // property-only (they mint no socket — see `params`).
+        params()
+            .mint_sockets(InstanceTemplate::builder(alloc))
             .output("out", SocketType::Geometry3d)
             .build()
     }
 
     fn properties(&self) -> Vec<PropDef> {
-        let p: Vec<PropDef> = props_layout()
-            .into_iter()
-            .map(|(name, default, attrs)| PropDef::from_attrs(name, default, &attrs))
-            .collect();
-        // Shared `color` + `matrix` properties — bind them to the
-        // matching input sockets minted in `instantiate`, then place
-        // them first so the panel renders them as the leading rows.
-        let mut geom = geometry_props();
-        for prop in &mut geom {
-            let socket = match prop.name.as_ref() {
-                "color" => "Color",
-                "matrix" => "Matrix",
-                _ => continue,
-            };
-            *prop = prop.clone().bind_input(socket);
-        }
-        geom.extend(p);
-        geom
+        params().prop_defs()
     }
 
     fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
@@ -323,26 +234,31 @@ mod tests {
         );
     }
 
-    /// `props_layout` must cover every field on `CylinderProps`, plus
-    /// the read-only easy-mode message that has no backing field.
-    /// Catches drift between the typed struct and the layout table.
+    /// The `params()` schema must declare a row for every field on
+    /// `CylinderProps`, plus the read-only easy-mode message that has no
+    /// backing field. Catches drift between the typed struct and the
+    /// declarative param schema.
     #[test]
-    fn layout_covers_every_reflected_field() {
+    fn params_cover_every_reflected_field() {
         let props = CylinderProps::default();
         let reflected: Vec<&str> = (0..props.field_len())
             .map(|i| props.name_at(i).unwrap())
             .collect();
-        let layout_names: Vec<&str> = props_layout().iter().map(|(n, _, _)| *n).collect();
+        let param_names: Vec<String> = params()
+            .prop_defs()
+            .into_iter()
+            .map(|p| p.name.to_string())
+            .collect();
         for name in reflected {
             assert!(
-                layout_names.contains(&name),
-                "layout table missing field {}",
+                param_names.iter().any(|n| n == name),
+                "params schema missing field {}",
                 name
             );
         }
         // The read-only message has no Reflect-backed field — it's a
-        // pure display row. Verify it's in the table anyway.
-        assert!(layout_names.contains(&"easy_mode_message"));
+        // pure display row. Verify it's in the schema anyway.
+        assert!(param_names.iter().any(|n| n == "easy_mode_message"));
     }
 
     /// Advanced-only fields should carry the `advanced` flag in the
@@ -385,10 +301,12 @@ mod tests {
     }
 
     /// Editor hints survive the layout → `PropDef` translation. The
-    /// `Slider` variant carries its range and decimal-places metadata
-    /// through unchanged.
+    /// numeric rows carry their range and decimal-places metadata
+    /// through unchanged. Every editable number row uses the
+    /// `NumberDrag` (DragValue-style) control — the app-wide policy that
+    /// only `NumberConst` keeps an explicit slider.
     #[test]
-    fn slider_attrs_round_trip_through_propdef() {
+    fn number_attrs_round_trip_through_propdef() {
         let by_name: std::collections::HashMap<String, PropDef> = CylinderNode
             .properties()
             .into_iter()
@@ -396,24 +314,24 @@ mod tests {
             .collect();
         let diameter = &by_name["diameter"];
         match &diameter.editor {
-            EditorKind::Slider(attrs) => {
+            EditorKind::NumberDrag(attrs) => {
                 assert_eq!(attrs.min, Some(1.0));
                 assert_eq!(attrs.max, Some(400.0));
                 assert_eq!(attrs.max_decimal_places, Some(2));
                 assert_eq!(attrs.ease_in, Some(2.0));
                 assert!(attrs.snap_grid);
             }
-            other => panic!("expected Slider, got {:?}", other),
+            other => panic!("expected NumberDrag, got {:?}", other),
         }
-        // `sides` is an integer slider with step=1, no decimal places.
+        // `sides` is an integer number row with step=1, no decimal places.
         let sides = &by_name["sides"];
         match &sides.editor {
-            EditorKind::Slider(attrs) => {
+            EditorKind::NumberDrag(attrs) => {
                 assert!(attrs.integer);
                 assert_eq!(attrs.step, Some(1.0));
                 assert_eq!(attrs.max_decimal_places, None);
             }
-            other => panic!("expected Slider, got {:?}", other),
+            other => panic!("expected NumberDrag, got {:?}", other),
         }
     }
 

@@ -10,10 +10,12 @@
 //! walls); `Color` is preserved as graph metadata pending the renderer's
 //! per-mesh material story.
 //!
-//! Property layout lives on the typed [`ExtrudeProps`] struct which
-//! derives [`bevy_reflect::Reflect`] so future inspector / form-driven UI
-//! can iterate fields by type. The `props_layout` table pairs each field
-//! with its editor metadata + bound input socket.
+//! Property layout lives on a declarative [`ParamSet`] ([`params`]) — the
+//! single source from which the input sockets, property rows, and the
+//! socket-else-property `evaluate` reads all derive. The typed
+//! [`ExtrudeProps`] struct (which derives [`bevy_reflect::Reflect`] so
+//! future inspector / form-driven UI can iterate fields by type) is now
+//! just a snapshot populated from the `ParamSet` reader.
 //!
 //! Algorithm:
 //!   1. Tessellate the cross-section's contours via `tess2-rust` with the
@@ -40,16 +42,49 @@ use crate::geometry::path2d::{is_ccw, CrossSection, Vec2D};
 use crate::graph::node::{identity_matrix, PortValue};
 use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    EditorKind, EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeFieldAttrs, NodeOutputs,
-    NodeRegistry, NumberAttrs, PropDef,
+    EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeRegistry, ParamSet, PropDef,
 };
+#[cfg(test)]
+use crate::registry::EditorKind;
 use crate::socket_types::SocketType;
+
+/// The Extrude node's parameter schema. Declares each param once (name,
+/// label, default, range/step, editor by type, socket name); the input
+/// sockets, property rows, and the `evaluate` reads all derive from it.
+/// The capitalized socket names (`Height`, `Radius`, …) are preserved
+/// via `socket_named` since the property keys differ (`bevel_radius` vs
+/// socket `Radius`) and saved graphs reference the socket names.
+fn params() -> ParamSet {
+    let def = ExtrudeProps::default();
+    ParamSet::new()
+        .number("height", "Height", def.height, 0.1..=40.0)
+        .ease_in(2.0)
+        .snap_grid()
+        .socket_named("Height")
+        .number("bevel_radius", "Radius", def.bevel_radius, 0.0..=10.0)
+        .ease_in(2.0)
+        .socket_named("Radius")
+        .number("bevel_segments", "Segments", def.bevel_segments, 1.0..=30.0)
+        .integer()
+        .step(1.0)
+        .socket_named("Segments")
+        .number("bottom_radius", "Bottom Radius", def.bottom_radius, 0.0..=10.0)
+        .ease_in(2.0)
+        .socket_named("Bottom Radius")
+        .number("bottom_segments", "Bottom Segments", def.bottom_segments, 1.0..=30.0)
+        .integer()
+        .step(1.0)
+        .socket_named("Bottom Segments")
+        .color("color", "Color", def.color)
+        .socket_named("Color")
+        .matrix("matrix", "Matrix", def.matrix)
+        .socket_named("Matrix")
+}
 
 /// Typed property struct for the Extrude node — mirrors NodeDesigner's
 /// `ExtrudeNode.properties`. Derives [`Reflect`] so reflection-driven
-/// tooling can iterate field types at runtime; the matching
-/// [`props_layout`] table carries the editor / label / socket-binding
-/// metadata that lives outside the reflected type system.
+/// tooling can iterate field types at runtime; it is a snapshot
+/// populated from the [`params`] `ParamSet` reader.
 #[derive(Clone, Debug, Reflect)]
 pub struct ExtrudeProps {
     pub height: f64,
@@ -76,139 +111,22 @@ impl Default for ExtrudeProps {
 }
 
 impl ExtrudeProps {
-    /// Read a snapshot from an evaluation context, applying upstream input
-    /// overrides first and falling back to the property's stored value
-    /// (then to the type default).
+    /// Read a snapshot from an evaluation context via the [`params`]
+    /// reader: each field resolves connected-socket-else-property-else-
+    /// declared-default.
     pub fn resolve(ctx: &EvalCtx) -> Self {
-        let def = Self::default();
-        let props = ctx.properties;
-        let height = match ctx.input_named("Height") {
-            PortValue::Number(n) => *n,
-            _ => props.number("height", def.height),
-        };
-        let bevel_radius = match ctx.input_named("Radius") {
-            PortValue::Number(n) => *n,
-            _ => props.number("bevel_radius", def.bevel_radius),
-        };
-        let bevel_segments = match ctx.input_named("Segments") {
-            PortValue::Number(n) => *n,
-            _ => props.number("bevel_segments", def.bevel_segments),
-        };
-        let bottom_radius = match ctx.input_named("Bottom Radius") {
-            PortValue::Number(n) => *n,
-            _ => props.number("bottom_radius", def.bottom_radius),
-        };
-        let bottom_segments = match ctx.input_named("Bottom Segments") {
-            PortValue::Number(n) => *n,
-            _ => props.number("bottom_segments", def.bottom_segments),
-        };
-        let color = match ctx.input_named("Color") {
-            PortValue::Color(c) => *c,
-            _ => match props.get("color") {
-                PortValue::Color(c) => *c,
-                _ => def.color,
-            },
-        };
-        let matrix = match ctx.input_named("Matrix") {
-            PortValue::Matrix4x4(m) => *m,
-            _ => match props.get("matrix") {
-                PortValue::Matrix4x4(m) => *m,
-                _ => def.matrix,
-            },
-        };
+        let ps = params();
+        let r = ps.reader(ctx);
         Self {
-            height,
-            bevel_radius,
-            bevel_segments,
-            bottom_radius,
-            bottom_segments,
-            color,
-            matrix,
+            height: r.number("height"),
+            bevel_radius: r.number("bevel_radius"),
+            bevel_segments: r.number("bevel_segments"),
+            bottom_radius: r.number("bottom_radius"),
+            bottom_segments: r.number("bottom_segments"),
+            color: r.color("color"),
+            matrix: r.matrix("matrix"),
         }
     }
-}
-
-/// Static layout describing each [`ExtrudeProps`] field: the canonical
-/// property name (also the JSON key), its default `PortValue`, and the
-/// editor + binding metadata. The node's [`NodeDef::properties`] and
-/// [`NodeDef::input_sockets`] are both derived from this table so we
-/// never duplicate the schema across two sources.
-fn props_layout() -> Vec<(&'static str, PortValue, NodeFieldAttrs)> {
-    let def = ExtrudeProps::default();
-    vec![
-        (
-            "height",
-            PortValue::Number(def.height),
-            NodeFieldAttrs::new()
-                .with_label("Height")
-                .with_editor(EditorKind::Slider(
-                    NumberAttrs::with_range(0.1, 40.0)
-                        .with_ease_in(2.0)
-                        .with_snap_grid(),
-                ))
-                .bound_to("Height"),
-        ),
-        (
-            "bevel_radius",
-            PortValue::Number(def.bevel_radius),
-            NodeFieldAttrs::new()
-                .with_label("Radius")
-                .with_editor(EditorKind::Slider(
-                    NumberAttrs::with_range(0.0, 10.0).with_ease_in(2.0),
-                ))
-                .bound_to("Radius"),
-        ),
-        (
-            "bevel_segments",
-            PortValue::Number(def.bevel_segments),
-            NodeFieldAttrs::new()
-                .with_label("Segments")
-                .with_editor(EditorKind::Slider(
-                    NumberAttrs::with_range(1.0, 30.0)
-                        .integer()
-                        .with_step(1.0),
-                ))
-                .bound_to("Segments"),
-        ),
-        (
-            "bottom_radius",
-            PortValue::Number(def.bottom_radius),
-            NodeFieldAttrs::new()
-                .with_label("Bottom Radius")
-                .with_editor(EditorKind::Slider(
-                    NumberAttrs::with_range(0.0, 10.0).with_ease_in(2.0),
-                ))
-                .bound_to("Bottom Radius"),
-        ),
-        (
-            "bottom_segments",
-            PortValue::Number(def.bottom_segments),
-            NodeFieldAttrs::new()
-                .with_label("Bottom Segments")
-                .with_editor(EditorKind::Slider(
-                    NumberAttrs::with_range(1.0, 30.0)
-                        .integer()
-                        .with_step(1.0),
-                ))
-                .bound_to("Bottom Segments"),
-        ),
-        (
-            "color",
-            PortValue::Color(def.color),
-            NodeFieldAttrs::new()
-                .with_label("Color")
-                .with_editor(EditorKind::ColorPicker)
-                .bound_to("Color"),
-        ),
-        (
-            "matrix",
-            PortValue::Matrix4x4(def.matrix),
-            NodeFieldAttrs::new()
-                .with_label("Matrix")
-                .with_editor(EditorKind::Matrix)
-                .bound_to("Matrix"),
-        ),
-    ]
 }
 
 pub struct ExtrudeNode;
@@ -219,24 +137,19 @@ impl NodeDef for ExtrudeNode {
     fn category(&self) -> &'static str { "Operations 3D" }
 
     fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
-        InstanceTemplate::builder(alloc)
-            .input_with_label("Paths", "Paths", SocketType::Path2d, false)
-            .input_with_label("Height", "Height", SocketType::Number, true)
-            .input_with_label("Radius", "Radius", SocketType::Number, true)
-            .input_with_label("Segments", "Segments", SocketType::Number, true)
-            .input_with_label("Bottom Radius", "Bottom Radius", SocketType::Number, true)
-            .input_with_label("Bottom Segments", "Bottom Segments", SocketType::Number, true)
-            .input_with_label("Color", "Color", SocketType::Color, true)
-            .input_with_label("Matrix", "Matrix", SocketType::Matrix4x4, true)
+        // The `Paths` geometry input leads; the schema params (Height,
+        // Radius, Segments, …, Color, Matrix) follow in declaration order.
+        params()
+            .mint_sockets(
+                InstanceTemplate::builder(alloc)
+                    .input_with_label("Paths", "Paths", SocketType::Path2d, false),
+            )
             .output_with_label("Geometry", "Geometry", SocketType::Geometry3d)
             .build()
     }
 
     fn properties(&self) -> Vec<PropDef> {
-        props_layout()
-            .into_iter()
-            .map(|(name, default, attrs)| PropDef::from_attrs(name, default, &attrs))
-            .collect()
+        params().prop_defs()
     }
 
     fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {

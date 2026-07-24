@@ -70,6 +70,19 @@ impl TestHarness {
         Self::from_state(fresh_state_with_starter_graph())
     }
 
+    /// Boot the real widget tree over a caller-supplied [`AppState`].
+    ///
+    /// The harness registry is an immutable `Arc<NodeRegistry>` captured
+    /// by `build_app`, so a test that needs a component (subgraph) type
+    /// registered — or any other non-default registry / graph seeding —
+    /// builds its own `AppState` (registering the subgraph *before*
+    /// construction) and hands it here. Everything downstream (widget
+    /// tree, event dispatch, evaluation) is identical to the default
+    /// constructors; only the seeded state differs.
+    pub fn with_app_state(state: AppState) -> Self {
+        Self::from_state(state)
+    }
+
     /// Resize the harness viewport. Re-runs `App::layout` so widget
     /// bounds reflect the new size on the next event.
     pub fn with_size(mut self, w: u32, h: u32) -> Self {

@@ -41,6 +41,10 @@ pub use geometry_props_mod::{
 mod editor;
 pub use editor::{EditorKind, NodeFieldAttrs, NumberAttrs, PropDef, VisibleWhen};
 
+#[path = "registry/params.rs"]
+mod params;
+pub use params::{ParamReader, ParamSet};
+
 
 /// Initial socket + property layout for a new node instance — what
 /// [`NodeDef::instantiate`] returns. The graph populates a new
@@ -360,6 +364,37 @@ pub struct DisconnectCtx<'a> {
     pub target_socket: SocketUid,
 }
 
+/// Context passed to [`NodeDef::on_property_changed`] — invoked *after* a
+/// property value has been written to the node instance. The hook may
+/// retype / rename this node's own sockets in response (e.g. a typed
+/// GraphInput whose output socket adopts the type named by a "port type"
+/// property).
+///
+/// Socket mutation goes through `graph`'s granular helpers
+/// (`retype_socket`, `rename_socket`, `append_output_socket`, …), exactly
+/// as [`ConnectCtx`] does — including `graph.allocate_socket_uid()` when a
+/// new socket must be minted. After the hook returns, the graph
+/// re-validates every noodle touching this node and disconnects any that
+/// the retype left type-incompatible (see
+/// [`Graph::set_property_hooked`](crate::graph::graph::Graph::set_property_hooked)).
+pub struct PropertyChangedCtx<'a> {
+    pub graph: &'a mut crate::graph::graph::Graph,
+    pub this_node: crate::graph::node::NodeId,
+    /// Name of the property that just changed.
+    pub property: &'a str,
+}
+
+impl<'a> PropertyChangedCtx<'a> {
+    /// Current (post-change) value of a property on this node. Read access
+    /// to the node's live property map so the hook can branch on the new
+    /// value or read sibling properties.
+    pub fn property_value(&self, name: &str) -> Option<PortValue> {
+        self.graph
+            .get(self.this_node)
+            .and_then(|n| n.properties.get(name).cloned())
+    }
+}
+
 /// One registered node type — describes its factory + behavior.
 pub trait NodeDef: Send + Sync {
     /// Stable identifier used for serialization and registry lookup.
@@ -392,6 +427,15 @@ pub trait NodeDef: Send + Sync {
     /// background thread.
     fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError>;
 
+    /// The shared template graph backing a subgraph / component node type,
+    /// if this def wraps one. Returned as the same `Arc<Mutex<Graph>>` the
+    /// def holds, so the UI's drill-in can open the template for in-place
+    /// editing and every instance observes those edits live. Non-subgraph
+    /// node types return `None` (the default).
+    fn subgraph_template(&self) -> Option<Arc<std::sync::Mutex<crate::graph::graph::Graph>>> {
+        None
+    }
+
     /// Pre-connect veto hook. Return `Err(reason)` to reject the
     /// connection. Default: allow.
     fn validate_input_connection(&self, _ctx: &ValidateCtx) -> Result<(), String> {
@@ -408,6 +452,14 @@ pub trait NodeDef: Send + Sync {
     /// Default is no-op; dynamic-input nodes override to collapse the
     /// now-orphan slot.
     fn on_input_disconnected(&self, _ctx: &mut DisconnectCtx) {}
+
+    /// Invoked after a property value changes on an instance of this type.
+    /// Default no-op. Nodes with type-dependent sockets (a typed
+    /// GraphInput whose output socket retypes when its "port type"
+    /// property changes) override this to retype / rename their own
+    /// sockets via `ctx.graph`. After the hook returns, the graph
+    /// disconnects any noodle the retype left type-incompatible.
+    fn on_property_changed(&self, _ctx: &mut PropertyChangedCtx) {}
 
     /// Decide whether a property row should appear in the panel right
     /// now. This is the dynamic, host-defined visibility hook —
@@ -427,6 +479,16 @@ pub trait NodeDef: Send + Sync {
     /// rule.
     fn row_visible(&self, name: &str, props: &NodeProperties) -> bool {
         self.default_row_visible(name, props)
+    }
+
+    /// Per-instance override of a property's editor. Lets a node vary
+    /// editor attributes (e.g. slider range) with its live property
+    /// values — the static [`PropDef`] schema is per node *type*, but
+    /// nodes like NumberConst want the value slider's range to follow
+    /// the instance's own `min`/`max`/`step` properties. Returning
+    /// `None` (the default) means "use the static `PropDef` editor".
+    fn editor_override(&self, _prop: &str, _props: &NodeProperties) -> Option<EditorKind> {
+        None
     }
 
     /// Provided helper: the declarative visibility check using each

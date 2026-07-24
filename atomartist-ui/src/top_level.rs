@@ -14,6 +14,7 @@ use agg_gui::{
 use crate::app_state::AppState;
 use agg_gui_node_editor::NodeEditor;
 use crate::app_state_model::shared_model_for;
+use crate::breadcrumb_bar::BreadcrumbBar;
 use crate::debug_windows::{build_debug_windows, DebugWindowHandles};
 use crate::floating_overlay::{FloatingOverlayHandle, FloatingOverlayHost};
 use crate::settings::UiSettings;
@@ -127,12 +128,19 @@ pub fn build_app(
             .with_margin(Insets::symmetric(8.0, 0.0)),
     );
 
+    // Drill-in navigation chrome: back button + breadcrumb trail. Hidden
+    // (zero-slot) at the root, appears the moment the user drills into a
+    // component. Sits just right of the menu bar so it reads as chrome,
+    // not content.
+    let breadcrumb: Box<dyn Widget> = Box::new(BreadcrumbBar::new(state.clone()));
+
     let top_row: Box<dyn Widget> = Box::new(
         FlexRow::new()
             .with_h_anchor(HAnchor::STRETCH)
             .with_v_anchor(VAnchor::FIT)
             .with_max_size(agg_gui::Size::new(f64::INFINITY, MENU_BAR_H))
             .add(menu_bar)
+            .add(breadcrumb)
             .add_flex(Box::new(Spacer::new().with_h_anchor(HAnchor::STRETCH)), 1.0)
             .add(project_title),
     );

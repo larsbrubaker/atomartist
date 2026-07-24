@@ -25,10 +25,10 @@ use agg_gui::{
 
 const DEFAULT_FONT_BYTES: &[u8] =
     include_bytes!("../../../agg-gui/agg-gui/assets/fonts/NotoSans-Regular.ttf");
-const ICON_FONT_BYTES: &[u8] = include_bytes!("../assets/bootstrap-icons.ttf");
+use crate::fa::ICON_FONT_BYTES;
 
-/// Install AtomArtist's light theme, system font (NotoSans with a Bootstrap
-/// Icons fallback), and the full text-quality recipe. Call once at startup,
+/// Install AtomArtist's light theme, system font (NotoSans with a Font
+/// Awesome fallback), and the full text-quality recipe. Call once at startup,
 /// from both shells, so native and wasm produce identical pixels.
 ///
 /// `device_scale` is the platform's physical-pixels-per-logical-pixel ratio.
@@ -42,7 +42,7 @@ pub fn install_theme_and_fonts(device_scale: f64) {
     set_visuals(Visuals::light());
 
     let icon_font =
-        Arc::new(Font::from_bytes(ICON_FONT_BYTES.to_vec()).expect("load Bootstrap Icons"));
+        Arc::new(Font::from_bytes(ICON_FONT_BYTES.to_vec()).expect("load Font Awesome"));
     let font = Arc::new(
         Font::from_bytes(DEFAULT_FONT_BYTES.to_vec())
             .expect("load NotoSans-Regular")

@@ -23,6 +23,16 @@
 //! [`PropDef`] — it's an internal slot the loader fills in. The graph
 //! JSON serializer drops heap geometry from properties, so the cache
 //! is invisible to the on-disk format.
+//!
+//! ## Not migrated to the declarative `ParamSet` schema
+//!
+//! This node mints **no** parameter input sockets: its `color` / `matrix`
+//! are property-only (via [`geometry_props`], which produces unbound
+//! rows), and `asset` / `label` are string props with no socket. It also
+//! doesn't call [`wrap_mesh`] — `evaluate` rebuilds the body by hand from
+//! the runtime mesh cache. With no socket/property/reader triple to
+//! collapse, `ParamSet` would add indirection without removing
+//! duplication, so this node keeps its hand-written schema.
 
 use std::sync::Arc;
 
@@ -31,8 +41,8 @@ use crate::graph::graph::Graph;
 use crate::graph::node::{identity_matrix, PortValue};
 use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    geometry_props, EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeRegistry,
-    PropDef,
+    geometry_props, EditorKind, EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs,
+    NodeRegistry, PropDef,
 };
 use crate::serialization::asset_store::{AssetRef, AssetStore};
 use crate::serialization::mesh_3mf::import_3mf;
@@ -70,8 +80,12 @@ impl NodeDef for MeshNode {
 
     fn properties(&self) -> Vec<PropDef> {
         let mut p = vec![
+            // `asset` stays display-only (content-addressed ref, not
+            // meant for freehand editing); `label` is user-facing text so
+            // it opts into inline canvas editing.
             PropDef::new("asset", PortValue::StringVal(Arc::new(String::new()))),
-            PropDef::new("label", PortValue::StringVal(Arc::new(String::new()))),
+            PropDef::new("label", PortValue::StringVal(Arc::new(String::new())))
+                .with_editor(EditorKind::StringSingleLine),
         ];
         // Mesh nodes carry the same `matrix` + `color` editor props as
         // every other geometry-producing node so users can transform /

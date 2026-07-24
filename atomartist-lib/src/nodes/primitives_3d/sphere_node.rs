@@ -6,12 +6,25 @@ use crate::geometry::generate_sphere;
 use crate::graph::node::PortValue;
 use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    geometry_props, wrap_mesh, EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs,
-    NodeRegistry, PropDef,
+    wrap_mesh, EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeRegistry, ParamSet,
+    PropDef,
 };
 use crate::socket_types::SocketType;
 
 pub struct SphereNode;
+
+/// The Sphere node's parameter schema. Shared `Color` / `Matrix` (via
+/// [`ParamSet::geometry`]) lead; the radius + U/V segment counts follow on
+/// capitalized sockets, matching the "socket-or-property" shape.
+fn params() -> ParamSet {
+    ParamSet::geometry()
+        .number("radius", "Radius", 10.0, 0.001..=10_000.0)
+        .socket_named("Radius")
+        .number("segments_u", "Segments U", 32.0, 3.0..=256.0)
+        .socket_named("Segments U")
+        .number("segments_v", "Segments V", 16.0, 2.0..=256.0)
+        .socket_named("Segments V")
+}
 
 impl NodeDef for SphereNode {
     fn type_id(&self) -> &'static str { "Sphere" }
@@ -19,26 +32,22 @@ impl NodeDef for SphereNode {
     fn category(&self) -> &'static str { "Primitives 3D" }
 
     fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
-        InstanceTemplate::builder(alloc)
+        params()
+            .mint_sockets(InstanceTemplate::builder(alloc))
             .output("out", SocketType::Geometry3d)
             .build()
     }
 
     fn properties(&self) -> Vec<PropDef> {
-        let mut p = vec![
-            PropDef::new("radius", PortValue::Number(10.0)).with_range(0.001, 10_000.0),
-            PropDef::new("segments_u", PortValue::Number(32.0)).with_range(3.0, 256.0),
-            PropDef::new("segments_v", PortValue::Number(16.0)).with_range(2.0, 256.0),
-        ];
-        // Prepend color + matrix so they render as the first two rows.
-        let mut p = { let mut g = geometry_props(); g.extend(p); g };
-        p
+        params().prop_defs()
     }
 
     fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
-        let r = ctx.properties.number("radius", 10.0);
-        let su = ctx.properties.number("segments_u", 32.0).round().clamp(3.0, 256.0) as u32;
-        let sv = ctx.properties.number("segments_v", 16.0).round().clamp(2.0, 256.0) as u32;
+        let ps = params();
+        let rd = ps.reader(ctx);
+        let r = rd.number("radius");
+        let su = rd.number("segments_u").round().clamp(3.0, 256.0) as u32;
+        let sv = rd.number("segments_v").round().clamp(2.0, 256.0) as u32;
         let mesh = generate_sphere(r, su, sv);
         let mut out = NodeOutputs::default();
         out.set("out", PortValue::Geometry3d(Arc::new(wrap_mesh(ctx, mesh))));

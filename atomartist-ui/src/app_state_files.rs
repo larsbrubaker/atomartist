@@ -44,6 +44,10 @@ impl AppState {
     pub fn new_empty_project(&self) {
         *self.graph.lock().unwrap() = Graph::new();
         self.undo.lock().unwrap().clear_history();
+        // Discard any drill-in navigation: the old root (and its
+        // component templates) is being thrown away, so there's nothing
+        // to sync back — clear the stack directly rather than exiting it.
+        self.edit_stack.lock().unwrap().clear();
         *self.current_file.lock().unwrap() = None;
         *self.display_node.lock().unwrap() = None;
         *self.selection.lock().unwrap() = None;
@@ -75,6 +79,11 @@ impl AppState {
         *self.graph.lock().unwrap() = graph;
         *self.assets.lock().unwrap() = assets;
         self.undo.lock().unwrap().clear_history();
+        // Exit any drilled-in component from the previous project — the
+        // old root and its templates are being replaced wholesale, so
+        // clear the stack directly (no exit-sync against a discarded
+        // graph).
+        self.edit_stack.lock().unwrap().clear();
         *self.current_file.lock().unwrap() = Some(path.to_path_buf());
         self.mark_saved_baseline();
         self.note_recent_project(path);

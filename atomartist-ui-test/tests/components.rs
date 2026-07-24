@@ -8,7 +8,7 @@
 //! these tests verify that a subgraph type registered with the same
 //! mechanism is reachable from the production AppState used by the UI.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use atomartist_lib::graph::node::{NodeId, PortValue};
 use atomartist_lib::graph::{Noodle, Graph};
@@ -52,7 +52,7 @@ fn registry_in_appstate_can_register_a_passthrough_subgraph() {
     tpl.connect(Noodle::new(xform, xform_out, out_node, out_empty), &reg)
         .unwrap();
 
-    let id = register_subgraph(&mut reg, "Passthrough", "Passthrough", tpl);
+    let id = register_subgraph(&mut reg, "Passthrough", "Passthrough", Arc::new(Mutex::new(tpl)));
     assert!(reg.get(id).is_some());
     let def = reg.get(id).unwrap();
     assert_eq!(def.category(), "Components");

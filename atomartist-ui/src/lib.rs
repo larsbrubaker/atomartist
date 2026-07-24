@@ -6,11 +6,14 @@
 //! mount. No platform code lives here.
 
 pub mod app_state;
+pub mod app_state_drill;
 pub mod app_state_files;
 pub mod app_state_model;
+pub mod breadcrumb_bar;
 pub mod circular_dropdown;
 pub mod circular_icon_button;
 pub mod debug_windows;
+pub mod fa;
 pub mod floating_overlay;
 pub mod icons;
 pub mod mattercad_icons;

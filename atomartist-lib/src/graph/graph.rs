@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::graph::node::{NodeId, NodeInstance, PortValue};
 use crate::graph::socket::{SocketUid, SocketUidAlloc};
-use crate::registry::{ConnectCtx, DisconnectCtx, NodeRegistry, ValidateCtx};
+use crate::registry::{ConnectCtx, DisconnectCtx, NodeRegistry, PropertyChangedCtx, ValidateCtx};
 use crate::socket_types::SocketType;
 
 /// Identifier for one socket endpoint on a noodle.
@@ -423,6 +423,95 @@ impl Graph {
         }
         self.mark_dirty_subtree(id);
         Ok(())
+    }
+
+    /// Property mutation that also fires the type's `on_property_changed`
+    /// hook and re-validates sockets. Use this (rather than
+    /// [`set_property`](Self::set_property)) wherever a node's socket
+    /// layout may depend on its property values — e.g. a typed GraphInput
+    /// whose output socket retypes when its "port type" property changes.
+    ///
+    /// Returns the noodles that had to be disconnected because the hook
+    /// retyped a socket incompatibly with an attached edge. The caller
+    /// (an undo command) restores these on undo so the round-trip is
+    /// lossless — mirroring how [`remove_node`](Self::remove_node) hands
+    /// back its detached noodles.
+    pub fn set_property_hooked(
+        &mut self,
+        id: NodeId,
+        name: impl Into<Arc<str>>,
+        value: PortValue,
+        registry: &NodeRegistry,
+    ) -> Result<Vec<Noodle>, GraphError> {
+        let name = name.into();
+        self.set_property(id, name.clone(), value)?;
+        Ok(self.fire_property_changed(id, &name, registry))
+    }
+
+    /// Run the property-changed hook on `id`'s type, then GC any noodle the
+    /// hook left type-incompatible. Returns the disconnected noodles.
+    fn fire_property_changed(
+        &mut self,
+        id: NodeId,
+        property: &str,
+        registry: &NodeRegistry,
+    ) -> Vec<Noodle> {
+        let type_id = match self.get(id) {
+            Some(n) => n.type_id.clone(),
+            None => return Vec::new(),
+        };
+        let def = match registry.get(&type_id) {
+            Some(d) => d.clone(),
+            None => return Vec::new(),
+        };
+        {
+            let mut ctx = PropertyChangedCtx {
+                graph: self,
+                this_node: id,
+                property,
+            };
+            def.on_property_changed(&mut ctx);
+        }
+        self.revalidate_node_noodles(id)
+    }
+
+    /// Drop every noodle whose endpoint on `node` is no longer
+    /// type-compatible — used after a hook retypes sockets. Marks the
+    /// affected downstream subtrees dirty and returns the removed noodles.
+    ///
+    /// Like the granular socket-removal helpers, this is a consistency GC:
+    /// it does *not* cascade `on_input_disconnected` (which is reserved
+    /// for user-initiated disconnects), so a retype can't trigger a hook
+    /// storm across the graph.
+    pub fn revalidate_node_noodles(&mut self, node: NodeId) -> Vec<Noodle> {
+        let mut removed: Vec<Noodle> = Vec::new();
+        for n in self.noodles().to_vec() {
+            if n.from.node != node && n.to.node != node {
+                continue;
+            }
+            let from_ty = self
+                .get(n.from.node)
+                .and_then(|nd| nd.output_by_uid(n.from.socket).map(|s| s.socket_type));
+            let to_ty = self
+                .get(n.to.node)
+                .and_then(|nd| nd.input_by_uid(n.to.socket).map(|s| s.socket_type));
+            let compatible = match (from_ty, to_ty) {
+                (Some(f), Some(t)) => f.is_compatible_with(t),
+                // A dangling endpoint (socket removed by the hook) is
+                // never compatible — drop the noodle.
+                _ => false,
+            };
+            if !compatible {
+                removed.push(n);
+            }
+        }
+        if !removed.is_empty() {
+            self.noodles.retain(|e| !removed.contains(e));
+            for n in &removed {
+                self.mark_dirty_subtree(n.to.node);
+            }
+        }
+        removed
     }
 
     /// Move a node to a new canvas position. Does not mark dirty (position

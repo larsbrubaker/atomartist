@@ -25,24 +25,60 @@ use crate::geometry::{Body, Geometry3d};
 use crate::graph::node::PortValue;
 use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    compose_with_upstream, op_props, EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs,
-    NodeProperties, NodeRegistry, PropDef,
+    compose_with_upstream, EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs,
+    NodeRegistry, ParamSet, PropDef,
 };
 use crate::socket_types::SocketType;
 
 pub struct TransformNode;
 
+/// The Transform node's parameter schema. Uses the [`ParamSet::op`]
+/// preseed for the shared `color` (INHERIT default, socket `Color`) +
+/// `matrix` params, but marks `matrix` `no_socket`: Transform builds its
+/// own matrix from the nine translate/rotate/scale parameters and would
+/// discard any op `matrix` input, so wiring one would be a silent no-op.
+/// The translation offsets are unbounded; rotations and scales carry the
+/// NodeDesigner ranges. Capitalized socket names are preserved.
+fn params() -> ParamSet {
+    ParamSet::op()
+        .no_socket() // `matrix`: property-only; Transform builds its own.
+        .number_unbounded("tx", "Translate X", 0.0)
+        .socket_named("Translate X")
+        .number_unbounded("ty", "Translate Y", 0.0)
+        .socket_named("Translate Y")
+        .number_unbounded("tz", "Translate Z", 0.0)
+        .socket_named("Translate Z")
+        .number("rx", "Rotate X", 0.0, -360.0..=360.0)
+        .socket_named("Rotate X")
+        .number("ry", "Rotate Y", 0.0, -360.0..=360.0)
+        .socket_named("Rotate Y")
+        .number("rz", "Rotate Z", 0.0, -360.0..=360.0)
+        .socket_named("Rotate Z")
+        .number("sx", "Scale X", 1.0, 0.001..=1000.0)
+        .socket_named("Scale X")
+        .number("sy", "Scale Y", 1.0, 0.001..=1000.0)
+        .socket_named("Scale Y")
+        .number("sz", "Scale Z", 1.0, 0.001..=1000.0)
+        .socket_named("Scale Z")
+}
+
 impl TransformNode {
-    fn build_matrix(props: &NodeProperties) -> [f32; 16] {
-        let tx = props.number("tx", 0.0) as f32;
-        let ty = props.number("ty", 0.0) as f32;
-        let tz = props.number("tz", 0.0) as f32;
-        let rx = (props.number("rx", 0.0) as f32).to_radians();
-        let ry = (props.number("ry", 0.0) as f32).to_radians();
-        let rz = (props.number("rz", 0.0) as f32).to_radians();
-        let sx = props.number("sx", 1.0) as f32;
-        let sy = props.number("sy", 1.0) as f32;
-        let sz = props.number("sz", 1.0) as f32;
+    /// Build the transform matrix from the nine translate/rotate/scale
+    /// parameters. Each reads its wired input socket first (so it can be
+    /// driven by NumberConst / GraphInput / math nodes), falling back to
+    /// the stored property, then the type default.
+    fn build_matrix(ctx: &EvalCtx) -> [f32; 16] {
+        let ps = params();
+        let r = ps.reader(ctx);
+        let tx = r.number("tx") as f32;
+        let ty = r.number("ty") as f32;
+        let tz = r.number("tz") as f32;
+        let rx = (r.number("rx") as f32).to_radians();
+        let ry = (r.number("ry") as f32).to_radians();
+        let rz = (r.number("rz") as f32).to_radians();
+        let sx = r.number("sx") as f32;
+        let sy = r.number("sy") as f32;
+        let sz = r.number("sz") as f32;
 
         let s = mat_scale(sx, sy, sz);
         let rxm = mat_rot_x(rx);
@@ -63,30 +99,19 @@ impl NodeDef for TransformNode {
     fn category(&self) -> &'static str { "Operations 3D" }
 
     fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
-        InstanceTemplate::builder(alloc)
-            .input("input", SocketType::Geometry3d)
+        // Geometry input stays first; the schema params (Color plus the
+        // nine translate/rotate/scale sockets) follow. `matrix` mints no
+        // socket (see `params`).
+        params()
+            .mint_sockets(
+                InstanceTemplate::builder(alloc).input("input", SocketType::Geometry3d),
+            )
             .output("out", SocketType::Geometry3d)
             .build()
     }
 
     fn properties(&self) -> Vec<PropDef> {
-        let tail = vec![
-            PropDef::new("tx", PortValue::Number(0.0)),
-            PropDef::new("ty", PortValue::Number(0.0)),
-            PropDef::new("tz", PortValue::Number(0.0)),
-            PropDef::new("rx", PortValue::Number(0.0)).with_range(-360.0, 360.0),
-            PropDef::new("ry", PortValue::Number(0.0)).with_range(-360.0, 360.0),
-            PropDef::new("rz", PortValue::Number(0.0)).with_range(-360.0, 360.0),
-            PropDef::new("sx", PortValue::Number(1.0)).with_range(0.001, 1000.0),
-            PropDef::new("sy", PortValue::Number(1.0)).with_range(0.001, 1000.0),
-            PropDef::new("sz", PortValue::Number(1.0)).with_range(0.001, 1000.0),
-        ];
-        // Prepend color + matrix so they render as the first two rows.
-        // Op-variant: color default is INHERIT_COLOR so upstream colour
-        // flows through until the user picks an override.
-        let mut p = op_props();
-        p.extend(tail);
-        p
+        params().prop_defs()
     }
 
     fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
@@ -102,7 +127,7 @@ impl NodeDef for TransformNode {
         // `transform_matrix · upstream.matrix`; colour pulls from
         // upstream unless this node has an explicit override. Mesh
         // bytes are shared via Arc — no per-vertex transformation.
-        let transform_matrix = Self::build_matrix(ctx.properties);
+        let transform_matrix = Self::build_matrix(ctx);
         let bodies: Vec<Body> = input
             .iter()
             .map(|upstream| {
@@ -194,7 +219,7 @@ mod tests {
     use super::*;
     use crate::geometry::{generate_box, Body, Geometry3d, INHERIT_COLOR};
     use crate::graph::node::{identity_matrix, NodeId, NodeInstance};
-    use crate::registry::NodeInputs;
+    use crate::registry::{NodeInputs, NodeProperties};
 
     fn props_with(values: &[(&'static str, f64)]) -> NodeProperties {
         let mut p = NodeProperties::default();
@@ -251,6 +276,24 @@ mod tests {
         // m[12]=tx, m[13]=ty, m[14]=tz).
         assert!((body.matrix[13] - 5.0).abs() < 1e-5,
                 "ty=5 should land at matrix[13]; got matrix {:?}", body.matrix);
+    }
+
+    /// A wired `Translate Z` input overrides the stored `tz` property —
+    /// the socket-or-property rule for the transform parameters.
+    #[test]
+    fn wired_translate_input_wins_over_property() {
+        let n = TransformNode;
+        let mesh = Arc::new(generate_box(1.0, 1.0, 1.0));
+        let (inst, mut inputs) = setup_with_body(Body::from_mesh(mesh));
+        // Property says tz=2, but the wired socket says tz=9 → 9 wins.
+        let tz_uid = inst.input_by_name("Translate Z").unwrap().uid;
+        inputs.insert(tz_uid, PortValue::Number(9.0));
+        let props = props_with(&[("tz", 2.0)]);
+        let ctx = EvalCtx { instance: &inst, properties: &props, inputs: &inputs };
+        let outs = n.evaluate(&ctx).unwrap();
+        let body = first_body(&outs);
+        assert!((body.matrix[14] - 9.0).abs() < 1e-5,
+                "wired Translate Z=9 should win over property tz=2; got {}", body.matrix[14]);
     }
 
     /// Upstream's matrix is preserved — Transform stacks on top.

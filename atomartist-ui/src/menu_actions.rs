@@ -8,6 +8,7 @@
 //! is exported for the platform shell's window-close path.
 
 use agg_gui::theme::{AccentColor, ThemePreference};
+use atomartist_lib::graph::undo_commands::AddNodeCmd;
 
 use crate::app_state::AppState;
 use crate::app_state_files::MeshExportFormat;
@@ -99,15 +100,31 @@ pub(crate) fn handle_action(
             .map(|d| d.type_id())
             .find(|s| *s == type_id);
         if let Some(static_id) = interned {
-            let mut g = state.graph.lock().unwrap();
-            let _ = crate::node_helpers::add_node_with_defaults(
-                &mut g,
-                &state.registry,
-                static_id,
-                [80.0, 220.0],
-            );
-            drop(g);
-            state.schedule_evaluate();
+            // Add into the *active* graph (the component template when
+            // drilled in, else the root) and push the undo command onto
+            // that graph's stack — mirrors `AppStateModel::add_node`.
+            // Build the node off-graph, then hand the full instance to
+            // AddNodeCmd so redo can re-insert it.
+            let ag = state.active_graph();
+            let node = {
+                let mut g = ag.lock().unwrap();
+                // Menu-add has no cursor position; drop the node in open
+                // space to the right of the current graph so it doesn't
+                // stack on prior adds or hide behind existing nodes.
+                let pos = crate::node_helpers::next_menu_add_position(&g);
+                crate::node_helpers::add_node_with_defaults(
+                    &mut g,
+                    &state.registry,
+                    static_id,
+                    pos,
+                )
+                .and_then(|id| g.remove_node(id).ok().map(|(node, _detached)| node))
+            };
+            if let Some(node) = node {
+                let cmd = AddNodeCmd::new(ag, node);
+                state.active_undo().lock().unwrap().add_and_do(Box::new(cmd));
+                state.schedule_evaluate_after_edit();
+            }
         }
         return;
     }
@@ -180,14 +197,14 @@ pub(crate) fn handle_action(
     }
     match action {
         "edit.undo" => {
-            let mut buf = state.undo.lock().unwrap();
-            buf.undo();
-            state.schedule_evaluate();
+            // Route to the active graph's undo stack — the component
+            // template's stack when drilled in, else the root stack.
+            state.active_undo().lock().unwrap().undo();
+            state.schedule_evaluate_after_edit();
         }
         "edit.redo" => {
-            let mut buf = state.undo.lock().unwrap();
-            buf.redo();
-            state.schedule_evaluate();
+            state.active_undo().lock().unwrap().redo();
+            state.schedule_evaluate_after_edit();
         }
         "file.new" => {
             if confirm_discard_unsaved(state, dialogs) {
@@ -262,5 +279,142 @@ pub(crate) fn handle_action(
             debug.perf_visible.set(!debug.perf_visible.get());
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::debug_windows::DebugWindowHandles;
+    use crate::settings::DebugWindowsState;
+    use crate::top_level::fresh_state_with_starter_graph;
+    use crate::top_menu_bar::NoFileDialogs;
+    use atomartist_lib::graph::node::NodeId;
+
+    fn debug_handles() -> DebugWindowHandles {
+        DebugWindowHandles::new(DebugWindowsState::default())
+    }
+
+    /// (position, id) for every node of `type_id` in the active graph.
+    fn nodes_of_type(state: &AppState, type_id: &str) -> Vec<([f64; 2], NodeId)> {
+        let ag = state.active_graph();
+        let g = ag.lock().unwrap();
+        g.nodes()
+            .filter(|n| n.type_id.as_ref() == type_id)
+            .map(|n| (n.position, n.id))
+            .collect()
+    }
+
+    /// Reproduces the user-reported "menu-added node can't be selected /
+    /// moved / connected, and the next add doesn't appear" cluster. Root
+    /// cause: menu-add dropped every node at a single fixed canvas point
+    /// that overlapped a starter node, so successive adds stacked on top
+    /// of each other and behind existing nodes — invisible to hit-testing.
+    #[test]
+    fn menu_add_places_nodes_without_overlap_or_stacking() {
+        let state = fresh_state_with_starter_graph();
+        let dialogs = NoFileDialogs;
+        let debug = debug_handles();
+
+        handle_action(&state, &dialogs, &debug, "add.Cylinder");
+        handle_action(&state, &dialogs, &debug, "add.Sphere");
+
+        // Symptom 4: both nodes actually get added, with distinct ids.
+        let cyl = nodes_of_type(&state, "Cylinder");
+        let sph = nodes_of_type(&state, "Sphere");
+        assert_eq!(cyl.len(), 1, "Cylinder should be added exactly once");
+        assert_eq!(sph.len(), 1, "Sphere should be added exactly once");
+        assert_ne!(cyl[0].1, sph[0].1, "added nodes must have distinct ids");
+
+        // Symptoms 1/4: successive menu-adds must not stack on the same
+        // canvas position.
+        assert_ne!(
+            cyl[0].0, sph[0].0,
+            "successive menu-added nodes must not stack at one position",
+        );
+
+        // Symptoms 1/2: a new node must not land on top of an existing
+        // node, or its title bar / sockets are unreachable by hit-testing.
+        let existing: Vec<[f64; 2]> = {
+            let ag = state.active_graph();
+            let g = ag.lock().unwrap();
+            g.nodes()
+                .filter(|n| {
+                    n.type_id.as_ref() != "Cylinder" && n.type_id.as_ref() != "Sphere"
+                })
+                .map(|n| n.position)
+                .collect()
+        };
+        // A node header is roughly 170 wide × 120 tall in canvas units;
+        // anything closer than that overlaps enough to steal hit-testing.
+        let overlaps = |a: [f64; 2], b: [f64; 2]| {
+            (a[0] - b[0]).abs() < 170.0 && (a[1] - b[1]).abs() < 120.0
+        };
+        for new_pos in [cyl[0].0, sph[0].0] {
+            for e in &existing {
+                assert!(
+                    !overlaps(new_pos, *e),
+                    "new node at {:?} overlaps existing node at {:?}",
+                    new_pos,
+                    e,
+                );
+            }
+        }
+    }
+
+    /// Follow-up to the placement fix: the rightward cascade must not run
+    /// off toward +X forever. Once a row fills, menu-add wraps to a new row
+    /// below (Y-up: smaller Y). Guarantees X stays bounded and no two nodes
+    /// ever collide, however many are added.
+    #[test]
+    fn menu_add_wraps_row_keeping_x_bounded_without_overlap() {
+        let state = fresh_state_with_starter_graph();
+        let dialogs = NoFileDialogs;
+        let debug = debug_handles();
+
+        // Left-most column across the starter graph anchors the wrap bound.
+        let leftmost_x = {
+            let ag = state.active_graph();
+            let g = ag.lock().unwrap();
+            g.nodes().map(|n| n.position[0]).fold(f64::INFINITY, f64::min)
+        };
+
+        // Add well past one row's worth (~6 columns) to force several wraps.
+        for _ in 0..18 {
+            handle_action(&state, &dialogs, &debug, "add.Cylinder");
+        }
+
+        let positions: Vec<[f64; 2]> = {
+            let ag = state.active_graph();
+            let g = ag.lock().unwrap();
+            g.nodes().map(|n| n.position).collect()
+        };
+
+        // X stays bounded: nothing cascades past the wrap extent from the
+        // left-most column (must match ROW_MAX_EXTENT in node_helpers).
+        const ROW_MAX_EXTENT: f64 = 1400.0;
+        for p in &positions {
+            assert!(
+                p[0] <= leftmost_x + ROW_MAX_EXTENT + 1.0,
+                "node X {} exceeded the wrap bound {}",
+                p[0],
+                leftmost_x + ROW_MAX_EXTENT,
+            );
+        }
+
+        // No two nodes (added or starter) collide.
+        let overlaps = |a: [f64; 2], b: [f64; 2]| {
+            (a[0] - b[0]).abs() < 170.0 && (a[1] - b[1]).abs() < 120.0
+        };
+        for i in 0..positions.len() {
+            for j in (i + 1)..positions.len() {
+                assert!(
+                    !overlaps(positions[i], positions[j]),
+                    "nodes at {:?} and {:?} overlap",
+                    positions[i],
+                    positions[j],
+                );
+            }
+        }
     }
 }

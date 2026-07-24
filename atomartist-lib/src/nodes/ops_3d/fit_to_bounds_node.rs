@@ -16,12 +16,31 @@ use crate::geometry::{bounds, Body, Geometry3d};
 use crate::graph::node::{matmul4x4, PortValue};
 use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    compose_with_upstream, op_props, EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs,
-    NodeRegistry, PropDef,
+    compose_with_upstream, EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs,
+    NodeRegistry, ParamSet, PropDef,
 };
 use crate::socket_types::SocketType;
 
 pub struct FitToBoundsNode;
+
+/// The FitToBounds node's parameter schema. Uses the [`ParamSet::op`]
+/// preseed for the shared `color` (INHERIT default, socket `Color`) +
+/// `matrix` params, but marks `matrix` `no_socket`: FitToBounds composes
+/// its own scale into `Body.matrix`, so wiring an op `matrix` input would
+/// be a silent no-op. The target box dimensions plus the uniform-scale
+/// toggle follow on capitalized sockets.
+fn params() -> ParamSet {
+    ParamSet::op()
+        .no_socket() // `matrix`: property-only; FitToBounds builds its own.
+        .number("width", "Width", 20.0, 0.001..=10_000.0)
+        .socket_named("Width")
+        .number("height", "Height", 20.0, 0.001..=10_000.0)
+        .socket_named("Height")
+        .number("depth", "Depth", 20.0, 0.001..=10_000.0)
+        .socket_named("Depth")
+        .bool_("uniform", "Uniform", true)
+        .socket_named("Uniform")
+}
 
 impl NodeDef for FitToBoundsNode {
     fn type_id(&self) -> &'static str { "FitToBounds" }
@@ -29,24 +48,16 @@ impl NodeDef for FitToBoundsNode {
     fn category(&self) -> &'static str { "Operations 3D" }
 
     fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
-        InstanceTemplate::builder(alloc)
-            .input("input", SocketType::Geometry3d)
+        params()
+            .mint_sockets(
+                InstanceTemplate::builder(alloc).input("input", SocketType::Geometry3d),
+            )
             .output("out", SocketType::Geometry3d)
             .build()
     }
 
     fn properties(&self) -> Vec<PropDef> {
-        let tail = vec![
-            PropDef::new("width",  PortValue::Number(20.0)).with_range(0.001, 10_000.0),
-            PropDef::new("height", PortValue::Number(20.0)).with_range(0.001, 10_000.0),
-            PropDef::new("depth",  PortValue::Number(20.0)).with_range(0.001, 10_000.0),
-            PropDef::new("uniform", PortValue::Bool(true)),
-        ];
-        // Op-variant geometry_props: color defaults to INHERIT_COLOR so
-        // upstream tints flow through.
-        let mut p = op_props();
-        p.extend(tail);
-        p
+        params().prop_defs()
     }
 
     fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
@@ -84,17 +95,19 @@ impl NodeDef for FitToBoundsNode {
             (mx[1] - mn[1]).max(1e-6),
             (mx[2] - mn[2]).max(1e-6),
         ];
+        let ps = params();
+        let rd = ps.reader(ctx);
         let target = [
-            ctx.properties.number("width", 20.0) as f32,
-            ctx.properties.number("height", 20.0) as f32,
-            ctx.properties.number("depth", 20.0) as f32,
+            rd.number("width") as f32,
+            rd.number("height") as f32,
+            rd.number("depth") as f32,
         ];
         let factor = [
             target[0] / cur[0],
             target[1] / cur[1],
             target[2] / cur[2],
         ];
-        let uniform = ctx.properties.bool_("uniform", true);
+        let uniform = rd.bool_("uniform");
         let (sx, sy, sz) = if uniform {
             let s = factor[0].min(factor[1]).min(factor[2]);
             (s, s, s)

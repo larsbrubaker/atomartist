@@ -98,11 +98,27 @@ impl AppStateModel {
         }
     }
 
-    fn property_value_to_ne(v: &PortValue) -> ne::PropertyValue {
+    /// A string maps to the canvas's inline-editable `Text` variant
+    /// only when its schema editor is *explicitly* the single-line
+    /// string editor. This is an allowlist, not a denylist: enum-backed
+    /// strings (`EnumDropdown` / `EnumButtons` / `EnumTabs`) also carry
+    /// a `PortValue::StringVal`, and surfacing those as free-text would
+    /// let the user type a value outside the enum's variant set. Read-
+    /// only, multi-line, and the default `Display` editor likewise stay
+    /// display-only (`Other`). Node authors opt a string into inline
+    /// editing by declaring `EditorKind::StringSingleLine`.
+    fn string_is_inline_editable(editor: &EditorKind) -> bool {
+        matches!(editor, EditorKind::StringSingleLine)
+    }
+
+    fn property_value_to_ne(v: &PortValue, editor: &EditorKind) -> ne::PropertyValue {
         match v {
             PortValue::Number(n) => ne::PropertyValue::Number(*n),
             PortValue::Bool(b) => ne::PropertyValue::Bool(*b),
             PortValue::Color(c) => ne::PropertyValue::Color(*c),
+            PortValue::StringVal(s) if Self::string_is_inline_editable(editor) => {
+                ne::PropertyValue::Text(s.as_str().to_string())
+            }
             PortValue::StringVal(s) => ne::PropertyValue::Other {
                 display: s.as_str().to_string(),
             },
@@ -129,7 +145,8 @@ impl AppStateModel {
 
 impl ne::NodeGraphModel for AppStateModel {
     fn nodes(&self) -> Vec<ne::NodeView> {
-        let g = self.state.graph.lock().unwrap();
+        let ag = self.state.active_graph();
+        let g = ag.lock().unwrap();
         let reg = &self.state.registry;
         g.nodes()
             .filter_map(|n| {
@@ -188,19 +205,31 @@ impl ne::NodeGraphModel for AppStateModel {
                             .get(&p.name)
                             .cloned()
                             .unwrap_or_else(|| p.default.clone());
+                        // Let the node vary a property's editor with its
+                        // live values (e.g. NumberConst's value slider
+                        // tracking the instance's min/max/step). Falls
+                        // back to the static schema editor when the node
+                        // has no override for this property.
+                        let editor = def
+                            .editor_override(&p.name, &snapshot)
+                            .unwrap_or_else(|| p.editor.clone());
+                        let (min, max) = match editor.numeric_range() {
+                            (Some(mn), Some(mx)) => (Some(mn), Some(mx)),
+                            _ => (p.min, p.max),
+                        };
                         ne::PropertyView {
                             name: p.name.to_string(),
                             display_label: p.label.as_ref().map(|l| l.to_string()),
-                            current: Self::property_value_to_ne(&current),
-                            min: p.min,
-                            max: p.max,
+                            current: Self::property_value_to_ne(&current, &editor),
+                            min,
+                            max,
                             bound_input: p.bound_input.as_ref().map(|s| s.to_string()),
-                            editor: Self::editor_kind_to_ne(&p.editor),
+                            editor: Self::editor_kind_to_ne(&editor),
                             // Forward the full schema-side editor so
                             // the per-kind row renderers (`paint_row`)
                             // can mount the right pill, toggle,
                             // swatch, etc.
-                            editor_kind: Some(p.editor.clone()),
+                            editor_kind: Some(editor),
                         }
                     })
                     .collect();
@@ -219,7 +248,8 @@ impl ne::NodeGraphModel for AppStateModel {
     }
 
     fn noodles(&self) -> Vec<ne::NoodleView> {
-        let g = self.state.graph.lock().unwrap();
+        let ag = self.state.active_graph();
+        let g = ag.lock().unwrap();
         g.noodles()
             .iter()
             .filter_map(|noodle| {
@@ -281,6 +311,9 @@ impl ne::NodeGraphModel for AppStateModel {
             "Operations 3D" => Color::rgb(0.42, 0.66, 0.32),
             "Mesh" => Color::rgb(0.85, 0.55, 0.22),
             "Math" => Color::rgb(0.50, 0.50, 0.55),
+            // Graph-interface / value-source nodes (NodeDesigner uses a
+            // magenta family, #8b4c8b, for these).
+            "Input" => Color::rgb(0.545, 0.298, 0.545),
             "Output" => Color::rgb(0.62, 0.36, 0.78),
             _ => fallback,
         }
@@ -297,10 +330,11 @@ impl ne::NodeGraphModel for AppStateModel {
 
     fn set_node_position(&mut self, id: ne::NodeId, pos: [f64; 2]) {
         let domain_id = Self::from_ne(id);
+        let undo = self.state.active_undo();
         // Drag coalescing: a single user drag fires this method many
         // times per second. Merge into the top-of-stack `MoveNodeCmd`
         // when the target matches so the whole drag is one undo step.
-        let coalesced = self.state.undo.lock().unwrap().try_coalesce_last(|top| {
+        let coalesced = undo.lock().unwrap().try_coalesce_last(|top| {
             if let Some(cmd) = top.as_any_mut().downcast_mut::<MoveNodeCmd>() {
                 if cmd.id == domain_id {
                     cmd.extend_into(pos);
@@ -310,8 +344,8 @@ impl ne::NodeGraphModel for AppStateModel {
             false
         });
         if !coalesced {
-            let cmd = MoveNodeCmd::new(self.state.graph.clone(), domain_id, pos);
-            self.state.undo.lock().unwrap().add_and_do(Box::new(cmd));
+            let cmd = MoveNodeCmd::new(self.state.active_graph(), domain_id, pos);
+            undo.lock().unwrap().add_and_do(Box::new(cmd));
         }
     }
 
@@ -321,23 +355,24 @@ impl ne::NodeGraphModel for AppStateModel {
         // Wasteful but engine-side simpler than introducing a separate
         // build-without-insert API — revisit if profiling shows this
         // matters.
+        let ag = self.state.active_graph();
         let (id, node) = {
-            let mut g = self.state.graph.lock().unwrap();
+            let mut g = ag.lock().unwrap();
             let id = g.add_new_node(type_id, pos, &self.state.registry).ok()?;
             let (node, _detached) = g.remove_node(id).ok()?;
             (id, node)
         };
-        let cmd = AddNodeCmd::new(self.state.graph.clone(), node);
-        self.state.undo.lock().unwrap().add_and_do(Box::new(cmd));
-        self.state.schedule_evaluate();
+        let cmd = AddNodeCmd::new(self.state.active_graph(), node);
+        self.state.active_undo().lock().unwrap().add_and_do(Box::new(cmd));
+        self.state.schedule_evaluate_after_edit();
         Some(Self::to_ne(id))
     }
 
     fn remove_node(&mut self, id: ne::NodeId) {
         let domain_id = Self::from_ne(id);
-        let cmd = RemoveNodeCmd::new(self.state.graph.clone(), domain_id);
-        self.state.undo.lock().unwrap().add_and_do(Box::new(cmd));
-        self.state.schedule_evaluate();
+        let cmd = RemoveNodeCmd::new(self.state.active_graph(), domain_id);
+        self.state.active_undo().lock().unwrap().add_and_do(Box::new(cmd));
+        self.state.schedule_evaluate_after_edit();
     }
 
     fn try_add_noodle(
@@ -357,13 +392,15 @@ impl ne::NodeGraphModel for AppStateModel {
             _ => return ne::NoodleResult::Rejected,
         };
         let noodle = Noodle::new(Self::from_ne(from_node), from_uid, Self::from_ne(to_node), to_uid);
+        let ag = self.state.active_graph();
+        let undo = self.state.active_undo();
         // Dry-run the connect on a peek lock to figure out which path
         // (clean Connect / Replace-existing / Reject) we'll take —
         // without mutating. Pre-collect existing noodles to the same
         // input so the Replace branch knows what to capture for the
         // undo batch.
         let (existing_at_target, decision) = {
-            let g = self.state.graph.lock().unwrap();
+            let g = ag.lock().unwrap();
             let existing: Vec<Noodle> = g
                 .noodles()
                 .iter()
@@ -391,20 +428,20 @@ impl ne::NodeGraphModel for AppStateModel {
         let result = match decision {
             ne::NoodleResult::Connected => {
                 let cmd = ConnectCmd::new(
-                    self.state.graph.clone(),
+                    ag.clone(),
                     self.state.registry.clone(),
                     noodle,
                 );
-                self.state.undo.lock().unwrap().add_and_do(Box::new(cmd));
+                undo.lock().unwrap().add_and_do(Box::new(cmd));
                 // Check it actually landed (validation failures inside
                 // ConnectCmd::do_it set succeeded=false; the noodle
                 // count tells us cleanly).
-                if self.state.graph.lock().unwrap().noodles().contains(&noodle) {
+                if ag.lock().unwrap().noodles().contains(&noodle) {
                     ne::NoodleResult::Connected
                 } else {
                     // Pop the no-op cmd off the stack so users don't
                     // see a phantom undo step for a rejected connect.
-                    self.state.undo.lock().unwrap().undo();
+                    undo.lock().unwrap().undo();
                     ne::NoodleResult::Rejected
                 }
             }
@@ -415,29 +452,29 @@ impl ne::NodeGraphModel for AppStateModel {
                 let mut children: Vec<Box<dyn agg_gui::undo::UndoRedoCommand>> = Vec::new();
                 for existing in &existing_at_target {
                     children.push(Box::new(DisconnectCmd::new(
-                        self.state.graph.clone(),
+                        ag.clone(),
                         self.state.registry.clone(),
                         *existing,
                     )));
                 }
                 children.push(Box::new(ConnectCmd::new(
-                    self.state.graph.clone(),
+                    ag.clone(),
                     self.state.registry.clone(),
                     noodle,
                 )));
                 let batch = BatchCmd::new("Replace Connection", children);
-                self.state.undo.lock().unwrap().add_and_do(Box::new(batch));
-                if self.state.graph.lock().unwrap().noodles().contains(&noodle) {
+                undo.lock().unwrap().add_and_do(Box::new(batch));
+                if ag.lock().unwrap().noodles().contains(&noodle) {
                     ne::NoodleResult::Replaced
                 } else {
-                    self.state.undo.lock().unwrap().undo();
+                    undo.lock().unwrap().undo();
                     ne::NoodleResult::Rejected
                 }
             }
             _ => ne::NoodleResult::Rejected,
         };
         if matches!(result, ne::NoodleResult::Connected | ne::NoodleResult::Replaced) {
-            self.state.schedule_evaluate();
+            self.state.schedule_evaluate_after_edit();
         }
         result
     }
@@ -467,16 +504,17 @@ impl ne::NodeGraphModel for AppStateModel {
         // sometimes asks for removal of a noodle that's already gone
         // (multi-event drag races). A phantom undo step would be
         // surprising to the user.
-        if !self.state.graph.lock().unwrap().noodles().contains(&noodle) {
+        let ag = self.state.active_graph();
+        if !ag.lock().unwrap().noodles().contains(&noodle) {
             return false;
         }
         let cmd = DisconnectCmd::new(
-            self.state.graph.clone(),
+            ag,
             self.state.registry.clone(),
             noodle,
         );
-        self.state.undo.lock().unwrap().add_and_do(Box::new(cmd));
-        self.state.schedule_evaluate();
+        self.state.active_undo().lock().unwrap().add_and_do(Box::new(cmd));
+        self.state.schedule_evaluate_after_edit();
         true
     }
 
@@ -486,9 +524,11 @@ impl ne::NodeGraphModel for AppStateModel {
             ne::PropertyValue::Number(n) => PortValue::Number(n),
             ne::PropertyValue::Bool(b) => PortValue::Bool(b),
             ne::PropertyValue::Color(c) => PortValue::Color(c),
+            ne::PropertyValue::Text(s) => PortValue::StringVal(Arc::new(s)),
             ne::PropertyValue::Other { .. } => return,
         };
         let name_arc: Arc<str> = Arc::<str>::from(name);
+        let undo = self.state.active_undo();
         // Slider-coalescing — see MoveNodeCmd::extend_into for the
         // matching node-drag case. Pixel-rate property writes merge
         // into the top-of-stack ChangePropertyCmd as long as the
@@ -496,7 +536,7 @@ impl ne::NodeGraphModel for AppStateModel {
         let coalesced = {
             let name_for_pred = name_arc.clone();
             let value_for_pred = port_value.clone();
-            self.state.undo.lock().unwrap().try_coalesce_last(|top| {
+            undo.lock().unwrap().try_coalesce_last(|top| {
                 if let Some(cmd) = top.as_any_mut().downcast_mut::<ChangePropertyCmd>() {
                     if cmd.id == domain_id && cmd.name == name_for_pred {
                         cmd.extend_into(value_for_pred.clone());
@@ -508,14 +548,15 @@ impl ne::NodeGraphModel for AppStateModel {
         };
         if !coalesced {
             let cmd = ChangePropertyCmd::new(
-                self.state.graph.clone(),
+                self.state.active_graph(),
                 domain_id,
                 name_arc,
                 port_value,
-            );
-            self.state.undo.lock().unwrap().add_and_do(Box::new(cmd));
+            )
+            .with_registry(self.state.registry.clone());
+            undo.lock().unwrap().add_and_do(Box::new(cmd));
         }
-        self.state.schedule_evaluate();
+        self.state.schedule_evaluate_after_edit();
     }
 
     fn on_canvas_zoom_changed(&mut self, zoom: f64) {
@@ -525,31 +566,39 @@ impl ne::NodeGraphModel for AppStateModel {
     fn on_primary_selection_changed(&mut self, id: Option<ne::NodeId>) {
         let domain = id.map(Self::from_ne);
         self.state.set_selection(domain);
-        if let Some(nid) = domain {
-            let g = self.state.graph.lock().unwrap();
-            // Geometry detection now reads the instance's outputs
-            // directly — same answer as before for static nodes, and
-            // correctly reflects dynamic outputs for the new Output node.
-            let has_geom = g
-                .get(nid)
-                .map(|n| n.outputs.iter().any(|s| s.socket_type == SocketType::Geometry3d))
-                .unwrap_or(false);
-            drop(g);
-            if has_geom {
-                self.state.set_display_node(Some(nid));
-            }
-        }
+        // Product spec: nothing renders in the 3-D viewport unless it is
+        // wired into the Output node, whose merged `__display__` geometry
+        // is what the viewport shows. We deliberately do NOT pin the
+        // selected node as the viewport display here — the previous
+        // preview-on-selection behaviour made an unconnected primitive
+        // appear in the viewport the moment it was clicked, violating that
+        // rule. `display_node` remains available as an explicit,
+        // programmatic override (the starter graph pins Output; tests pin
+        // a specific node) but is no longer driven by canvas selection.
+    }
+
+    /// Double-click on a node title bar. Drill into the node when it's a
+    /// component (a `SubgraphNodeDef`), returning `true` so the editor
+    /// suppresses its default collapse toggle; return `false` for plain
+    /// nodes so the collapse behaviour is preserved.
+    ///
+    /// Safe under the editor's model-mutex hold: `enter_component` locks
+    /// only `AppState`'s graph / stack mutexes, never this model's.
+    fn on_node_activated(&mut self, node: ne::NodeId) -> bool {
+        self.state.enter_component(Self::from_ne(node))
     }
 }
 
 impl AppStateModel {
     fn lookup_output_uid(&self, node: DomainNodeId, name: &str) -> Option<SocketUid> {
-        let g = self.state.graph.lock().unwrap();
+        let ag = self.state.active_graph();
+        let g = ag.lock().unwrap();
         g.get(node)?.output_by_name(name).map(|s| s.uid)
     }
 
     fn lookup_input_uid(&self, node: DomainNodeId, name: &str) -> Option<SocketUid> {
-        let g = self.state.graph.lock().unwrap();
+        let ag = self.state.active_graph();
+        let g = ag.lock().unwrap();
         g.get(node)?.input_by_name(name).map(|s| s.uid)
     }
 }
@@ -562,125 +611,4 @@ pub fn shared_model_for(state: AppState) -> ne::SharedModel {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use atomartist_lib::nodes;
-    use atomartist_lib::registry::NodeRegistry;
-    use atomartist_lib::Graph;
-
-    fn fixture() -> AppState {
-        let mut reg = NodeRegistry::new();
-        nodes::register_all(&mut reg);
-        AppState::new(Graph::new(), reg)
-    }
-
-    #[test]
-    fn nodes_view_round_trips_position_and_type() {
-        let state = fixture();
-        {
-            let mut g = state.graph.lock().unwrap();
-            g.add_new_node("Box", [10.0, 20.0], &state.registry).unwrap();
-        }
-        let model = AppStateModel::new(state);
-        let nodes = ne::NodeGraphModel::nodes(&model);
-        assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].type_id, "Box");
-        assert_eq!(nodes[0].position, [10.0, 20.0]);
-    }
-
-    #[test]
-    fn add_node_inserts_through_adapter() {
-        let state = fixture();
-        let mut model = AppStateModel::new(state);
-        let id = ne::NodeGraphModel::add_node(&mut model, "Box", [50.0, 60.0]);
-        assert!(id.is_some());
-        let g = model.state.graph.lock().unwrap();
-        assert_eq!(g.nodes().count(), 1);
-    }
-
-    #[test]
-    fn property_set_through_adapter_writes_graph() {
-        let state = fixture();
-        let id = {
-            let mut g = state.graph.lock().unwrap();
-            g.add_new_node("Box", [0.0, 0.0], &state.registry).unwrap()
-        };
-        let mut model = AppStateModel::new(state);
-        ne::NodeGraphModel::set_property(
-            &mut model,
-            ne::NodeId(id.0),
-            "width",
-            ne::PropertyValue::Number(7.5),
-        );
-        let g = model.state.graph.lock().unwrap();
-        let n = g.get(id).unwrap();
-        match n.properties.get("width") {
-            Some(PortValue::Number(v)) => assert!((v - 7.5).abs() < 1e-9),
-            _ => panic!("width property not updated"),
-        }
-    }
-
-    #[test]
-    fn primary_selection_change_mirrors_to_app_state() {
-        let state = fixture();
-        let id = {
-            let mut g = state.graph.lock().unwrap();
-            g.add_new_node("Box", [0.0, 0.0], &state.registry).unwrap()
-        };
-        let mut model = AppStateModel::new(state);
-        ne::NodeGraphModel::on_primary_selection_changed(&mut model, Some(ne::NodeId(id.0)));
-        assert_eq!(*model.state.selection.lock().unwrap(), Some(id));
-    }
-
-    #[test]
-    fn extrude_view_pairs_inputs_with_bound_properties() {
-        let state = fixture();
-        let id = {
-            let mut g = state.graph.lock().unwrap();
-            g.add_new_node("Extrude", [0.0, 0.0], &state.registry).unwrap()
-        };
-        let model = AppStateModel::new(state);
-        let nodes = ne::NodeGraphModel::nodes(&model);
-        let n = nodes.iter().find(|n| n.id.0 == id.0).unwrap();
-        assert_eq!(n.outputs.len(), 1);
-        assert_eq!(n.outputs[0].name, "Geometry");
-        let optional_input_names: Vec<&str> = vec![
-            "Height",
-            "Radius",
-            "Segments",
-            "Bottom Radius",
-            "Bottom Segments",
-            "Color",
-            "Matrix",
-        ];
-        for name in optional_input_names {
-            let matched = n
-                .properties
-                .iter()
-                .any(|p| p.bound_input.as_deref() == Some(name));
-            assert!(matched, "no property bound to input '{}'", name);
-        }
-        let height_input = n.inputs.iter().find(|s| s.name == "Height").unwrap();
-        assert_eq!(height_input.display_label.as_deref(), Some("Height"));
-    }
-
-    // Undo round-trip tests live in `atomartist-ui/tests/undo_round_trip.rs`
-    // — see that file for the full mutation coverage matrix.
-
-    #[test]
-    fn extrude_color_property_round_trips_as_color_value() {
-        let state = fixture();
-        let _id = {
-            let mut g = state.graph.lock().unwrap();
-            g.add_new_node("Extrude", [0.0, 0.0], &state.registry).unwrap()
-        };
-        let model = AppStateModel::new(state);
-        let nodes = ne::NodeGraphModel::nodes(&model);
-        let n = &nodes[0];
-        let color = n.properties.iter().find(|p| p.name == "color").unwrap();
-        match &color.current {
-            ne::PropertyValue::Color(c) => assert_eq!(*c, [1.0, 1.0, 1.0, 1.0]),
-            other => panic!("expected Color, got {:?}", other),
-        }
-    }
-}
+mod tests;

@@ -26,9 +26,9 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agg-gui"
-version = "0.2.1"
+version = "0.4.0"
 dependencies = [
- "agg-rust 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "agg-rust 1.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "base64",
  "bevy_reflect",
  "clipper2-rust",
@@ -57,13 +57,13 @@ dependencies = [
 
 [[package]]
 name = "agg-rust"
-version = "1.0.2"
+version = "1.1.0"
 
 [[package]]
 name = "agg-rust"
-version = "1.0.2"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc3d9844c645308d7ce04db178d1b83bb2728ff26e4fc1d214010dbcf54a5a72"
+checksum = "a048e396a0713452db5b3053b541c957748133bd9bdd16360b727a06e9dea3ee"
 
 [[package]]
 name = "ahash"
@@ -375,7 +375,7 @@ version = "0.0.1"
 dependencies = [
  "agg-gui",
  "agg-gui-node-editor",
- "agg-rust 1.0.2",
+ "agg-rust 1.1.0",
  "atomartist-lib",
  "atomartist-renderer",
  "glam",
@@ -660,9 +660,9 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "clipper2-rust"
-version = "1.0.3"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "119b9306cc17492f50224736a2b2595543665c3095ba40c04c5c5181d53678bc"
+checksum = "0fd663fe209e7030c956e3be4c051dcc20cdb73da794f31466762cff12ca11bf"
 dependencies = [
  "num-traits",
 ]
@@ -861,7 +861,7 @@ name = "demo-wgpu"
 version = "0.1.0"
 dependencies = [
  "agg-gui",
- "agg-rust 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "agg-rust 1.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "bytemuck",
  "console_error_panic_hook",
  "pollster 0.3.0",
@@ -1827,7 +1827,7 @@ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
 name = "manifold-rust"
-version = "0.1.0"
+version = "0.9.3"
 dependencies = [
  "clipper2-rust",
  "num-traits",
