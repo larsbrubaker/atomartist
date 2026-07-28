@@ -68,22 +68,6 @@ Never commit a bug fix that isn't covered by a test.
 - When test failures occur, treat all failures as real bugs — resolve through
   instrumentation and root-cause analysis, never by weakening tests
 
-**Running tests:**
-```bash
-cargo test --workspace
-cargo test -p atomartist-lib
-cargo test test_name -- --exact
-cargo test -- --nocapture
-```
-
-## Testing
-
-- Tests MUST test actual production code, not copies - Never duplicate production logic in tests. Import and call the real code. Tests that verify copied code prove nothing about the actual system.
-- Tests should run as fast as possible—fast tests get run more often
-- Write tests for regressions and complex logic
-- Avoid redundant tests that verify the same behavior
-- All tests must pass before merging
-
 ## Coding Standards
 
 ### File length
@@ -98,7 +82,6 @@ cargo test -- --nocapture
 - Add doc comments to functions when they clarify intent, non-obvious behavior, or
   cross-module relationships. Skip them when the function name and signature
   already tell the full story.
-- Explain *why*, not *what*. A comment that restates the code is noise.
 
 ### Coordinate system
 - **Y-axis is inverted (bottom-up)** — origin at bottom-left, +Y points upward.
@@ -122,10 +105,6 @@ cargo test -- --nocapture
 - Prefer `Result` / `Option` over `unwrap` in library code; `expect` is acceptable
   in `main` for startup failures with a clear message.
 - Avoid unsafe code unless there is no alternative; document every `unsafe` block.
-
-### Names
-Follow Rust conventions (`snake_case` functions/variables, `PascalCase` types,
-`SCREAMING_SNAKE_CASE` constants).
 
 ### Performance
 - **Never guess at performance problems by reading code.** Always measure first.
