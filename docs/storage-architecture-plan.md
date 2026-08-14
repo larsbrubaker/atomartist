@@ -497,7 +497,7 @@ test first.
    providers that want `mh://tenant/…`; it is a breaking change to the
    URI grammar, so it should land before the first deployment if we want
    it at all.
-5. **Path traversal once a provider is rooted.** `StorageUri`'s
+6. **Path traversal once a provider is rooted.** `StorageUri`'s
    `normalize_path` collapses separators and empty segments but deliberately
    preserves `..`, so `file:///projects/../../etc/passwd` survives
    normalization and resolves through `to_local_path`. That is harmless
