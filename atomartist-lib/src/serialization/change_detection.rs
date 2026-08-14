@@ -24,6 +24,16 @@
 use crate::graph::graph::Graph;
 use crate::serialization::graph_json::graph_to_json_string;
 
+/// A graph snapshot that can become a tracker baseline later.
+///
+/// Exists for asynchronous saves: the bytes handed to a storage provider
+/// describe the graph *at serialize time*, so the baseline that the
+/// write's confirmation installs must be captured then too. Re-snapshotting
+/// the live graph when the write lands would mark edits made while the
+/// write was in flight — edits that are not in the file — as saved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedBaseline(String);
+
 /// Snapshot-based "unsaved changes" detector for a single [`Graph`].
 ///
 /// Construct one per project and feed it the live graph at save points
@@ -41,11 +51,28 @@ impl ChangeTracker {
         Self::default()
     }
 
+    /// Capture the graph's current state for a later
+    /// [`mark_saved_from`](Self::mark_saved_from).
+    pub fn baseline_of(graph: &Graph) -> SavedBaseline {
+        SavedBaseline(graph_to_json_string(graph))
+    }
+
     /// Take a snapshot of the current graph state as the new baseline.
     /// Call this right after a successful save / load — anything that
     /// changes after this point will be reported as unsaved.
+    ///
+    /// Only correct when the graph *is* what was saved. A save whose IO
+    /// completes later must capture the baseline at serialize time with
+    /// [`baseline_of`](Self::baseline_of) and install it with
+    /// [`mark_saved_from`](Self::mark_saved_from).
     pub fn mark_saved(&mut self, graph: &Graph) {
-        self.baseline = Some(graph_to_json_string(graph));
+        self.mark_saved_from(Self::baseline_of(graph));
+    }
+
+    /// Install a baseline captured earlier. Anything the graph has gained
+    /// since that capture is still reported as unsaved.
+    pub fn mark_saved_from(&mut self, baseline: SavedBaseline) {
+        self.baseline = Some(baseline.0);
     }
 
     /// True if the graph's canonical JSON differs from the last

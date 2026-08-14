@@ -17,7 +17,7 @@ use atomartist_lib::graph::executor::evaluate_dirty;
 use atomartist_lib::graph::node::{NodeId, PortValue};
 use atomartist_lib::graph::undo_commands::{ChangePropertyCmd, ChangePropsCmd};
 use atomartist_lib::registry::NodeRegistry;
-use atomartist_lib::serialization::ChangeTracker;
+use atomartist_lib::serialization::{ChangeTracker, SavedBaseline};
 use atomartist_lib::Graph;
 use atomartist_renderer::{
     CameraPoseAnimation, OrbitCamera, ProjectionAnimation, RenderStyle, ViewportTool,
@@ -245,6 +245,24 @@ impl AppState {
     pub fn mark_saved_baseline(&self) {
         let graph = self.graph.lock().unwrap();
         self.change_tracker.lock().unwrap().mark_saved(&graph);
+    }
+
+    /// Capture the current graph as a baseline to install *later*, once
+    /// some asynchronous write of those same bytes is confirmed. See
+    /// [`Self::apply_saved_baseline`].
+    pub fn saved_baseline_now(&self) -> SavedBaseline {
+        let graph = self.graph.lock().unwrap();
+        ChangeTracker::baseline_of(&graph)
+    }
+
+    /// Install a baseline captured by [`Self::saved_baseline_now`].
+    ///
+    /// The asynchronous counterpart of [`Self::mark_saved_baseline`]: a
+    /// save's continuation runs after the graph may have moved on, and
+    /// only the bytes that were actually written are "saved". Edits made
+    /// while the write was in flight stay unsaved.
+    pub fn apply_saved_baseline(&self, baseline: SavedBaseline) {
+        self.change_tracker.lock().unwrap().mark_saved_from(baseline);
     }
 
     /// True when the live graph differs from the last clean baseline.

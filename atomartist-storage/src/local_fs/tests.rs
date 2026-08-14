@@ -234,3 +234,30 @@ fn only_the_windows_sharing_shapes_are_retried() {
         );
     }
 }
+
+/// Reproduces a listing-killing panic: `do_list` used the panicking
+/// `StorageUri::join` on names straight out of `read_dir`. A file literally
+/// named `a\..\b` is legal on Unix and macOS (a backslash is just a byte in
+/// a file name), so the URI layer saw traversal segments and `join` aborted
+/// the whole listing. Such an entry must be skipped, not fatal.
+///
+/// Tested through `entry_uri` rather than by creating the file, so the case
+/// runs on Windows too — where that name cannot exist on disk at all.
+#[test]
+fn an_entry_name_containing_traversal_bytes_is_skipped_not_fatal() {
+    let dir = StorageUri::new(FILE_SCHEME, "/C:/scratch");
+
+    assert_eq!(entry_uri(&dir, r"a\..\b"), None);
+    assert_eq!(entry_uri(&dir, ".."), None);
+    assert_eq!(entry_uri(&dir, "a/../b"), None);
+
+    // Ordinary names — dots included — still join.
+    assert_eq!(
+        entry_uri(&dir, "bracket.atmr").map(|u| u.to_string()),
+        Some("file:///C:/scratch/bracket.atmr".to_string())
+    );
+    assert_eq!(
+        entry_uri(&dir, "..hidden").map(|u| u.to_string()),
+        Some("file:///C:/scratch/..hidden".to_string())
+    );
+}

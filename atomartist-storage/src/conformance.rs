@@ -71,6 +71,56 @@ pub fn run_conformance(provider: &dyn StorageProvider, root: &StorageUri) {
     create_dir_then_list(provider, root);
     file_ancestor_blocks_nested_paths(provider, root);
     unversioned_provider_rejects_preconditions(provider, root);
+    traversal_uris_cannot_reach_the_provider(provider, root);
+}
+
+/// No URI a provider can be handed contains a `.` or `..` segment, so
+/// `read` / `write` / `stat` / `list` / `delete` cannot be aimed outside
+/// the provider's root by traversal — the value simply cannot be built.
+///
+/// This is a property of [`StorageUri`] rather than of any one backend,
+/// which is exactly why it belongs here: it is the reason a rooted
+/// provider (OPFS, a per-account cloud prefix) is allowed to trust the
+/// path it is given, and it must keep holding for every provider anyone
+/// writes. See `docs/storage-architecture-plan.md` §13 open question 6.
+///
+/// ## What this verifies, and what it cannot
+///
+/// **Verifies:** every traversal spelling is rejected by `FromStr`,
+/// `try_new` and `try_join`, so no such value exists to hand to
+/// `provider`; and that `root` — built by the caller with the same
+/// constructors — is a real location this provider answers `stat` for, so
+/// the rejections above are not vacuously passing against a bogus scheme.
+///
+/// **Cannot verify:** that a given provider would refuse to *resolve* a
+/// traversal path, because there is no way to express one to it. That is
+/// the design, not a gap in the check: the guarantee is enforced by the
+/// type, once, instead of by each backend remembering to re-check. A
+/// provider that concatenates URI paths with attacker-controlled strings
+/// of its own is outside what this suite can see.
+pub fn traversal_uris_cannot_reach_the_provider(provider: &dyn StorageProvider, root: &StorageUri) {
+    // The root the caller built must be a location this provider actually
+    // serves; otherwise the rejections below prove nothing about it.
+    await_job(&provider.stat(root)).expect("stat on the conformance root should succeed");
+
+    let scheme = root.scheme();
+    for path in ["/a/../b", "/../up", "/./x", "/.."] {
+        let text = format!("{scheme}://{path}");
+        assert!(
+            text.parse::<StorageUri>().is_err(),
+            "`{text}` must not parse into a URI this provider could be handed"
+        );
+        assert!(
+            StorageUri::try_new(scheme, path).is_err(),
+            "`{scheme}` + `{path}` must not construct"
+        );
+    }
+    for child in ["..", "../escape", "./here", "a/../../escape"] {
+        assert!(
+            root.try_join(child).is_err(),
+            "joining `{child}` onto the provider root must not construct"
+        );
+    }
 }
 
 /// Bytes written come back byte-identical, and the write reports a stamp.

@@ -26,16 +26,18 @@
 //!   calls.** A local provider settles inline, so the continuation runs on
 //!   the caller's stack and will deadlock against a held lock.
 //! - Anything that must observe the *graph as it is now* (project
-//!   serialization) happens at submit time, before the job is created.
-//!   Anything that records the *outcome* (current file, saved baseline,
-//!   recents) happens in the continuation, so a failed write never
-//!   reports success.
+//!   serialization, and the saved baseline that describes those same
+//!   bytes) happens at submit time, before the job is created. Anything
+//!   that records the *outcome* (current file, recents, and *installing*
+//!   the captured baseline) happens in the continuation, so a failed
+//!   write never reports success.
 
 use atomartist_storage::StorageUri;
 
 use atomartist_lib::nodes::mesh::mesh_node;
 use atomartist_lib::serialization::{
     export_3mf, export_obj, export_stl, read_project_from_bytes, write_project_to_bytes,
+    ChangeTracker,
 };
 use atomartist_lib::Graph;
 
@@ -256,10 +258,17 @@ impl AppState {
         on_done: impl FnOnce(&AppState, Result<(), String>) + Send + 'static,
     ) {
         let uri = uri.clone();
-        let bytes = {
+        // Bytes and baseline are captured under the same lock, so the
+        // baseline installed when the write confirms describes exactly the
+        // document that was written — not whatever the graph has become
+        // while an asynchronous provider was busy.
+        let (bytes, baseline) = {
             let graph = self.graph.lock().unwrap();
             let assets = self.assets.lock().unwrap();
-            write_project_to_bytes(&graph, &assets)
+            (
+                write_project_to_bytes(&graph, &assets),
+                ChangeTracker::baseline_of(&graph),
+            )
         };
         let bytes = match bytes {
             Ok(bytes) => bytes,
@@ -278,7 +287,7 @@ impl AppState {
             move |state, result| match result {
                 Ok(_stamp) => {
                     *state.current_file.lock().unwrap() = Some(uri.clone());
-                    state.mark_saved_baseline();
+                    state.apply_saved_baseline(baseline);
                     state.note_recent_project(&uri);
                     state.notify(NoticeLevel::Info, format!("Saved {}", uri_label(&uri)));
                     on_done(state, Ok(()));

@@ -114,11 +114,10 @@ impl LocalFsProvider {
                 continue;
             }
             let child_path = child.path();
-            // Derive the child URI from the (already valid) directory URI
-            // rather than re-deriving it from the OS path: joining cannot
-            // fail, while `from_local_path` refuses UNC / verbatim paths
-            // that could never have produced `dir` in the first place.
-            let uri = dir.join(&name);
+            let Some(uri) = entry_uri(dir, &name) else {
+                eprintln!("local_fs: skipping unrepresentable entry name `{name}` in `{dir}`");
+                continue;
+            };
             // `fs::metadata` follows symlinks, so a link to a directory lists
             // as a directory. A broken link (or a file that vanished between
             // `read_dir` and here) still gets an entry, with no metadata.
@@ -361,6 +360,22 @@ fn io_error(action: &str, path: &Path, err: &io::Error) -> StorageError {
 /// `MemoryProvider` uses, applied everywhere an `Entry` is built.
 fn display_name_of(uri: &StorageUri) -> String {
     uri.file_name().unwrap_or("/").to_string()
+}
+
+/// URI for a `read_dir` entry named `name` inside `dir`, or `None` when that
+/// name has no URI form.
+///
+/// The child URI is derived from the (already valid) directory URI rather
+/// than re-derived from the OS path: `from_local_path` refuses UNC and
+/// verbatim paths that could never have produced `dir` in the first place.
+///
+/// Fallible because a *file name* is not a URI segment: on Unix and macOS a
+/// backslash is an ordinary byte, so a file may legitimately be called
+/// `a\..\b`, which the URI layer reads as traversal segments and refuses.
+/// Such an entry is skipped by the caller — one unrepresentable name must
+/// not abort the whole listing.
+fn entry_uri(dir: &StorageUri, name: &str) -> Option<StorageUri> {
+    dir.try_join(name).ok()
 }
 
 /// `Ok(None)` when nothing is stored at `path`, `Err` only for real failures

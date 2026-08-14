@@ -10,6 +10,14 @@
 //! The one exception is the `file:` scheme, which round-trips losslessly to a
 //! `PathBuf` so OS "Open With", CLI arguments, and drag-and-drop keep working
 //! on native shells.
+//!
+//! A URI path can never contain a `.` or `..` segment: every constructor
+//! refuses one. Once a provider is rooted (`browser:` OPFS, a per-account
+//! cloud prefix) the URI *is* the authorization boundary, and a value that
+//! cannot express traversal cannot be used to escape that root — no
+//! provider has to remember to re-check. Local paths that legitimately
+//! contain `..` are resolved before URI-ification (see
+//! [`StorageUri::from_local_path`]).
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -41,6 +49,12 @@ pub enum UriParseError {
     /// The portion after `://` did not start with `/` (we only accept
     /// authority-less URIs — `scheme:///path`).
     InvalidPath(String),
+    /// The path contained a `.` or `..` segment. A URI is an
+    /// authorization boundary for any rooted provider (`browser:` OPFS, a
+    /// per-account cloud prefix), so traversal segments are refused at
+    /// construction rather than resolved — see
+    /// `docs/storage-architecture-plan.md` §13 open question 6.
+    TraversalSegment(String),
 }
 
 impl fmt::Display for UriParseError {
@@ -53,6 +67,10 @@ impl fmt::Display for UriParseError {
             UriParseError::InvalidPath(p) => {
                 write!(f, "storage URI path must be absolute, got `{p}`")
             }
+            UriParseError::TraversalSegment(p) => write!(
+                f,
+                "storage URI path must not contain `.` or `..` segments, got `{p}`"
+            ),
         }
     }
 }
@@ -63,11 +81,38 @@ impl StorageUri {
     /// Build a URI from its parts. The scheme is lower-cased and the path is
     /// normalized: backslashes become `/`, and a leading `/` is added if the
     /// caller omitted it.
+    ///
+    /// # Panics
+    ///
+    /// If `path` contains a `.` or `..` segment, or `scheme` is not a legal
+    /// scheme (`[A-Za-z][A-Za-z0-9+.-]*`). Both are **programmer errors**, in the same class as indexing a slice out of bounds: a URI
+    /// is an authorization boundary for a rooted provider, and no
+    /// legitimate caller writes a traversal segment into a literal path.
+    /// Every path that comes from *outside* the program — a settings file,
+    /// a CLI argument, a picker, a provider listing — must go through the
+    /// fallible [`try_new`](Self::try_new), [`try_join`](Self::try_join),
+    /// [`from_local_path`](Self::from_local_path) or `FromStr` instead.
     pub fn new(scheme: &str, path: &str) -> Self {
-        Self {
-            scheme: Arc::from(scheme.to_ascii_lowercase().as_str()),
-            path: Arc::from(normalize_path(path).as_str()),
+        match Self::try_new(scheme, path) {
+            Ok(uri) => uri,
+            Err(err) => panic!("StorageUri::new({scheme:?}, {path:?}): {err}"),
         }
+    }
+
+    /// [`new`](Self::new) for a scheme or path this code did not author:
+    /// returns [`UriParseError::InvalidScheme`] /
+    /// [`UriParseError::TraversalSegment`] instead of panicking.
+    ///
+    /// The scheme is validated exactly as `FromStr` validates it, so every
+    /// URI built here re-parses from its own [`Display`](fmt::Display) form.
+    pub fn try_new(scheme: &str, path: &str) -> Result<Self, UriParseError> {
+        if !valid_scheme(scheme) {
+            return Err(UriParseError::InvalidScheme(scheme.to_string()));
+        }
+        Ok(Self {
+            scheme: Arc::from(scheme.to_ascii_lowercase().as_str()),
+            path: Arc::from(normalize_path(path)?.as_str()),
+        })
     }
 
     pub fn scheme(&self) -> &str {
@@ -103,12 +148,27 @@ impl StorageUri {
     }
 
     /// Append a child segment (or several, `/`-separated) to this URI.
+    ///
+    /// # Panics
+    ///
+    /// If `child` contains a `.` or `..` segment — the same programmer-error
+    /// precondition as [`new`](Self::new). Use [`try_join`](Self::try_join)
+    /// for a name that came from outside the program.
     pub fn join(&self, child: &str) -> StorageUri {
-        let joined = format!("{}/{}", self.path, child);
-        StorageUri {
-            scheme: Arc::clone(&self.scheme),
-            path: Arc::from(normalize_path(&joined).as_str()),
+        match self.try_join(child) {
+            Ok(uri) => uri,
+            Err(err) => panic!("StorageUri::join({child:?}) on `{self}`: {err}"),
         }
+    }
+
+    /// [`join`](Self::join) for a child name this code did not author —
+    /// a directory listing from a provider, a name typed by the user.
+    pub fn try_join(&self, child: &str) -> Result<StorageUri, UriParseError> {
+        let joined = format!("{}/{}", self.path, child);
+        Ok(StorageUri {
+            scheme: Arc::clone(&self.scheme),
+            path: Arc::from(normalize_path(&joined)?.as_str()),
+        })
     }
 
     /// True when `self` is `dir` itself or lives beneath it.
@@ -159,12 +219,23 @@ impl StorageUri {
     /// on Unix and, rarely, Windows) is lossily converted and will not round
     /// -trip. Every path AtomArtist itself produces — pickers, recents, CLI
     /// arguments — is already valid Unicode.
+    ///
+    /// A real local path may contain `..` — the user navigated up in the
+    /// OS file dialog — while a `StorageUri` may not. Such components are
+    /// resolved **lexically** here (no filesystem access, so an
+    /// as-yet-nonexistent save target works and a symlinked path is not
+    /// silently rewritten); a path whose `..`s reach past the start
+    /// (`../elsewhere`) has no absolute form without the process's current
+    /// directory and is refused like the others. So is one whose `..`s
+    /// would pop a Windows drive prefix (`C:\a\..\..\b`): the result would
+    /// name a different volume.
     pub fn from_local_path(path: impl AsRef<Path>) -> Option<StorageUri> {
         let path = path.as_ref();
         if !is_round_trippable(path) {
             return None;
         }
-        Some(StorageUri::new(FILE_SCHEME, &path.to_string_lossy()))
+        let resolved = resolve_traversal(&path.to_string_lossy())?;
+        StorageUri::try_new(FILE_SCHEME, &resolved).ok()
     }
 }
 
@@ -223,16 +294,77 @@ fn local_path_str(path: &str) -> Option<&str> {
 /// Every constructor funnels through here — `StorageUri` equality is about to
 /// become the app-wide identity key, so `mem:///x//y/`, `mem:///x/y`, and
 /// `mem:///x\y` must be the same URI with the same hash.
-fn normalize_path(path: &str) -> String {
+///
+/// `.` and `..` segments are **rejected**, not resolved: a `StorageUri` that
+/// cannot express traversal cannot be used to escape a provider's root, and
+/// there is no ordering hazard about *when* resolution happened relative to
+/// a root check. Local paths that legitimately contain `..` (the user
+/// navigated up in a picker) are resolved by the OS layer first — see
+/// [`StorageUri::from_local_path`].
+fn normalize_path(path: &str) -> Result<String, UriParseError> {
     let mut out = String::with_capacity(path.len() + 1);
     out.push('/');
     for segment in path.split(['/', '\\']).filter(|s| !s.is_empty()) {
+        if segment == "." || segment == ".." {
+            return Err(UriParseError::TraversalSegment(path.to_string()));
+        }
         if out.len() > 1 {
             out.push('/');
         }
         out.push_str(segment);
     }
-    out
+    Ok(out)
+}
+
+/// Resolve `.` and `..` in a native path *lexically* — without touching the
+/// filesystem — into the segment list a URI path can hold.
+///
+/// Deliberately not `Path::canonicalize`: that hits the disk, so it fails
+/// for a save target that does not exist yet and silently rewrites a path
+/// the user picked through a symlink. Lexical resolution is a pure string
+/// operation and is what the user meant by "up one directory" in a file
+/// dialog.
+///
+/// Returns `None` when the `..`s underflow (`../outside`, `/..`): the
+/// result would depend on the process's current directory, which is not
+/// something a stored URI may inherit.
+///
+/// A leading `C:` is a **volume, not a directory**, so it is a floor the
+/// `..`s may not cross: `C:\a\..\..\b` used to yield `/b`, a path Windows
+/// resolves against whatever the current drive happens to be — a save that
+/// reports success while writing to the wrong volume. Windows itself
+/// clamps (`C:\..` is `C:\`), but this refuses instead, the same
+/// conservative choice made for UNC and verbatim paths above: a path the
+/// user actually navigated through an OS dialog comes back already
+/// resolved, so only hand-constructed input reaches this branch.
+fn resolve_traversal(path: &str) -> Option<String> {
+    let mut segments: Vec<&str> = Vec::new();
+    // Number of leading segments `..` may never pop: 1 for a drive prefix.
+    let mut floor = 0usize;
+    for segment in path.split(['/', '\\']).filter(|s| !s.is_empty()) {
+        match segment {
+            "." => {}
+            ".." => {
+                if segments.len() <= floor {
+                    return None;
+                }
+                segments.pop();
+            }
+            other => {
+                if segments.is_empty() && is_drive_segment(other) {
+                    floor = 1;
+                }
+                segments.push(other);
+            }
+        }
+    }
+    Some(segments.join("/"))
+}
+
+/// True for a bare Windows drive designator (`C:`) as a path segment.
+fn is_drive_segment(segment: &str) -> bool {
+    let bytes = segment.as_bytes();
+    bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }
 
 fn valid_scheme(scheme: &str) -> bool {
@@ -262,10 +394,11 @@ impl FromStr for StorageUri {
             return Err(UriParseError::InvalidPath(rest.to_string()));
         }
         // Normalize exactly as `StorageUri::new` does: a URI parsed from a
-        // settings file must equal (and hash like) the one built in code.
+        // settings file must equal (and hash like) the one built in code —
+        // and, like it, refuses traversal segments.
         Ok(StorageUri {
             scheme: Arc::from(scheme.to_ascii_lowercase().as_str()),
-            path: Arc::from(normalize_path(rest).as_str()),
+            path: Arc::from(normalize_path(rest)?.as_str()),
         })
     }
 }
@@ -446,6 +579,152 @@ mod tests {
             assert_eq!(equivalent.to_string(), "mem:///x/y");
             assert_eq!(hash_of(&equivalent), hash_of(&canonical));
         }
+    }
+
+    /// Traversal is refused, never resolved: a `StorageUri` that cannot
+    /// express `..` cannot be used to escape a rooted provider, whatever
+    /// order that provider does its checks in.
+    #[test]
+    fn every_constructor_rejects_traversal_segments() {
+        for text in [
+            "mem:///a/../b",
+            "mem:///../up",
+            "mem:///./x",
+            "mem:///..",
+            "mem:///.",
+            "mem:///a/./b",
+            "file:///C:/projects/../../Windows/System32/config",
+        ] {
+            assert_eq!(
+                text.parse::<StorageUri>(),
+                Err(UriParseError::TraversalSegment(
+                    text.split_once("://").expect("test URIs have a scheme").1.to_string()
+                )),
+                "`{text}` must not parse",
+            );
+        }
+
+        assert!(StorageUri::try_new("mem", "/a/../b").is_err());
+        assert!(StorageUri::try_new("mem", "a/./b").is_err());
+        assert!(StorageUri::try_new("mem", r"a\..\b").is_err());
+        assert!(StorageUri::new("mem", "/a").try_join("../b").is_err());
+        assert!(StorageUri::new("mem", "/a").try_join("..").is_err());
+        assert!(StorageUri::new("mem", "/a").try_join("./b").is_err());
+
+        // Serialized state is external input: a settings file carrying a
+        // traversal URI must fail to deserialize, not smuggle one in.
+        assert!(serde_json::from_str::<StorageUri>("\"mem:///a/../b\"").is_err());
+    }
+
+    /// A segment that merely *contains* dots is an ordinary name.
+    #[test]
+    fn dotted_names_are_not_traversal() {
+        let uri = StorageUri::new("mem", "/..a/b../.hidden/x.atmr");
+        assert_eq!(uri.to_string(), "mem:///..a/b../.hidden/x.atmr");
+    }
+
+    #[test]
+    #[should_panic(expected = "`.` or `..` segments")]
+    fn new_panics_on_a_traversal_literal() {
+        let _ = StorageUri::new("mem", "/a/../b");
+    }
+
+    /// A user who navigates up in the file dialog picks a path with `..`
+    /// in it. That resolves lexically — no filesystem access, so it works
+    /// for a save target that does not exist yet.
+    #[cfg(windows)]
+    #[test]
+    fn local_paths_resolve_traversal_before_becoming_uris() {
+        let uri = StorageUri::from_local_path(Path::new(r"C:\a\b\..\c.atmr")).unwrap();
+        assert_eq!(uri.to_string(), "file:///C:/a/c.atmr");
+
+        // The save target does not exist (and neither does its parent), so
+        // a `canonicalize`-based resolution would have failed here.
+        let target = Path::new(r"C:\a\no-such-dir\..\other\brand-new.atmr");
+        assert!(!target.exists());
+        assert_eq!(
+            StorageUri::from_local_path(target).unwrap().to_string(),
+            "file:///C:/a/other/brand-new.atmr"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn local_paths_resolve_traversal_before_becoming_uris() {
+        let uri = StorageUri::from_local_path(Path::new("/a/b/../c.atmr")).unwrap();
+        assert_eq!(uri.to_string(), "file:///a/c.atmr");
+
+        let target = Path::new("/a/no-such-dir/../other/brand-new.atmr");
+        assert!(!target.exists());
+        assert_eq!(
+            StorageUri::from_local_path(target).unwrap().to_string(),
+            "file:///a/other/brand-new.atmr"
+        );
+    }
+
+    /// `..`s that reach past the start of the path name a location only
+    /// the process's current directory can resolve. A stored URI must not
+    /// inherit that, so such paths are refused like UNC ones.
+    #[test]
+    fn local_paths_whose_traversal_underflows_are_refused() {
+        for rejected in ["/..", "../elsewhere", "a/../../b"] {
+            assert_eq!(
+                StorageUri::from_local_path(Path::new(rejected)),
+                None,
+                "`{rejected}` escapes its own root and must be refused",
+            );
+        }
+    }
+
+    /// Reproduces a silent wrong-volume bug: lexical resolution treated the
+    /// `C:` drive prefix as an ordinary directory segment, so `C:\a\..\..\b`
+    /// popped the drive and produced `file:///b` — a path Windows later
+    /// resolves against whatever the *current* drive happens to be. Windows
+    /// itself clamps (`C:\..` is `C:\`), but rather than emulate that we
+    /// refuse, matching how UNC and verbatim paths are handled: only
+    /// hand-constructed pathological input reaches here, since a real OS
+    /// dialog hands back an already-resolved path.
+    ///
+    /// Written without `#[cfg(windows)]` on purpose — the resolver splits on
+    /// both separator kinds, so these cases behave identically everywhere.
+    #[test]
+    fn traversal_may_not_pop_a_windows_drive_prefix() {
+        for rejected in [r"C:\a\..\..\b", r"C:\..\Windows", r"C:\a\..\.."] {
+            assert_eq!(
+                StorageUri::from_local_path(Path::new(rejected)),
+                None,
+                "`{rejected}` traverses past its drive and must be refused",
+            );
+        }
+
+        // The ordinary case still resolves, drive intact.
+        assert_eq!(
+            StorageUri::from_local_path(Path::new(r"C:\a\..\b"))
+                .unwrap()
+                .to_string(),
+            "file:///C:/b"
+        );
+    }
+
+    /// `try_new` must accept exactly the schemes `FromStr` accepts, or a URI
+    /// it builds cannot be re-parsed from its own `to_string`.
+    #[test]
+    fn try_new_validates_the_scheme_like_parsing_does() {
+        assert_eq!(
+            StorageUri::try_new("1bad", "/x"),
+            Err(UriParseError::InvalidScheme("1bad".into()))
+        );
+        assert_eq!(
+            StorageUri::try_new("", "/x"),
+            Err(UriParseError::InvalidScheme(String::new()))
+        );
+        assert_eq!(
+            StorageUri::try_new("has space", "/x"),
+            Err(UriParseError::InvalidScheme("has space".into()))
+        );
+
+        let uri = StorageUri::try_new("mem+v2", "/x/y").unwrap();
+        assert_eq!(uri.to_string().parse::<StorageUri>(), Ok(uri));
     }
 
     fn hash_of(uri: &StorageUri) -> u64 {

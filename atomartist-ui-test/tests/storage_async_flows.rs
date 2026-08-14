@@ -283,6 +283,51 @@ fn the_save_then_open_chain_completes_across_frames() {
     assert!(!h.state().has_unsaved_changes());
 }
 
+/// The saved baseline must describe **the bytes that were written**, not
+/// the graph as it stands when the write confirms. With an asynchronous
+/// provider those differ: an edit made while the write is in flight is not
+/// in the file, so re-snapshotting the live graph in the continuation
+/// marks unsaved work as saved and the user loses it at the next
+/// New/Open/close with no prompt.
+#[test]
+fn edits_made_while_a_save_is_in_flight_stay_unsaved() {
+    let (h, provider) = harness_with(FlakyConfig::default().with_latency(2));
+    let at = uri("inflight.atmr");
+
+    h.state().save_project(&at);
+    assert_eq!(h.state().pending_op_count(), 1, "the write is in flight");
+
+    // The user keeps working while the provider is still writing.
+    dirty(h.state());
+
+    frames(&h, &provider, 2);
+    assert_eq!(h.state().pending_op_count(), 0, "the write landed");
+    assert!(stored(&provider, &at), "the bytes reached the provider");
+    assert!(
+        h.state().has_unsaved_changes(),
+        "an edit made while the write was in flight is not in the file, \
+         so the document must still be dirty"
+    );
+}
+
+/// Companion to the above, pinning the happy path: with no edits during
+/// the write, a confirmed save leaves the document clean.
+#[test]
+fn a_save_with_no_edits_in_flight_ends_clean() {
+    let (h, provider) = harness_with(FlakyConfig::default().with_latency(2));
+    dirty(h.state());
+    assert!(h.state().has_unsaved_changes());
+
+    h.state().save_project(&uri("quiet.atmr"));
+    frames(&h, &provider, 2);
+
+    assert_eq!(h.state().pending_op_count(), 0);
+    assert!(
+        !h.state().has_unsaved_changes(),
+        "a confirmed save of the current graph re-baselines the tracker"
+    );
+}
+
 /// Startup auto-reopen of a last project that has since been deleted is
 /// not a failure the user asked for, so it must not post an
 /// [`NoticeLevel::Error`]: error notices are deliberately sticky (an Info

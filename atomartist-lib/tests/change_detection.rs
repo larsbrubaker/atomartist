@@ -224,6 +224,46 @@ fn mark_saved_replaces_previous_baseline() {
 }
 
 // ============================================================================
+// baseline_of / mark_saved_from — asynchronous saves
+// ============================================================================
+
+/// A save whose IO completes later must baseline on the graph it
+/// serialized, not on the graph as it stands when the write confirms:
+/// edits made in between are not in the file and must stay unsaved.
+#[test]
+fn mark_saved_from_ignores_edits_made_after_the_snapshot() {
+    let reg = registry();
+    let mut g = Graph::new();
+    let p = g.add_new_node("test::ProducerNumber", [100.0, 100.0], &reg).unwrap();
+
+    // The bytes handed to the provider describe *this* graph.
+    let baseline = ChangeTracker::baseline_of(&g);
+
+    // The user keeps working while the write is in flight.
+    g.set_position(p, [300.0, 300.0]).unwrap();
+
+    let mut tracker = ChangeTracker::new();
+    tracker.mark_saved_from(baseline);
+    assert!(tracker.has_baseline());
+    assert!(
+        tracker.has_unsaved_changes(&g),
+        "the move happened after the snapshot, so it is still unsaved"
+    );
+}
+
+/// With no edits in between, an earlier snapshot is the current graph.
+#[test]
+fn mark_saved_from_a_fresh_snapshot_is_clean() {
+    let reg = registry();
+    let mut g = Graph::new();
+    g.add_new_node("test::ProducerNumber", [100.0, 100.0], &reg).unwrap();
+
+    let mut tracker = ChangeTracker::new();
+    tracker.mark_saved_from(ChangeTracker::baseline_of(&g));
+    assert!(!tracker.has_unsaved_changes(&g));
+}
+
+// ============================================================================
 // clear
 // ============================================================================
 

@@ -21,7 +21,7 @@ pub mod mesh_obj;
 pub mod nodedesigner_import;
 
 pub use asset_store::{AssetEntry, AssetRef, AssetStore};
-pub use change_detection::ChangeTracker;
+pub use change_detection::{ChangeTracker, SavedBaseline};
 pub use atmr::{
     read_graph_json_from_atmr, read_project_from_bytes, write_atmr_into, write_project_to_bytes,
     AtmrError, GRAPH_ENTRY_NAME, PROJECT_EXTENSION,

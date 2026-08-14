@@ -497,15 +497,23 @@ test first.
    providers that want `mh://tenant/…`; it is a breaking change to the
    URI grammar, so it should land before the first deployment if we want
    it at all.
-6. **Path traversal once a provider is rooted.** `StorageUri`'s
-   `normalize_path` collapses separators and empty segments but deliberately
-   preserves `..`, so `file:///projects/../../etc/passwd` survives
-   normalization and resolves through `to_local_path`. That is harmless
-   today — `LocalFsProvider` is intentionally "the whole disk", exactly like
-   the OS file dialog it stands in for, and no URI arrives from an untrusted
-   source. It stops being harmless the moment a provider has a *root* it is
-   meant to stay inside (a sandboxed local root, `browser:` OPFS, a
-   per-account cloud prefix), because a URI is then also an authorization
-   boundary. Decide before Phase 5 whether `..` is resolved during
-   normalization or rejected outright, and add the case to the conformance
-   suite so every provider is held to the same answer.
+6. ~~**Path traversal once a provider is rooted**~~ — **settled**: `.` and
+   `..` segments are **rejected outright** at construction/parse time, not
+   resolved. A URI is an authorization boundary the moment a provider has a
+   root (`browser:` OPFS, a per-account cloud prefix), and a value that
+   cannot *express* traversal needs no root re-check anywhere; resolving
+   instead would invite ordering bugs about when normalization ran relative
+   to that check. `StorageUri::try_new` / `try_join` / `FromStr` /
+   `Deserialize` return `UriParseError::TraversalSegment`; the infallible
+   `new` / `join` keep their signatures and panic, documented as a
+   programmer-error precondition for code-authored literals. Local paths
+   legitimately containing `..` (the user navigated up in a picker) are
+   resolved *lexically* by `from_local_path` before URI-ification — no
+   filesystem access, so an as-yet-nonexistent save target still works and a
+   symlinked path is not silently rewritten — and refused when the `..`s
+   underflow or would pop a Windows drive prefix (`C:\a\..\..\b`, which
+   would otherwise name a different volume). The conformance suite
+   (`traversal_uris_cannot_reach_the_provider`) pins that traversal URIs
+   remain unrepresentable at the type level for every provider — it cannot
+   test a provider's *resolution* of such a path, because no such value
+   can be built to hand it.
