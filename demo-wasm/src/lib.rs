@@ -17,7 +17,7 @@ use agg_gui::{App, MouseButton, Modifiers, Size};
 use atomartist_ui::{
     build_app, fresh_state_with_starter_graph, install_theme_and_fonts,
     top_menu_bar::{FileDialogProvider, NoFileDialogs},
-    DebugWindowHandles,
+    DebugWindowHandles, FirstPaintGate,
 };
 use demo_wgpu::{begin_frame, WgpuGfxCtx};
 use wasm_bindgen::prelude::*;
@@ -38,6 +38,12 @@ thread_local! {
     // so we only re-collect when widget invalidation changes.
     static INSPECTOR_SNAPSHOT_EPOCH: std::cell::Cell<Option<u64>> =
         const { std::cell::Cell::new(None) };
+    // Forces `render` to paint until one frame has actually been
+    // presented — see the `FirstPaintGate` docs and the note at the end
+    // of `init_wgpu`. Belt and braces alongside the `request_draw()`
+    // there: this one survives anything else consuming the draw flag
+    // between init and the next requestAnimationFrame tick.
+    static FIRST_PAINT: FirstPaintGate = const { FirstPaintGate::new() };
 }
 
 struct GpuHandles {
@@ -285,6 +291,15 @@ async fn init_wgpu() -> Result<(), String> {
     APP.with(|c| *c.borrow_mut() = Some(app));
     DEBUG.with(|c| *c.borrow_mut() = Some(debug));
 
+    // The web equivalent of winit's initial `RedrawRequested`. The app
+    // defaults to Reactive mode, whose paint gate (`should_paint`) only
+    // fires on an animation, an invalidation, or a due deadline —
+    // nothing guarantees one of those is pending at the instant this
+    // async init resolves. Without this the page could stay blank until
+    // the first resize (whose code path bypasses the gate), which is
+    // exactly what a refresh — and every mobile load — hit.
+    agg_gui::animation::request_draw();
+
     Ok(())
 }
 
@@ -311,7 +326,15 @@ pub fn render(width: u32, height: u32, frame_ms: f64) {
     // needs, so without this gate the WASM shell painted every single
     // tick and Reactive mode did nothing — the mode switch was inert on
     // web while working correctly on native.
-    if !resized && !should_paint() {
+    //
+    // The first-paint gate sits in front of it: until one frame has
+    // been presented we paint regardless, because Reactive mode has no
+    // guaranteed first-frame signal on the web. The gate takes
+    // `should_paint` lazily and skips it while forcing a paint, so a due
+    // `request_draw_after` deadline isn't promoted on a tick that may
+    // still bail before painting. That's tidiness, not correctness:
+    // `wants_draw()` never clears the immediate flag.
+    if !FIRST_PAINT.with(|g| g.should_paint_tick(resized, should_paint)) {
         return;
     }
 
@@ -403,6 +426,10 @@ pub fn render(width: u32, height: u32, frame_ms: f64) {
         });
     });
     frame.present();
+    // Latched only here, after a frame was acquired, painted, and
+    // presented — every early `return` above leaves the gate open so
+    // the next tick tries again.
+    FIRST_PAINT.with(|g| g.mark_painted());
 }
 
 /// Whether this requestAnimationFrame tick should actually paint.
