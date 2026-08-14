@@ -1,0 +1,28 @@
+[package]
+name = "atomartist-storage"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.85"
+authors = ["Lars Brubaker <larsbrubaker@matterhackers.com>"]
+license = "MIT"
+description = "AtomArtist pluggable storage: StorageUri, Job, StorageProvider trait, registry, and in-memory reference provider."
+repository = "https://github.com/larsbrubaker/atomartist"
+
+[lib]
+name = "atomartist_storage"
+path = "src/lib.rs"
+
+[dependencies]
+# `serde` so a `StorageUri` can live in settings / recents files. It
+# serializes as its URI string, not as a struct, so the on-disk shape is
+# stable even if the internal representation changes.
+serde = { version = "1", features = ["derive"] }
+
+# WASM has no threads, so asynchronous providers hand their work to the
+# browser event loop instead. Target-gated so native builds never pull
+# wasm-bindgen into the tree.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = "0.4"
+
+[dev-dependencies]
+serde_json = "1"

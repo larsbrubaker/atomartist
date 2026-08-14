@@ -1,0 +1,52 @@
+//! AtomArtist pluggable storage.
+//!
+//! This crate owns the seam between "the app has some bytes for a project"
+//! and "those bytes live somewhere": a local disk, browser storage (OPFS /
+//! IndexedDB), or a remote service. Nothing above this crate knows which.
+//!
+//! The pieces, in dependency order:
+//!
+//! - [`StorageUri`] (`uri.rs`) — the identity of a project or asset,
+//!   replacing `PathBuf` everywhere outside a provider.
+//! - [`Job`] (`job.rs`) — a pollable slot holding work in flight, so no
+//!   async runtime is imposed and wasm (which cannot block) uses the same
+//!   call sites as native.
+//! - [`StorageProvider`] (`provider.rs`) — the object-safe plug-in trait,
+//!   plus [`Capabilities`], [`Entry`], [`Precondition`], and [`Stamp`].
+//! - [`StorageRegistry`] (`registry.rs`) — scheme -> provider lookup, in the
+//!   spirit of `atomartist-lib`'s node registry.
+//! - [`MemoryProvider`] (`memory.rs`) and [`FlakyProvider`] (`flaky.rs`) —
+//!   the in-process reference backend and its fault-injecting wrapper.
+//! - [`conformance`] — the suite every provider (including third-party ones)
+//!   must pass.
+//!
+//! Deliberately absent: `std::fs`, HTTP, and any GUI dependency. The native
+//! filesystem provider (Phase 3) and browser provider (Phase 5) are the only
+//! places allowed to touch platform IO.
+//!
+//! See `docs/storage-architecture-plan.md` for the full design.
+
+pub mod conformance;
+mod error;
+mod flaky;
+mod job;
+mod memory;
+mod provider;
+mod registry;
+mod uri;
+
+pub use error::{StorageError, StorageResult};
+pub use flaky::{FlakyConfig, FlakyProvider};
+pub use job::{Job, JobCompleter, JobState};
+pub use memory::MemoryProvider;
+pub use provider::{
+    Blob, Bytes, Capabilities, Entry, ModifiedMs, NativePicker, Precondition, Stamp,
+    StorageProvider,
+};
+pub use registry::{DuplicateScheme, StorageRegistry};
+pub use uri::{StorageUri, UriParseError, FILE_SCHEME};
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use job::spawn_blocking;
+#[cfg(target_arch = "wasm32")]
+pub use job::spawn_local;

@@ -2,6 +2,7 @@
 members = [
     "atomartist-lib",
     "atomartist-renderer",
+    "atomartist-storage",
     "atomartist-ui",
     "atomartist-ui-test",
     "demo-native",

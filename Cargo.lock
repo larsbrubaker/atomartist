@@ -372,6 +372,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "atomartist-storage"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "wasm-bindgen-futures",
+]
+
+[[package]]
 name = "atomartist-ui"
 version = "0.0.1"
 dependencies = [
