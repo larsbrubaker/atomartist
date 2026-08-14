@@ -692,6 +692,15 @@ fn main() {
                     }
                 }
                 Event::AboutToWait => {
+                    // Storage job pump, ahead of the paint decision below:
+                    // a job that settled since the last frame must be
+                    // applied even on a frame that ends up painting
+                    // nothing. While anything is still in flight the pump
+                    // requests a draw itself, which the `wants_draw()`
+                    // branch below turns into the next redraw — so the
+                    // loop keeps ticking until the queue drains.
+                    state_for_save.pump_storage();
+
                     // Continuous run-mode keeps the loop spinning every
                     // frame regardless of widget invalidation — required
                     // when the Performance window's selector is flipped

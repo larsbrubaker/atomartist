@@ -24,6 +24,7 @@ pub mod node_helpers;
 pub mod settings;
 pub mod shell_init;
 pub mod status_bar;
+pub mod storage_ops;
 pub mod top_level;
 pub mod top_menu_bar;
 pub mod viewport_overlay;
@@ -40,6 +41,7 @@ pub use settings::{
     DebugWindowState, DebugWindowsState, MainWindowState, UiSettings, WindowPlacement,
 };
 pub use shell_init::install_theme_and_fonts;
+pub use storage_ops::{JobOp, Notice, NoticeLevel, PendingOp};
 pub use top_level::{
     build_app, fresh_state_with_builtins, fresh_state_with_builtins_and_storage,
     fresh_state_with_starter_graph, fresh_state_with_starter_graph_and_storage,

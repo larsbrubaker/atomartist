@@ -169,6 +169,48 @@ impl TestHarness {
         self.state.evaluate_now();
     }
 
+    /// One frame of the storage job pump — the same
+    /// [`AppState::pump_storage`] call the native and web shells make
+    /// once per frame. Returns `true` while operations are still in
+    /// flight.
+    ///
+    /// Tests drive this explicitly instead of sleeping: an asynchronous
+    /// provider under test (`FlakyProvider`) advances its own simulated
+    /// clock with `pump()`, and this advances the app's.
+    pub fn pump(&self) -> bool {
+        self.state.pump_storage()
+    }
+
+    /// Pump up to `max_frames` times, stopping as soon as the queue
+    /// drains.
+    ///
+    /// Panics — naming the operations still outstanding — rather than
+    /// looping forever, so a test that never settles fails fast instead
+    /// of hanging CI. Note this only advances the *app's* clock: a
+    /// provider with its own simulated latency must be pumped alongside.
+    pub fn pump_until_idle(&self, max_frames: usize) {
+        // An already-idle queue is idle regardless of the budget, so
+        // `pump_until_idle(0)` on a quiet state must not panic.
+        if self.state.pending_op_count() == 0 {
+            return;
+        }
+        for _ in 0..max_frames {
+            if !self.pump() {
+                return;
+            }
+        }
+        let outstanding: Vec<String> = self
+            .state
+            .pending_op_status()
+            .into_iter()
+            .map(|(label, _progress)| label)
+            .collect();
+        panic!(
+            "storage ops still pending after {max_frames} pump frames: {}",
+            outstanding.join(", ")
+        );
+    }
+
     /// Borrow the agg-gui `App`. Useful for low-level reflection / focus
     /// checks the harness doesn't expose helpers for.
     pub fn app(&self) -> &App {

@@ -37,6 +37,10 @@ thread_local! {
     // wgpu init; consumed each frame by `render` for edit draining,
     // node snapshotting, and `FrameHistory::push`.
     static DEBUG:    RefCell<Option<DebugWindowHandles>> = RefCell::new(None);
+    // Clone of the AppState the widget tree was built over — the shell
+    // keeps one so `render` can drive the storage job pump (the widget
+    // tree has no way to reach it from outside an event).
+    static STATE:    RefCell<Option<atomartist_ui::AppState>> = RefCell::new(None);
     // Mirrors agg-gui's `render_app_frame::INSPECTOR_SNAPSHOT_EPOCH`
     // so we only re-collect when widget invalidation changes.
     static INSPECTOR_SNAPSHOT_EPOCH: std::cell::Cell<Option<u64>> =
@@ -283,7 +287,8 @@ async fn init_wgpu() -> Result<(), String> {
     // IndexedDB) lands in Phase 5 of the storage plan.
     let state = fresh_state_with_starter_graph();
     let dialogs: Arc<dyn FileDialogProvider> = Arc::new(NoFileDialogs);
-    let (root, debug) = build_app(state, dialogs, None);
+    let (root, debug) = build_app(state.clone(), dialogs, None);
+    STATE.with(|c| *c.borrow_mut() = Some(state));
     let app = App::new(root);
 
     GPU.with(|c| {
@@ -343,6 +348,22 @@ pub fn render(width: u32, height: u32, frame_ms: f64) {
     // `request_draw_after` deadline isn't promoted on a tick that may
     // still bail before painting. That's tidiness, not correctness:
     // `wants_draw()` never clears the immediate flag.
+    // Storage job pump, ahead of the paint gate: a provider that
+    // completed since the last tick must have its continuation applied
+    // even on a frame that is about to bail out without painting. The
+    // pump re-requests a draw while anything is still in flight, so the
+    // gate below lets the next tick through.
+    //
+    // The state is cloned out of the RefCell and the borrow dropped
+    // before pumping: continuations are arbitrary app code and may well
+    // reach for STATE themselves, which would panic on the outstanding
+    // borrow. `AppState` is a bundle of `Arc`s, so the clone is cheap and
+    // shares everything that matters.
+    let pump_state = STATE.with(|c| c.borrow().clone());
+    if let Some(state) = pump_state {
+        state.pump_storage();
+    }
+
     if !FIRST_PAINT.with(|g| g.should_paint_tick(resized, should_paint)) {
         return;
     }

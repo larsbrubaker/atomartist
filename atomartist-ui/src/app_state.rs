@@ -163,6 +163,16 @@ pub struct AppState {
     /// a platform backend here is exactly what the storage seam exists
     /// to prevent.
     pub storage: Arc<StorageRegistry>,
+    /// Storage operations whose [`atomartist_storage::Job`] has not
+    /// settled yet, drained once per frame by
+    /// [`AppState::pump_storage`](crate::storage_ops). Synchronous
+    /// providers never put anything here — `submit_op` applies those
+    /// inline. The whole pump lives in `storage_ops.rs`.
+    pub(crate) pending_ops: crate::storage_ops::PendingOps,
+    /// User-facing messages posted by storage continuations, which run
+    /// outside the widget tree and so have no dialog provider to talk
+    /// to. Drained by the UI on its next paint.
+    pub(crate) notices: crate::storage_ops::Notices,
 }
 
 impl AppState {
@@ -216,6 +226,8 @@ impl AppState {
             change_tracker: Arc::new(Mutex::new(change_tracker)),
             recent_projects: Arc::new(Mutex::new(Vec::new())),
             storage,
+            pending_ops: Arc::new(Mutex::new(Vec::new())),
+            notices: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -563,9 +575,15 @@ impl Clone for AppState {
             change_tracker: self.change_tracker.clone(),
             recent_projects: self.recent_projects.clone(),
             storage: self.storage.clone(),
+            // Shared, not copied: a clone handed to a widget must see the
+            // same in-flight operations the shell's pump drains.
+            pending_ops: self.pending_ops.clone(),
+            notices: self.notices.clone(),
         }
     }
 }
 
 // File operations (load / save / import / export) live in
-// `app_state_files.rs` to keep this file under the 800-line cap.
+// `app_state_files.rs`, and the frame-loop storage job pump
+// (`submit_op` / `pump_storage` / notices) in `storage_ops.rs`, to keep
+// this file under the 800-line cap.
