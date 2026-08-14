@@ -52,8 +52,15 @@ pub struct Capabilities {
     pub writable: bool,
     pub can_list: bool,
     pub can_create_dir: bool,
-    /// Supports [`Precondition::IfMatch`] — required for safe multi-device
-    /// editing of the same project.
+    /// The backend can compare stored versions — required for safe
+    /// multi-device editing of the same project.
+    ///
+    /// Today this single flag gates *all* of [`Precondition`]: a provider
+    /// reporting `false` must reject both `IfMatch` and `IfAbsent` with
+    /// [`StorageError::Unsupported`](crate::StorageError::Unsupported). If a
+    /// backend ever turns up that offers exclusive create without version
+    /// handles (or the reverse), this splits into two flags — hence the
+    /// conformance suite checks the behaviour, not the flag.
     pub versioned: bool,
     pub max_blob_bytes: Option<u64>,
     pub requires_auth: bool,

@@ -459,3 +459,31 @@ test first.
 4. **Encryption at rest for the cloud provider** — server-side only, or
    optional client-side envelope encryption? The latter conflicts with
    server-side thumbnailing/search later.
+5. **UNC / network paths on Windows.** `StorageUri` is authority-less
+   (`scheme:///path`), so a UNC share has nowhere to put its host:
+   `\\server\share\p.atmr` would normalize to
+   `file:///server/share/p.atmr` and come back as `/server/share/p.atmr`,
+   which Windows resolves against the *current drive* — a save that
+   reports success while writing elsewhere. Phase 3 therefore makes
+   `StorageUri::from_local_path` return `Option` and **refuses** UNC and
+   verbatim (`\\?\`, `\\.\`) paths outright; the shell tells the user to
+   map the share to a drive letter, which round-trips like any other
+   path. Proper support needs a decision: add an optional host component
+   to `StorageUri` (and therefore to the `scheme://host/path` rendering),
+   or let `LocalFsProvider` own a private encoding of the share name
+   inside the path segment. The first is cleaner and also serves remote
+   providers that want `mh://tenant/…`; it is a breaking change to the
+   URI grammar, so it should land before the first deployment if we want
+   it at all.
+5. **Path traversal once a provider is rooted.** `StorageUri`'s
+   `normalize_path` collapses separators and empty segments but deliberately
+   preserves `..`, so `file:///projects/../../etc/passwd` survives
+   normalization and resolves through `to_local_path`. That is harmless
+   today — `LocalFsProvider` is intentionally "the whole disk", exactly like
+   the OS file dialog it stands in for, and no URI arrives from an untrusted
+   source. It stops being harmless the moment a provider has a *root* it is
+   meant to stay inside (a sandboxed local root, `browser:` OPFS, a
+   per-account cloud prefix), because a URI is then also an authorization
+   boundary. Decide before Phase 5 whether `..` is resolved during
+   normalization or rejected outright, and add the case to the conformance
+   suite so every provider is held to the same answer.

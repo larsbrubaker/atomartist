@@ -17,12 +17,14 @@
 //!   spirit of `atomartist-lib`'s node registry.
 //! - [`MemoryProvider`] (`memory.rs`) and [`FlakyProvider`] (`flaky.rs`) —
 //!   the in-process reference backend and its fault-injecting wrapper.
+//! - `LocalFsProvider` (`local_fs.rs`, native only) — the `file:` scheme, and
+//!   the one place in the app allowed to touch `std::fs` for storage.
 //! - [`conformance`] — the suite every provider (including third-party ones)
 //!   must pass.
 //!
-//! Deliberately absent: `std::fs`, HTTP, and any GUI dependency. The native
-//! filesystem provider (Phase 3) and browser provider (Phase 5) are the only
-//! places allowed to touch platform IO.
+//! Deliberately absent everywhere else: `std::fs`, HTTP, and any GUI
+//! dependency. `local_fs.rs` (Phase 3) and the browser provider (Phase 5) are
+//! the only places allowed to touch platform IO.
 //!
 //! See `docs/storage-architecture-plan.md` for the full design.
 
@@ -30,6 +32,8 @@ pub mod conformance;
 mod error;
 mod flaky;
 mod job;
+#[cfg(not(target_arch = "wasm32"))]
+mod local_fs;
 mod memory;
 mod provider;
 mod registry;
@@ -50,3 +54,5 @@ pub use uri::{StorageUri, UriParseError, FILE_SCHEME};
 pub use job::spawn_blocking;
 #[cfg(target_arch = "wasm32")]
 pub use job::spawn_local;
+#[cfg(not(target_arch = "wasm32"))]
+pub use local_fs::LocalFsProvider;

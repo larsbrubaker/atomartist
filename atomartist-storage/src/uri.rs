@@ -139,15 +139,57 @@ impl StorageUri {
         local_path_str(&self.path).map(PathBuf::from)
     }
 
-    /// Inverse of [`to_local_path`](Self::to_local_path).
+    /// Inverse of [`to_local_path`](Self::to_local_path), or `None` when
+    /// the path has no URI form that maps back to the same file.
+    ///
+    /// Refused (v1): **UNC** shares (`\\server\share\…`) and every
+    /// **verbatim** / device prefix (`\\?\…`, `\\?\UNC\…`, `\\.\…`). The
+    /// authority-less `scheme:///path` shape has nowhere to put a host,
+    /// so `\\server\share\p.atmr` would normalize to
+    /// `file:///server/share/p.atmr` and come back as
+    /// `/server/share/p.atmr` — a path Windows resolves against the
+    /// *current drive*. That is silent data loss: a save reports success
+    /// having written somewhere else. Refusing lets the caller say so;
+    /// the supported workaround is to map the share to a drive letter,
+    /// which is an ordinary path that round-trips. Proper UNC support
+    /// (a host component, or the `file://server/share` form) is open
+    /// question 5 in `docs/storage-architecture-plan.md` §13.
     ///
     /// Caveat: paths are carried as UTF-8, so a non-UTF-8 OS path (possible
     /// on Unix and, rarely, Windows) is lossily converted and will not round
     /// -trip. Every path AtomArtist itself produces — pickers, recents, CLI
     /// arguments — is already valid Unicode.
-    pub fn from_local_path(path: impl AsRef<Path>) -> StorageUri {
-        StorageUri::new(FILE_SCHEME, &path.as_ref().to_string_lossy())
+    pub fn from_local_path(path: impl AsRef<Path>) -> Option<StorageUri> {
+        let path = path.as_ref();
+        if !is_round_trippable(path) {
+            return None;
+        }
+        Some(StorageUri::new(FILE_SCHEME, &path.to_string_lossy()))
     }
+}
+
+/// Whether a native path survives the trip through `file:///…` and back.
+///
+/// Only a plain relative path or a drive-letter path does. Everything
+/// Windows expresses with a `\\` prefix carries information (a host, a
+/// device namespace, a "skip normalization" flag) that the URI form
+/// cannot represent.
+#[cfg(windows)]
+fn is_round_trippable(path: &Path) -> bool {
+    use std::path::{Component, Prefix};
+    match path.components().next() {
+        Some(Component::Prefix(prefix)) => matches!(prefix.kind(), Prefix::Disk(_)),
+        _ => true,
+    }
+}
+
+/// Off Windows there is no UNC syntax and no prefix component, but a
+/// leading `\\` can only have come from a Windows-shaped path — and path
+/// normalization would silently mangle it into segments — so it is
+/// refused here too rather than quietly producing a different file.
+#[cfg(not(windows))]
+fn is_round_trippable(path: &Path) -> bool {
+    !path.to_string_lossy().starts_with(r"\\")
 }
 
 /// True for `/C:/…` and `/C:` — a Windows drive letter wrapped by the URI's
@@ -276,17 +318,66 @@ mod tests {
 
     #[test]
     fn windows_path_becomes_a_drive_letter_uri_on_every_platform() {
-        let uri = StorageUri::from_local_path(Path::new(r"C:\Users\lars\bracket.atmr"));
+        let uri = StorageUri::from_local_path(Path::new(r"C:\Users\lars\bracket.atmr")).unwrap();
         assert_eq!(uri.to_string(), "file:///C:/Users/lars/bracket.atmr");
+    }
+
+    /// Reproduces a silent-data-loss bug: `\\server\share\p.atmr` used to
+    /// normalize to `file:///server/share/p.atmr`, whose `to_local_path`
+    /// is `/server/share/p.atmr` — a path Windows resolves against the
+    /// *current drive*. A save then reported success while writing
+    /// somewhere else entirely. Until the URI form grows a host
+    /// component, such paths are refused outright.
+    #[cfg(windows)]
+    #[test]
+    fn unc_and_verbatim_paths_are_refused_rather_than_corrupted() {
+        for rejected in [
+            r"\\server\share\bracket.atmr",
+            r"\\server\share",
+            r"\\?\C:\Users\lars\bracket.atmr",
+            r"\\?\UNC\server\share\bracket.atmr",
+            r"\\.\COM1",
+        ] {
+            assert_eq!(
+                StorageUri::from_local_path(Path::new(rejected)),
+                None,
+                "`{rejected}` has no round-trippable URI form and must be refused",
+            );
+        }
+    }
+
+    /// The supported workaround for a network share: map it to a drive
+    /// letter. A mapped drive is an ordinary `Prefix::Disk` path and
+    /// round-trips like any other.
+    #[cfg(windows)]
+    #[test]
+    fn mapped_network_drive_round_trips_like_any_disk_path() {
+        let uri = StorageUri::from_local_path(Path::new(r"Z:\projects\bracket.atmr")).unwrap();
+        assert_eq!(uri.to_string(), "file:///Z:/projects/bracket.atmr");
+        let back = uri.to_local_path().unwrap();
+        assert_eq!(StorageUri::from_local_path(&back), Some(uri));
+    }
+
+    /// Off Windows there is no UNC syntax, but a leading `\\` still can
+    /// only have come from a Windows-shaped path (a real Unix file name
+    /// containing backslashes would be mangled by normalization), so it
+    /// is refused there too.
+    #[cfg(not(windows))]
+    #[test]
+    fn double_backslash_paths_are_refused_off_windows_too() {
+        assert_eq!(
+            StorageUri::from_local_path(Path::new(r"\\server\share\bracket.atmr")),
+            None
+        );
     }
 
     #[cfg(windows)]
     #[test]
     fn windows_path_round_trips_losslessly() {
-        let uri = StorageUri::from_local_path(Path::new(r"C:\Users\lars\bracket.atmr"));
+        let uri = StorageUri::from_local_path(Path::new(r"C:\Users\lars\bracket.atmr")).unwrap();
         let back = uri.to_local_path().unwrap();
         assert_eq!(back, PathBuf::from("C:/Users/lars/bracket.atmr"));
-        assert_eq!(StorageUri::from_local_path(&back), uri);
+        assert_eq!(StorageUri::from_local_path(&back), Some(uri));
     }
 
     /// Off Windows a drive letter names nothing local, so `to_local_path`
@@ -300,10 +391,10 @@ mod tests {
 
     #[test]
     fn posix_path_round_trips_losslessly() {
-        let uri = StorageUri::from_local_path(Path::new("/home/lars/bracket.atmr"));
+        let uri = StorageUri::from_local_path(Path::new("/home/lars/bracket.atmr")).unwrap();
         assert_eq!(uri.to_string(), "file:///home/lars/bracket.atmr");
         let back = uri.to_local_path().unwrap();
-        assert_eq!(StorageUri::from_local_path(&back), uri);
+        assert_eq!(StorageUri::from_local_path(&back), Some(uri));
     }
 
     #[test]
