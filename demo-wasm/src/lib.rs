@@ -4,6 +4,9 @@
 //! surface backed by an `HtmlCanvasElement`. JS drives the animation
 //! loop via `requestAnimationFrame` calling `render(w, h, frame_ms)`,
 //! and forwards browser mouse events through the `on_mouse_*` exports.
+//! Keyboard input needs no JS glue: [`install_keyboard`] hands the DOM
+//! `keydown` / `keyup` / clipboard plumbing to agg-gui's `web_adapter`,
+//! which feeds `App::on_key_down` / `on_key_up` directly.
 //!
 //! Modeled (compactly) on `agg-gui/demo-wasm/src/lib.rs` with the
 //! inspector / multi-touch / persistence pieces stripped.
@@ -291,6 +294,8 @@ async fn init_wgpu() -> Result<(), String> {
     APP.with(|c| *c.borrow_mut() = Some(app));
     DEBUG.with(|c| *c.borrow_mut() = Some(debug));
 
+    install_keyboard();
+
     // The web equivalent of winit's initial `RedrawRequested`. The app
     // defaults to Reactive mode, whose paint gate (`should_paint`) only
     // fires on an animation, an invalidation, or a due deadline —
@@ -510,6 +515,40 @@ fn resize_surface(width: u32, height: u32) {
     });
 }
 
+/// Wire physical-keyboard input (and the clipboard bridge that rides
+/// along with it) into the live `App`.
+///
+/// The native shell gets keys from winit; on the web the equivalent
+/// plumbing lives in agg-gui's `web_adapter`, which registers
+/// window-level `keydown` / `keyup` / `copy` / `cut` / `paste`
+/// listeners, translates `KeyboardEvent.key` into [`agg_gui::Key`],
+/// and `preventDefault()`s only the keys an app actually consumes
+/// (typing / navigation / the Ctrl-C,X,A,Z,Y set) so Tab, F5, F12 and
+/// other browser chrome keep working. Using it keeps the shell pure
+/// Rust — no keyboard glue in `index.html`.
+///
+/// Listeners are window-level, so no canvas `tabindex` / focus dance is
+/// needed: keys reach the app whether or not the canvas is focused,
+/// except while a real DOM editor (`<input>`, `contenteditable`, …) has
+/// focus, which the adapter deliberately leaves to the browser.
+///
+/// Like the mouse handlers, this doesn't force a repaint: widgets that
+/// change visually mark themselves dirty from `on_event`, and the
+/// requestAnimationFrame loop's paint gate picks that up.
+fn install_keyboard() {
+    agg_gui::web_adapter::install_keyboard_listeners(|key, mods, pressed| {
+        APP.with(|c| {
+            if let Some(app) = c.borrow_mut().as_mut() {
+                if pressed {
+                    app.on_key_down(key, mods);
+                } else {
+                    app.on_key_up(key, mods);
+                }
+            }
+        });
+    });
+}
+
 #[wasm_bindgen]
 pub fn on_mouse_move(x: f64, y: f64) {
     CURSOR.with(|c| *c.borrow_mut() = (x, y));
@@ -521,33 +560,40 @@ pub fn on_mouse_move(x: f64, y: f64) {
 }
 
 #[wasm_bindgen]
-pub fn on_mouse_down(x: f64, y: f64, button: u8) {
+pub fn on_mouse_down(x: f64, y: f64, button: u8, ctrl: bool, shift: bool, alt: bool, meta: bool) {
     CURSOR.with(|c| *c.borrow_mut() = (x, y));
     let b = mouse_button_from_js(button);
+    let mods = modifiers_from_js(ctrl, shift, alt, meta);
     APP.with(|c| {
         if let Some(app) = c.borrow_mut().as_mut() {
-            app.on_mouse_down(x, y, b, Modifiers::default());
+            app.on_mouse_down(x, y, b, mods);
         }
     });
 }
 
 #[wasm_bindgen]
-pub fn on_mouse_up(x: f64, y: f64, button: u8) {
+pub fn on_mouse_up(x: f64, y: f64, button: u8, ctrl: bool, shift: bool, alt: bool, meta: bool) {
     CURSOR.with(|c| *c.borrow_mut() = (x, y));
     let b = mouse_button_from_js(button);
+    let mods = modifiers_from_js(ctrl, shift, alt, meta);
     APP.with(|c| {
         if let Some(app) = c.borrow_mut().as_mut() {
-            app.on_mouse_up(x, y, b, Modifiers::default());
+            app.on_mouse_up(x, y, b, mods);
         }
     });
 }
 
 #[wasm_bindgen]
-pub fn on_mouse_wheel(x: f64, y: f64, delta_y: f64) {
+pub fn on_mouse_wheel(x: f64, y: f64, delta_y: f64, ctrl: bool, shift: bool, alt: bool, meta: bool) {
     CURSOR.with(|c| *c.borrow_mut() = (x, y));
+    let mods = modifiers_from_js(ctrl, shift, alt, meta);
     APP.with(|c| {
         if let Some(app) = c.borrow_mut().as_mut() {
-            app.on_mouse_wheel(x, y, delta_y);
+            // `_xy_mods` rather than the 2-arg `on_mouse_wheel`: without
+            // the modifiers, Ctrl+wheel zoom and Shift+wheel horizontal
+            // scroll were dead on web. delta_x is 0 — the JS glue only
+            // forwards vertical wheel today.
+            app.on_mouse_wheel_xy_mods(x, y, 0.0, delta_y, mods);
         }
     });
 }
@@ -558,6 +604,25 @@ fn mouse_button_from_js(b: u8) -> MouseButton {
         1 => MouseButton::Middle,
         2 => MouseButton::Right,
         n => MouseButton::Other(n),
+    }
+}
+
+/// Build agg-gui [`Modifiers`] from the raw `MouseEvent` booleans the JS
+/// glue forwards.
+///
+/// These come from the mouse event itself rather than from cached
+/// keyboard state: the DOM event's `ctrlKey` / `shiftKey` / … are
+/// authoritative even when the page lost and regained focus mid-drag (an
+/// Alt+Tab away and back never delivers the matching `keyup`, so cached
+/// key state would report a modifier that is no longer held). Same
+/// reasoning as the native shell reading winit's `ModifiersChanged`
+/// rather than tracking key events itself.
+fn modifiers_from_js(ctrl: bool, shift: bool, alt: bool, meta: bool) -> Modifiers {
+    Modifiers {
+        ctrl,
+        shift,
+        alt,
+        meta,
     }
 }
 

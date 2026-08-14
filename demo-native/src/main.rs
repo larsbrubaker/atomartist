@@ -553,7 +553,14 @@ fn main() {
                         MouseScrollDelta::LineDelta(_, y) => (y as f64) * 60.0,
                         MouseScrollDelta::PixelDelta(p) => p.y,
                     };
-                    app.on_mouse_wheel(cursor_x, cursor_y, dy);
+                    // `_xy_mods` rather than the 2-arg `on_mouse_wheel`:
+                    // that wrapper hardcodes `Modifiers::default()`, so
+                    // Ctrl+wheel zoom / Shift+wheel horizontal scroll
+                    // never reached the widgets. `current_mods` is
+                    // already tracked from `ModifiersChanged` below.
+                    // delta_x is 0 — winit's horizontal wheel component
+                    // isn't plumbed through here yet.
+                    app.on_mouse_wheel_xy_mods(cursor_x, cursor_y, 0.0, dy, current_mods);
                 }
                 Event::WindowEvent {
                     event: WindowEvent::ModifiersChanged(mods), ..
