@@ -291,18 +291,30 @@ async fn init_wgpu() -> Result<(), String> {
 /// Render a single frame. JS's animation loop calls this every
 /// requestAnimationFrame tick; until init resolves it's a no-op.
 ///
-/// `frame_ms` is the wall-clock interval JS measured between this
-/// callback and the last one; we push it into the shared
-/// `FrameHistory` so the View → Debug → Performance window has live
-/// data even on WASM where we can't easily measure paint cost.
+/// `frame_ms` is the interval JS measured between this callback and the
+/// last one. It is *not* what the Performance graph plots — see
+/// [`should_paint`] and the timing push below.
 #[wasm_bindgen]
 pub fn render(width: u32, height: u32, frame_ms: f64) {
+    let _ = frame_ms;
+    let t_frame = web_time::Instant::now();
+
     let (cur_w, cur_h) = SIZE.with(|s| *s.borrow());
     let resized = cur_w != width || cur_h != height;
     if resized {
         resize_surface(width, height);
         SIZE.with(|s| *s.borrow_mut() = (width, height));
     }
+
+    // Honour the Performance window's Reactive / Continuous selector.
+    // requestAnimationFrame fires at vsync no matter what the app
+    // needs, so without this gate the WASM shell painted every single
+    // tick and Reactive mode did nothing — the mode switch was inert on
+    // web while working correctly on native.
+    if !resized && !should_paint() {
+        return;
+    }
+
     let acquired = SURFACE.with(|c| {
         c.borrow().as_ref().map(|s| s.get_current_texture())
     });
@@ -371,16 +383,77 @@ pub fn render(width: u32, height: u32, frame_ms: f64) {
                     app.paint(ctx);
                     ctx.end_frame();
 
-                    // Use the rAF delta JS provided — it's already
-                    // measuring real wall-clock frame time.
-                    if frame_ms.is_finite() && frame_ms > 0.0 {
-                        debug.frame_history.borrow_mut().push(frame_ms as f32);
+                    // Plot the frame cost we measured ourselves, which
+                    // is what `demo-native::paint_frame` pushes too, so
+                    // the two platforms' Performance graphs mean the
+                    // same thing and can be compared directly.
+                    //
+                    // This used to push JS's `frame_ms` argument, which
+                    // the page was supplying as the raw
+                    // requestAnimationFrame *timestamp* rather than an
+                    // interval — so the readout showed milliseconds
+                    // since page load (six-figure numbers that climbed
+                    // forever) instead of frame time.
+                    let elapsed = t_frame.elapsed().as_secs_f32() * 1000.0;
+                    if elapsed.is_finite() {
+                        debug.frame_history.borrow_mut().push(elapsed);
                     }
                 }
             });
         });
     });
     frame.present();
+}
+
+/// Whether this requestAnimationFrame tick should actually paint.
+///
+/// Ports `demo-native`'s redraw policy (see its `AboutToWait` /
+/// post-paint arms) to the web loop, so the Reactive / Continuous
+/// selector behaves identically on both platforms:
+///
+///   * Continuous — always paint, so the FPS readout reflects a real
+///     sustained framerate;
+///   * Reactive — paint only when an animation, a widget invalidation,
+///     or a scheduled draw deadline asks for it.
+///
+/// Returning `false` skips the surface acquire and the whole
+/// layout/paint, which is the point: in Reactive mode an idle page
+/// should cost nothing per vsync tick. The rAF loop keeps running
+/// either way, so the next tick picks up any new invalidation — that is
+/// the web equivalent of winit's `request_redraw`.
+fn should_paint() -> bool {
+    let continuous = DEBUG.with(|dc| {
+        dc.borrow()
+            .as_ref()
+            .map(|d| d.run_mode.get() == agg_gui::RunMode::Continuous)
+            // Before init completes there is nothing to paint anyway.
+            .unwrap_or(false)
+    });
+    if continuous || agg_gui::animation::wants_draw() {
+        return true;
+    }
+    APP.with(|ac| {
+        let mut app_borrow = ac.borrow_mut();
+        let Some(app) = app_borrow.as_mut() else {
+            return false;
+        };
+        if app.wants_draw() {
+            return true;
+        }
+        // A widget may have asked to be redrawn at a future instant
+        // (caret blink, delayed tooltip). Paint once that deadline
+        // passes, matching native's `next_scheduled_redraw`.
+        let deadline = match (
+            agg_gui::animation::peek_next_draw_deadline(),
+            app.next_draw_deadline(),
+        ) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
+        deadline.is_some_and(|d| web_time::Instant::now() >= d)
+    })
 }
 
 fn resize_surface(width: u32, height: u32) {

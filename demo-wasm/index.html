@@ -95,9 +95,16 @@ async function main() {
   // Disable the right-click context menu so the canvas's own menu wins.
   canvas.addEventListener('contextmenu', e => e.preventDefault());
 
+  // `render`'s third argument is the *interval* since the previous
+  // tick, not the raw requestAnimationFrame timestamp. Passing `t`
+  // directly made the Performance window read milliseconds-since-page-
+  // load, which climbs forever and looked like a six-figure frame time.
+  let lastFrameTime = null;
   function loop(t) {
+    const deltaMs = lastFrameTime === null ? 0 : t - lastFrameTime;
+    lastFrameTime = t;
     syncCanvasSize();
-    render(canvas.width, canvas.height, t);
+    render(canvas.width, canvas.height, deltaMs);
     requestAnimationFrame(loop);
   }
   requestAnimationFrame(loop);
