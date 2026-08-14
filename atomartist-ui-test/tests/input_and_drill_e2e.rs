@@ -34,7 +34,7 @@ use atomartist_lib::registry::NodeRegistry;
 use atomartist_lib::socket_types::SocketType;
 use atomartist_lib::Graph;
 use atomartist_ui::breadcrumb_bar::BACK_BUTTON_CENTER_X;
-use atomartist_ui::menu_actions::confirm_discard_unsaved;
+use atomartist_ui::menu_actions::confirm_discard_unsaved_then;
 use atomartist_ui::top_menu_bar::NoFileDialogs;
 use atomartist_ui::AppState;
 use atomartist_ui_test::harness::DEFAULT_HEIGHT;
@@ -526,10 +526,10 @@ fn file_new_while_drilled_in_clears_stack_and_root() {
     // menu's `file.new` arm runs (`handle_action` is pub(crate); its arm
     // is exactly this pair of public calls, and `NoFileDialogs` answers
     // the unsaved prompt with Discard).
-    let dialogs = NoFileDialogs;
-    if confirm_discard_unsaved(h.state(), &dialogs) {
-        h.state().new_empty_project();
-    }
+    let dialogs: std::sync::Arc<dyn atomartist_ui::top_menu_bar::FileDialogProvider> =
+        std::sync::Arc::new(NoFileDialogs);
+    confirm_discard_unsaved_then(h.state(), &dialogs, |state| state.new_empty_project());
+    h.pump_until_idle(4);
 
     assert_eq!(h.state().edit_depth(), 0, "New must clear the drill-in stack");
     assert_eq!(

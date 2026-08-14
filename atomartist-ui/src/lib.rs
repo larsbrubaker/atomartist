@@ -8,6 +8,7 @@
 pub mod app_state;
 pub mod app_state_drill;
 pub mod app_state_files;
+pub mod app_state_files_import;
 pub mod app_state_model;
 pub mod app_state_storage;
 pub mod breadcrumb_bar;
@@ -32,7 +33,7 @@ pub mod viewport_overlay;
 pub use app_state::AppState;
 pub use app_state_files::MeshExportFormat;
 pub use app_state_model::{shared_model_for, AppStateModel};
-pub use app_state_storage::{display_uri, uri_exists, uri_file_stem};
+pub use app_state_storage::{display_uri, uri_file_stem};
 pub use debug_windows::{build_debug_windows, DebugWindowHandles};
 pub use first_paint::FirstPaintGate;
 pub use floating_overlay::{FloatingOverlayHandle, FloatingOverlayHost};

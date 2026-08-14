@@ -81,10 +81,12 @@
 //! an operation is in flight — the trait's purpose-built channel for an
 //! ongoing draw need, which propagates into retained ancestors.
 //!
-//! Relationship to [`crate::app_state_storage`]: that module's `await_job`
-//! is the *synchronous-only* bridge the current call sites in
-//! [`crate::app_state_files`] still use. This module is its asynchronous
-//! successor; the call sites move across in a later step.
+//! Relationship to [`crate::app_state_storage`]: that module hands out
+//! the provider [`Job`]s and stops there. Every call site in
+//! [`crate::app_state_files`], [`crate::app_state_files_import`], and
+//! [`crate::menu_actions`] wraps one in a [`JobOp`] and submits it here —
+//! the synchronous `await_job` bridge those call sites used through
+//! Phase 4b is gone.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 

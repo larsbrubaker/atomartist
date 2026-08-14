@@ -208,7 +208,8 @@ fn menu_add_while_drilled_in_lands_in_template_not_root() {
     let template_before = template.lock().unwrap().node_count();
 
     assert!(state.enter_component(inst));
-    let dialogs = NoFileDialogs;
+    let dialogs: std::sync::Arc<dyn crate::top_menu_bar::FileDialogProvider> =
+        std::sync::Arc::new(NoFileDialogs);
     let debug = DebugWindowHandles::new(DebugWindowsState::default());
     crate::menu_actions::handle_action(&state, &dialogs, &debug, "add.Box");
 

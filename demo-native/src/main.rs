@@ -9,6 +9,7 @@
 //! which AtomArtist doesn't need yet.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use agg_gui::{
@@ -17,7 +18,7 @@ use agg_gui::{
 use atomartist_storage::{LocalFsProvider, StorageRegistry};
 use atomartist_ui::{
     build_app, fresh_state_with_starter_graph_and_storage, install_theme_and_fonts,
-    top_menu_bar::FileDialogProvider, uri_exists, MainWindowState, UiSettings, WindowPlacement,
+    top_menu_bar::FileDialogProvider, MainWindowState, UiSettings, WindowPlacement,
 };
 use demo_wgpu::WgpuGfxCtx;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
@@ -25,59 +26,21 @@ use winit::event::{ElementState, Event, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::{Window, WindowAttributes};
 
+mod close_gate;
 mod dialogs;
 mod frame;
 mod gpu;
+mod shell_settings;
 
+use close_gate::{deferred_close_decision, DeferredClose};
 use dialogs::NativeDialogs;
 use frame::paint_frame;
 use gpu::Gpu;
+use shell_settings::{
+    compose_settings_blob, initial_normal_bounds, monitor_to_rect, settings_path,
+    write_settings_blob,
+};
 
-
-/// Cast a winit `MonitorHandle` to a plain `(x, y, w, h)` rect in
-/// physical pixels — the shape `MainWindowState::fits_on_monitors`
-/// expects so the validation helper stays winit-agnostic.
-fn monitor_to_rect(m: winit::monitor::MonitorHandle) -> (i32, i32, u32, u32) {
-    let pos = m.position();
-    let size = m.size();
-    (pos.x, pos.y, size.width, size.height)
-}
-
-/// Read the current outer position + inner size + maximized state
-/// from the live `Window`. Used at startup to seed the
-/// "last normal bounds" cache and during persistence to capture
-/// the current maximized flag.
-fn current_main_window_state(window: &Window) -> MainWindowState {
-    let pos = window.outer_position().unwrap_or(PhysicalPosition::new(0, 0));
-    let size = window.inner_size();
-    MainWindowState {
-        x: pos.x,
-        y: pos.y,
-        width: size.width,
-        height: size.height,
-        maximized: window.is_maximized(),
-    }
-}
-
-/// Pick the initial value for the live "last normal bounds" cache.
-///
-/// We always prefer the saved bounds (with the recentered position
-/// if the saved one was off-screen now) over reading the live
-/// window — when the shell has just called `set_maximized(true)`,
-/// `outer_position()` and `inner_size()` report the maximized
-/// monitor-fill geometry, which is exactly the wrong thing to seed
-/// the "last non-maximized bounds" cache with. Falling back to the
-/// live window is reserved for the genuine first-launch case where
-/// no saved bounds exist at all.
-fn initial_normal_bounds(window: &Window, saved: Option<MainWindowState>) -> MainWindowState {
-    match saved {
-        Some(s) if s.has_valid_geometry() => MainWindowState {
-            maximized: window.is_maximized(),
-            ..s
-        },
-        _ => current_main_window_state(window),
-    }
-}
 
 fn translate_winit_button(b: winit::event::MouseButton) -> Option<MouseButton> {
     use winit::event::MouseButton as W;
@@ -111,38 +74,6 @@ fn translate_winit_key(key: &winit::keyboard::Key) -> Option<Key> {
             _ => None,
         },
         _ => None,
-    }
-}
-
-/// Cross-platform "user config dir" for AtomArtist's settings file.
-/// We avoid the `dirs` crate dependency by reading the well-known
-/// environment variables directly:
-///   - Windows: `%APPDATA%\atomartist\settings.txt`
-///   - macOS: `$HOME/Library/Application Support/atomartist/settings.txt`
-///   - Linux / BSD: `$XDG_CONFIG_HOME/atomartist/settings.txt`
-///     or `$HOME/.config/atomartist/settings.txt`
-fn settings_path() -> Option<PathBuf> {
-    #[cfg(target_os = "windows")]
-    {
-        std::env::var_os("APPDATA")
-            .map(PathBuf::from)
-            .map(|p| p.join("atomartist").join("settings.txt"))
-    }
-    #[cfg(target_os = "macos")]
-    {
-        std::env::var_os("HOME").map(PathBuf::from).map(|p| {
-            p.join("Library")
-                .join("Application Support")
-                .join("atomartist")
-                .join("settings.txt")
-        })
-    }
-    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-    {
-        std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-            .map(|p| p.join("atomartist").join("settings.txt"))
     }
 }
 
@@ -342,34 +273,33 @@ fn main() {
         state.apply_ui_settings(loaded);
     }
     // Auto-reopen the last project the user worked on so they
-    // resume where they left off. Failure is non-fatal — the
-    // starter graph stays in place and we log the reason. We do
-    // this *before* mounting the widget tree so the very first
-    // paint shows the restored project, not a one-frame flash of
-    // the starter scene.
+    // resume where they left off. Failure is non-fatal AND not an
+    // error: nobody asked for this open, so a project deleted since
+    // the last session is news, not a fault — `reopen_last_project`
+    // reports it at Info level and prunes the recent entry. (An
+    // error notice would be sticky, sitting in the status bar's one
+    // slot suppressing the user's first "Saved …".) No separate
+    // existence pre-check: a deleted file, or one written by a
+    // backend this build no longer registers, fails the read with
+    // exactly the message we would have printed. We submit *before*
+    // mounting the widget tree so the very first paint shows the
+    // restored project, not a one-frame flash of the starter scene
+    // — the `file:` provider settles its job inline, so the open is
+    // already applied when this returns.
     if let Some(last) = loaded_settings
         .as_ref()
         .and_then(|s| s.last_project_path.as_ref())
     {
-        // Existence is a question for the provider that owns the URI's
-        // scheme, not for `std::fs` — a project saved to a backend this
-        // build no longer registers reads as "not there" and we start
-        // fresh instead of failing.
-        if uri_exists(&state.storage, last) {
-            if let Err(e) = state.load_graph_from_uri(last) {
-                eprintln!("warning: could not reopen last project {}: {}", last, e);
-            }
-        } else {
-            eprintln!(
-                "info: last project {} no longer exists, starting fresh",
-                last
-            );
-        }
+        state.reopen_last_project(last);
     }
     // Clone for the persistence loop — `AppState` is `Arc`-shared
     // internally so this is just an Arc bump per field.
     let state_for_save = state.clone();
     let dialogs: std::sync::Arc<dyn FileDialogProvider> = std::sync::Arc::new(NativeDialogs);
+    // The close path needs the same provider the widget tree uses, and
+    // needs it as an `Arc`: a failed save-on-close raises its modal from
+    // the write's continuation, which outlives this event.
+    let dialogs_for_close = dialogs.clone();
     let (root, debug) = build_app(state, dialogs, loaded_settings);
     let mut app = App::new(root);
     // Clone for the persistence + paint loops — every field is an
@@ -403,6 +333,11 @@ fn main() {
     // diagnostic runs where you want enough samples for the periodic
     // frame-time / scene-time loggers to print.
     let mut frames_painted: u32 = 0;
+    // Set by the close prompt's Save continuation: "the save the user
+    // asked for is confirmed, you may now shut down". An `AtomicBool`
+    // rather than a `Cell` because the continuation is a `Send` closure
+    // owned by the pump.
+    let close_when_idle = Arc::new(AtomicBool::new(false));
     let screenshot_path = cli.screenshot_to.clone();
     let warmup_frames: u32 = std::env::var("ATOMARTIST_WARMUP_FRAMES")
         .ok()
@@ -422,17 +357,31 @@ fn main() {
                 } => {
                     // Unsaved-changes gate: same Save / Discard / Cancel
                     // flow the File menu's destructive actions use.
-                    // Cancel (or a cancelled/failed save) keeps the app
-                    // running. Skipped in screenshot mode — those runs
-                    // are headless and must never block on a dialog.
-                    if screenshot_path.is_none()
-                        && state_for_save.has_unsaved_changes()
-                        && !atomartist_ui::menu_actions::confirm_discard_unsaved(
+                    // Skipped in screenshot mode — those runs are
+                    // headless and must never block on a dialog.
+                    //
+                    // The gate is asynchronous now: choosing **Save**
+                    // submits the write and the permission to close
+                    // arrives in that write's continuation, so we set a
+                    // flag there instead of returning a verdict. With the
+                    // `file:` provider the job is already settled when
+                    // `submit_op` sees it, the continuation runs inline,
+                    // and the flag is set before the call below returns —
+                    // the window still closes on this very event. With a
+                    // slower provider we stay open and the `AboutToWait`
+                    // arm finishes the close once the pump delivers the
+                    // result; a failed save leaves the flag clear, the
+                    // window open, and the error notice on screen.
+                    if screenshot_path.is_none() && !close_when_idle.load(Ordering::SeqCst) {
+                        let flag = close_when_idle.clone();
+                        atomartist_ui::menu_actions::confirm_discard_unsaved_then(
                             &state_for_save,
-                            &NativeDialogs,
-                        )
-                    {
-                        return;
+                            &dialogs_for_close,
+                            move |_state| flag.store(true, Ordering::SeqCst),
+                        );
+                        if !close_when_idle.load(Ordering::SeqCst) {
+                            return;
+                        }
                     }
                     // Flush pending settings before exiting so the
                     // last-opened project path (and theme / accent /
@@ -442,22 +391,13 @@ fn main() {
                     // a non-zero `mouse_buttons_held` count that
                     // would otherwise skip the final write.
                     if let Some(ref path) = settings_path {
-                        let mut s = state_for_save.ui_settings();
-                        s.debug_windows = debug_for_save.current_state();
-                        let mut main = normal_bounds_for_save.get();
-                        main.maximized = window_for_save.is_maximized();
-                        s.main_window = main;
-                        let blob = s.to_text();
-                        if let Some(parent) = path.parent() {
-                            let _ = std::fs::create_dir_all(parent);
-                        }
-                        if let Err(e) = std::fs::write(path, blob) {
-                            eprintln!(
-                                "warning: failed to save UI settings to {}: {}",
-                                path.display(),
-                                e
-                            );
-                        }
+                        let blob = compose_settings_blob(
+                            &state_for_save,
+                            &debug_for_save,
+                            &normal_bounds_for_save,
+                            &window_for_save,
+                        );
+                        write_settings_blob(path, &blob);
                     }
                     // Last chance for in-flight storage work: the event
                     // loop is about to stop calling `pump_storage`, so a
@@ -621,34 +561,14 @@ fn main() {
                         settings_auto_save.tick(
                             mouse_buttons_held == 0,
                             || {
-                                // Compose: HUD state from AppState
-                                // plus floating-window layout from
-                                // the live debug handles plus the
-                                // OS window's last non-maximized
-                                // bounds + current maximized flag.
-                                // None of these own each other, so
-                                // the shell stitches them together
-                                // each time we render the
-                                // persistence blob.
-                                let mut s = state_for_save.ui_settings();
-                                s.debug_windows = debug_for_save.current_state();
-                                let mut main = normal_bounds_for_save.get();
-                                main.maximized = window_for_save.is_maximized();
-                                s.main_window = main;
-                                s.to_text()
+                                compose_settings_blob(
+                                    &state_for_save,
+                                    &debug_for_save,
+                                    &normal_bounds_for_save,
+                                    &window_for_save,
+                                )
                             },
-                            |blob| {
-                                if let Some(parent) = path.parent() {
-                                    let _ = std::fs::create_dir_all(parent);
-                                }
-                                if let Err(e) = std::fs::write(path, blob) {
-                                    eprintln!(
-                                        "warning: failed to save UI settings to {}: {}",
-                                        path.display(),
-                                        e
-                                    );
-                                }
-                            },
+                            |blob| write_settings_blob(path, blob),
                         );
                     }
                     // Some widgets (notably the tumble-cube click-to-orient
@@ -713,6 +633,43 @@ fn main() {
                     // branch below turns into the next redraw — so the
                     // loop keeps ticking until the queue drains.
                     state_for_save.pump_storage();
+
+                    // Deferred close: the user answered "Save" to the
+                    // close prompt and that save has now landed (the
+                    // pump above ran its continuation, which set the
+                    // flag). Re-validate before acting on it — the
+                    // permission was given for the document as it stood
+                    // at the click, and the user may have kept editing
+                    // while the write was in flight. See `close_gate`.
+                    match deferred_close_decision(
+                        close_when_idle.load(Ordering::SeqCst),
+                        state_for_save.has_unsaved_changes(),
+                    ) {
+                        DeferredClose::NotRequested => {}
+                        DeferredClose::CancelledByNewEdits => {
+                            close_when_idle.store(false, Ordering::SeqCst);
+                            state_for_save.notify(
+                                atomartist_ui::NoticeLevel::Info,
+                                "Close cancelled — there are unsaved changes made \
+                                 since you chose Save.",
+                            );
+                        }
+                        DeferredClose::Close => {
+                            if let Some(ref path) = settings_path {
+                                let blob = compose_settings_blob(
+                                    &state_for_save,
+                                    &debug_for_save,
+                                    &normal_bounds_for_save,
+                                    &window_for_save,
+                                );
+                                write_settings_blob(path, &blob);
+                            }
+                            state_for_save
+                                .drain_pending_ops(std::time::Duration::from_secs(5));
+                            elwt.exit();
+                            return;
+                        }
+                    }
 
                     // Continuous run-mode keeps the loop spinning every
                     // frame regardless of widget invalidation — required

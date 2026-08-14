@@ -210,13 +210,18 @@ fn dropped_mesh_is_wired_to_output_and_visible() {
 fn dropping_an_atmr_project_merges_into_the_scene() {
     // Scene formats route through import_scene_file: dropping a saved
     // project merges its nodes (minus Output) into the current graph.
+    // The drop handler submits the read to the frame pump; the `file:`
+    // provider settles it inline, so the merge is applied by the time
+    // `drop_file` returns (the pump call after it is belt-and-braces for
+    // an asynchronous provider).
     let mut h = TestHarness::with_starter_graph();
     // OS drops deliver a `PathBuf`, so this project has to be a real
     // file: save it through the harness's `file:` provider and drop the
     // same path the shell would hand us.
     let proj = std::env::temp_dir().join("__atmr_drop_project.atmr");
     let proj_uri = StorageUri::from_local_path(&proj).expect("temp path has a URI form");
-    h.state().save_graph_to_uri(&proj_uri).unwrap();
+    h.state().save_project(&proj_uri);
+    h.pump_until_idle(4);
     let before = h.state().graph.lock().unwrap().node_count();
 
     let canvas = h.find_by_id("node-canvas").expect("canvas widget");
@@ -226,6 +231,7 @@ fn dropping_an_atmr_project_merges_into_the_scene() {
         720.0 - (b.y + b.height * 0.5),
         proj.clone(),
     );
+    h.pump_until_idle(4);
 
     assert_eq!(
         h.state().graph.lock().unwrap().node_count(),

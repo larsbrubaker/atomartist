@@ -41,19 +41,24 @@ fn save_then_load_round_trips_starter_graph_topology() {
 
 #[test]
 fn save_then_load_atmr_round_trips_through_app_state() {
-    // Exercises the public `AppState::save_graph_to_uri` →
-    // `AppState::load_graph_from_uri` pipeline through the ATMR (zip)
+    // Exercises the public `AppState::save_project` →
+    // `AppState::open_project` pipeline through the ATMR (zip)
     // container. Confirms `current_file` is updated, the stored blob is
     // a real zip (PK header), and the round-tripped graph preserves node
     // + edge counts. Storage is the harness's `MemoryProvider`, so this
     // never touches the filesystem.
+    //
+    // Both operations submit through the frame pump; the memory provider
+    // settles inline, but the pumps are here anyway so the test stays
+    // honest for an asynchronous provider.
     let h = TestHarness::with_starter_graph();
     let nodes_before = h.state().graph.lock().unwrap().nodes().count();
     let noodles_before = h.state().graph.lock().unwrap().noodles().len();
 
     let uri = memory_uri("round_trip.atmr");
 
-    h.state().save_graph_to_uri(&uri).expect("save_graph_to_uri");
+    h.state().save_project(&uri);
+    h.pump_until_idle(4);
     assert_eq!(
         h.state().current_file.lock().unwrap().clone(),
         Some(uri.clone()),
@@ -74,9 +79,8 @@ fn save_then_load_atmr_round_trips_through_app_state() {
     // the topology survived the round trip.
     h.state().new_empty_project();
     assert_eq!(h.state().graph.lock().unwrap().nodes().count(), 0);
-    h.state()
-        .load_graph_from_uri(&uri)
-        .expect("load_graph_from_uri");
+    h.state().open_project(&uri);
+    h.pump_until_idle(4);
     let nodes_after = h.state().graph.lock().unwrap().nodes().count();
     let noodles_after = h.state().graph.lock().unwrap().noodles().len();
     assert_eq!(nodes_before, nodes_after);
@@ -94,7 +98,8 @@ fn ui_settings_surface_current_file_as_last_project_path() {
     assert_eq!(h.state().ui_settings().last_project_path, None);
 
     let uri = memory_uri("settings_surface.atmr");
-    h.state().save_graph_to_uri(&uri).expect("save_graph_to_uri");
+    h.state().save_project(&uri);
+    h.pump_until_idle(4);
 
     assert_eq!(h.state().ui_settings().last_project_path, Some(uri));
 }

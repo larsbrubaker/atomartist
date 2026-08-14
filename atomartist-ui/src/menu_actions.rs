@@ -3,9 +3,37 @@
 //! mutations, file dialogs, and debug-window toggles.
 //!
 //! Destructive file actions (`file.new`, `file.open`, recent-file
-//! opens) funnel through [`confirm_discard_unsaved`] so unsaved work
-//! always gets a Save / Discard / Cancel prompt first. The same helper
-//! is exported for the platform shell's window-close path.
+//! opens) funnel through [`confirm_discard_unsaved_then`] so unsaved
+//! work always gets a Save / Discard / Cancel prompt first. The same
+//! helper is exported for the platform shell's window-close path.
+//!
+//! # Why the gate takes a continuation
+//!
+//! Saving is asynchronous (Phase 4c): [`AppState::save_project_then`]
+//! submits the write to the frame pump and returns before the bytes have
+//! landed. A gate that returned `bool` could therefore only ever report
+//! "the save was *started*", and the follow-up action would run against a
+//! project that might yet fail to save. So the follow-up is handed *in*,
+//! and runs inside the save's continuation — immediately for the local
+//! providers (their jobs are already settled when `submit_op` sees them),
+//! a frame or more later for a network one. A failed or cancelled save
+//! simply never runs it; the error notice explains why.
+//!
+//! The blocking `rfd` pickers stay synchronous — they are native modal
+//! dialogs, not storage IO.
+//!
+//! # How failures are reported
+//!
+//! Save and open failures raise a modal (`FileDialogProvider::show_error`)
+//! *as well as* the status-bar notice; export, import, and the recent-list
+//! prune stay notice-only. See `docs/storage-architecture-plan.md` §7 for
+//! the reasoning — in short, only the first two lose work the user cannot
+//! recover by repeating the action. That is why every entry point here
+//! takes the dialogs as an `Arc<dyn FileDialogProvider>`: the modal is
+//! raised from the operation's continuation, which outlives the menu
+//! callback whenever the provider is asynchronous.
+
+use std::sync::Arc;
 
 use agg_gui::theme::{AccentColor, ThemePreference};
 use atomartist_lib::graph::undo_commands::AddNodeCmd;
@@ -13,44 +41,127 @@ use atomartist_storage::StorageUri;
 
 use crate::app_state::AppState;
 use crate::app_state_files::MeshExportFormat;
-use crate::app_state_storage::{display_uri, uri_exists, uri_file_stem};
+use crate::app_state_storage::{display_uri, stat_job, uri_file_stem, uri_label};
 use crate::debug_windows::DebugWindowHandles;
+use crate::storage_ops::{JobOp, NoticeLevel};
 use crate::top_menu_bar::{FileDialogProvider, UnsavedChoice};
 
-/// Gate for actions that would discard the current graph. Returns
-/// `true` when the caller may proceed:
-/// - no unsaved changes → proceed silently,
-/// - user picks **Save** → saved successfully (prompting for a path if
-///   the project was never saved); a cancelled or failed save blocks,
-/// - user picks **Discard** → proceed,
-/// - user picks **Cancel** → block.
-pub fn confirm_discard_unsaved(state: &AppState, dialogs: &dyn FileDialogProvider) -> bool {
+/// Gate for actions that would discard the current graph. `proceed` runs
+/// when it is safe to continue:
+/// - no unsaved changes → immediately,
+/// - user picks **Save** → from the save's continuation, once the write
+///   is confirmed (never, if the picker was cancelled or the write
+///   failed),
+/// - user picks **Discard** → immediately,
+/// - user picks **Cancel** → never.
+///
+/// Callers must not hold an [`AppState`] lock across this call: with a
+/// local provider `proceed` runs on the caller's stack.
+///
+/// Takes the dialogs as an `Arc` because a failed Save has to raise a
+/// modal from inside the write's continuation, which outlives the caller
+/// whenever the provider is asynchronous.
+pub fn confirm_discard_unsaved_then(
+    state: &AppState,
+    dialogs: &Arc<dyn FileDialogProvider>,
+    proceed: impl FnOnce(&AppState) + Send + 'static,
+) {
     if !state.has_unsaved_changes() {
-        return true;
+        proceed(state);
+        return;
     }
     match dialogs.confirm_unsaved_changes() {
-        UnsavedChoice::Save => save_current(state, dialogs),
-        UnsavedChoice::Discard => true,
-        UnsavedChoice::Cancel => false,
+        UnsavedChoice::Save => save_current_then(state, dialogs, proceed),
+        UnsavedChoice::Discard => proceed(state),
+        UnsavedChoice::Cancel => {}
     }
 }
 
 /// Save to the current location, prompting for one when the project has
-/// never been saved. Returns `true` on a completed save.
-pub fn save_current(state: &AppState, dialogs: &dyn FileDialogProvider) -> bool {
+/// never been saved.
+pub fn save_current(state: &AppState, dialogs: &Arc<dyn FileDialogProvider>) {
+    save_current_then(state, dialogs, |_state| {});
+}
+
+/// [`save_current`] plus a follow-up that runs only once the write is
+/// confirmed — the sequencing primitive behind
+/// [`confirm_discard_unsaved_then`].
+pub fn save_current_then(
+    state: &AppState,
+    dialogs: &Arc<dyn FileDialogProvider>,
+    on_success: impl FnOnce(&AppState) + Send + 'static,
+) {
     let existing = state.current_file.lock().unwrap().clone();
     let target = match existing {
         Some(uri) => Some(uri),
         None => dialogs.pick_save_project("untitled.atmr"),
     };
-    let Some(uri) = target else { return false };
-    match state.save_graph_to_uri(&uri) {
-        Ok(()) => true,
-        Err(e) => {
-            dialogs.show_error(&format!("Save failed: {}", e));
-            false
+    // A cancelled picker is not a failure and gets no notice; it just
+    // means nothing (including the follow-up) happens.
+    let Some(uri) = target else { return };
+    save_project_reporting(state, dialogs, &uri, on_success);
+}
+
+/// Save to `uri`, reporting a failure **both** ways: the status-bar
+/// notice every storage continuation posts, and a modal.
+///
+/// Why a modal here and not on export (see
+/// `docs/storage-architecture-plan.md` §7): losing a save costs the user
+/// work they cannot get back by repeating the action, and the status
+/// bar's single line is easy to miss — especially on the window-close
+/// path, where the next thing that happens is the app going away.
+fn save_project_reporting(
+    state: &AppState,
+    dialogs: &Arc<dyn FileDialogProvider>,
+    uri: &StorageUri,
+    on_success: impl FnOnce(&AppState) + Send + 'static,
+) {
+    let dialogs = dialogs.clone();
+    state.save_project_with_outcome(uri, move |state, outcome| match outcome {
+        Ok(()) => on_success(state),
+        Err(message) => {
+            state.notify(NoticeLevel::Error, message.clone());
+            dialogs.show_error(&format!("Save failed: {message}"));
         }
+    });
+}
+
+/// Open `uri`, reporting a failure both as a status-bar notice and a
+/// modal — the same policy as [`save_project_reporting`], for the same
+/// reason: an open the user explicitly asked for that silently does
+/// nothing is indistinguishable from a hang.
+fn open_project_reporting(
+    state: &AppState,
+    dialogs: &Arc<dyn FileDialogProvider>,
+    uri: &StorageUri,
+) {
+    let dialogs = dialogs.clone();
+    state.open_project_with_outcome(uri, move |state, outcome| {
+        if let Err(message) = outcome {
+            state.notify(NoticeLevel::Error, message.clone());
+            dialogs.show_error(&format!("Open failed: {message}"));
+        }
+    });
+}
+
+/// Cheap re-entry guard for the destructive file actions.
+///
+/// Double-clicking File → Open (or New / Save) while a slow provider
+/// still has the previous chain in flight used to re-prompt and
+/// double-submit. Refusing outright while *anything* is in flight is
+/// blunt — a background export blocks a Save — but it is honest, and it
+/// cannot produce the two-saves-racing outcome that per-chain flags would
+/// still have to be careful about. Returns `true` when the action should
+/// be dropped.
+fn storage_busy(state: &AppState) -> bool {
+    if state.pending_op_count() == 0 {
+        return false;
     }
+    state.notify(
+        NoticeLevel::Info,
+        "Storage is busy — try again in a moment.",
+    );
+    true
 }
 
 /// Suggested export filename: current project stem (or "export") plus
@@ -66,10 +177,44 @@ fn export_default_name(state: &AppState, ext: &str) -> String {
     format!("{stem}.{ext}")
 }
 
-fn open_project_at(state: &AppState, dialogs: &dyn FileDialogProvider, uri: &StorageUri) {
-    if let Err(e) = state.load_graph_from_uri(uri) {
-        dialogs.show_error(&format!("Open failed: {}", e));
-    }
+/// Open a project remembered in the recent list.
+///
+/// The entry may be stale (file deleted, or written by a provider this
+/// build no longer registers), so the existence check is a real storage
+/// operation: a `stat` job whose continuation either prunes the entry —
+/// leaving a notice that says so — or runs the unsaved-changes gate and
+/// opens the project.
+///
+/// Takes the dialogs as an `Arc` because the gate has to be reached from
+/// inside that continuation, which outlives the menu callback whenever
+/// the provider is asynchronous.
+fn open_recent(state: &AppState, dialogs: &Arc<dyn FileDialogProvider>, uri: StorageUri) {
+    let dialogs = dialogs.clone();
+    let job = stat_job(&state.storage, &uri);
+    state.submit_op(Box::new(JobOp::new(
+        format!("Checking {}", uri_label(&uri)),
+        job,
+        move |state, result| {
+            // An unknown scheme, a failed stat, and "nothing there" all
+            // read the same way: the entry cannot be opened, so it
+            // leaves the list.
+            if !matches!(result, Ok(Some(_))) {
+                state.notify(
+                    NoticeLevel::Error,
+                    format!(
+                        "{} no longer exists — removing it from the recent list.",
+                        display_uri(&uri)
+                    ),
+                );
+                state.recent_projects.lock().unwrap().retain(|u| u != &uri);
+                return;
+            }
+            let opener = dialogs.clone();
+            confirm_discard_unsaved_then(state, &dialogs, move |state| {
+                open_project_reporting(state, &opener, &uri)
+            });
+        },
+    )));
 }
 
 /// Apply the current theme + accent combination to agg-gui's live
@@ -88,7 +233,7 @@ fn apply_theme_visuals(theme: ThemePreference, accent: AccentColor) {
 
 pub(crate) fn handle_action(
     state: &AppState,
-    dialogs: &dyn FileDialogProvider,
+    dialogs: &Arc<dyn FileDialogProvider>,
     debug: &DebugWindowHandles,
     action: &str,
 ) {
@@ -160,21 +305,10 @@ pub(crate) fn handle_action(
         else {
             return;
         };
-        // Ask the provider whether the project is still there. An
-        // unknown scheme (a provider the current build doesn't
-        // register) reads the same as a deleted file: the entry can't
-        // be opened, so it leaves the list.
-        if !uri_exists(&state.storage, &uri) {
-            dialogs.show_error(&format!(
-                "{} no longer exists — removing it from the recent list.",
-                display_uri(&uri)
-            ));
-            state.recent_projects.lock().unwrap().retain(|u| u != &uri);
+        if storage_busy(state) {
             return;
         }
-        if confirm_discard_unsaved(state, dialogs) {
-            open_project_at(state, dialogs, &uri);
-        }
+        open_recent(state, dialogs, uri);
         return;
     }
     if let Some(ext) = action.strip_prefix("file.export.") {
@@ -187,16 +321,12 @@ pub(crate) fn handle_action(
         if let Some(format) = format {
             let name = export_default_name(state, format.extension());
             if let Some(uri) = dialogs.pick_save_export(format.extension(), &name) {
-                if let Err(e) = state.export_mesh_to_uri(&uri, format) {
-                    dialogs.show_error(&format!("Export failed: {}", e));
-                }
+                state.export_mesh_to_uri(&uri, format);
             }
         } else if ext == "atmr" {
             let name = export_default_name(state, "atmr");
             if let Some(uri) = dialogs.pick_save_export("atmr", &name) {
-                if let Err(e) = state.export_project_copy_to_uri(&uri) {
-                    dialogs.show_error(&format!("Export failed: {}", e));
-                }
+                state.export_project_copy_to_uri(&uri);
             }
         }
         return;
@@ -213,22 +343,37 @@ pub(crate) fn handle_action(
             state.schedule_evaluate_after_edit();
         }
         "file.new" => {
-            if confirm_discard_unsaved(state, dialogs) {
-                state.new_empty_project();
-            }
-        }
-        "file.open" => {
-            if !confirm_discard_unsaved(state, dialogs) {
+            if storage_busy(state) {
                 return;
             }
-            if let Some(uri) = dialogs.pick_open_project() {
-                open_project_at(state, dialogs, &uri);
+            confirm_discard_unsaved_then(state, dialogs, |state| state.new_empty_project());
+        }
+        "file.open" => {
+            if storage_busy(state) {
+                return;
             }
+            // The picker deliberately runs *after* the gate, inside its
+            // continuation: with an asynchronous provider the Save the
+            // user just asked for is still in flight here, and asking
+            // "which file?" before knowing that save succeeded would
+            // leave a picked file with nowhere to go.
+            let picker = dialogs.clone();
+            confirm_discard_unsaved_then(state, dialogs, move |state| {
+                if let Some(uri) = picker.pick_open_project() {
+                    open_project_reporting(state, &picker, &uri);
+                }
+            });
         }
         "file.save" => {
+            if storage_busy(state) {
+                return;
+            }
             save_current(state, dialogs);
         }
         "file.save_as" => {
+            if storage_busy(state) {
+                return;
+            }
             let suggested = state
                 .current_file
                 .lock()
@@ -237,18 +382,14 @@ pub(crate) fn handle_action(
                 .and_then(|uri| uri.file_name().map(|n| n.to_string()))
                 .unwrap_or_else(|| "untitled.atmr".to_string());
             if let Some(uri) = dialogs.pick_save_project(&suggested) {
-                if let Err(e) = state.save_graph_to_uri(&uri) {
-                    dialogs.show_error(&format!("Save failed: {}", e));
-                }
+                save_project_reporting(state, dialogs, &uri, |_state| {});
             }
         }
         "file.import" => {
             // Import adds to the scene rather than replacing it, so no
             // unsaved-changes gate.
             if let Some(uri) = dialogs.pick_import_file() {
-                if let Err(e) = state.import_scene_file(&uri) {
-                    dialogs.show_error(&format!("Import failed: {}", e));
-                }
+                state.import_scene_file(&uri);
             }
         }
         "help.about" => {
@@ -288,139 +429,8 @@ pub(crate) fn handle_action(
     }
 }
 
+// Tests live in `menu_actions_tests.rs` so this file stays under the
+// 800-line cap.
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::debug_windows::DebugWindowHandles;
-    use crate::settings::DebugWindowsState;
-    use crate::top_level::fresh_state_with_starter_graph;
-    use crate::top_menu_bar::NoFileDialogs;
-    use atomartist_lib::graph::node::NodeId;
-
-    fn debug_handles() -> DebugWindowHandles {
-        DebugWindowHandles::new(DebugWindowsState::default())
-    }
-
-    /// (position, id) for every node of `type_id` in the active graph.
-    fn nodes_of_type(state: &AppState, type_id: &str) -> Vec<([f64; 2], NodeId)> {
-        let ag = state.active_graph();
-        let g = ag.lock().unwrap();
-        g.nodes()
-            .filter(|n| n.type_id.as_ref() == type_id)
-            .map(|n| (n.position, n.id))
-            .collect()
-    }
-
-    /// Reproduces the user-reported "menu-added node can't be selected /
-    /// moved / connected, and the next add doesn't appear" cluster. Root
-    /// cause: menu-add dropped every node at a single fixed canvas point
-    /// that overlapped a starter node, so successive adds stacked on top
-    /// of each other and behind existing nodes — invisible to hit-testing.
-    #[test]
-    fn menu_add_places_nodes_without_overlap_or_stacking() {
-        let state = fresh_state_with_starter_graph();
-        let dialogs = NoFileDialogs;
-        let debug = debug_handles();
-
-        handle_action(&state, &dialogs, &debug, "add.Cylinder");
-        handle_action(&state, &dialogs, &debug, "add.Sphere");
-
-        // Symptom 4: both nodes actually get added, with distinct ids.
-        let cyl = nodes_of_type(&state, "Cylinder");
-        let sph = nodes_of_type(&state, "Sphere");
-        assert_eq!(cyl.len(), 1, "Cylinder should be added exactly once");
-        assert_eq!(sph.len(), 1, "Sphere should be added exactly once");
-        assert_ne!(cyl[0].1, sph[0].1, "added nodes must have distinct ids");
-
-        // Symptoms 1/4: successive menu-adds must not stack on the same
-        // canvas position.
-        assert_ne!(
-            cyl[0].0, sph[0].0,
-            "successive menu-added nodes must not stack at one position",
-        );
-
-        // Symptoms 1/2: a new node must not land on top of an existing
-        // node, or its title bar / sockets are unreachable by hit-testing.
-        let existing: Vec<[f64; 2]> = {
-            let ag = state.active_graph();
-            let g = ag.lock().unwrap();
-            g.nodes()
-                .filter(|n| {
-                    n.type_id.as_ref() != "Cylinder" && n.type_id.as_ref() != "Sphere"
-                })
-                .map(|n| n.position)
-                .collect()
-        };
-        // A node header is roughly 170 wide × 120 tall in canvas units;
-        // anything closer than that overlaps enough to steal hit-testing.
-        let overlaps = |a: [f64; 2], b: [f64; 2]| {
-            (a[0] - b[0]).abs() < 170.0 && (a[1] - b[1]).abs() < 120.0
-        };
-        for new_pos in [cyl[0].0, sph[0].0] {
-            for e in &existing {
-                assert!(
-                    !overlaps(new_pos, *e),
-                    "new node at {:?} overlaps existing node at {:?}",
-                    new_pos,
-                    e,
-                );
-            }
-        }
-    }
-
-    /// Follow-up to the placement fix: the rightward cascade must not run
-    /// off toward +X forever. Once a row fills, menu-add wraps to a new row
-    /// below (Y-up: smaller Y). Guarantees X stays bounded and no two nodes
-    /// ever collide, however many are added.
-    #[test]
-    fn menu_add_wraps_row_keeping_x_bounded_without_overlap() {
-        let state = fresh_state_with_starter_graph();
-        let dialogs = NoFileDialogs;
-        let debug = debug_handles();
-
-        // Left-most column across the starter graph anchors the wrap bound.
-        let leftmost_x = {
-            let ag = state.active_graph();
-            let g = ag.lock().unwrap();
-            g.nodes().map(|n| n.position[0]).fold(f64::INFINITY, f64::min)
-        };
-
-        // Add well past one row's worth (~6 columns) to force several wraps.
-        for _ in 0..18 {
-            handle_action(&state, &dialogs, &debug, "add.Cylinder");
-        }
-
-        let positions: Vec<[f64; 2]> = {
-            let ag = state.active_graph();
-            let g = ag.lock().unwrap();
-            g.nodes().map(|n| n.position).collect()
-        };
-
-        // X stays bounded: nothing cascades past the wrap extent from the
-        // left-most column (must match ROW_MAX_EXTENT in node_helpers).
-        const ROW_MAX_EXTENT: f64 = 1400.0;
-        for p in &positions {
-            assert!(
-                p[0] <= leftmost_x + ROW_MAX_EXTENT + 1.0,
-                "node X {} exceeded the wrap bound {}",
-                p[0],
-                leftmost_x + ROW_MAX_EXTENT,
-            );
-        }
-
-        // No two nodes (added or starter) collide.
-        let overlaps = |a: [f64; 2], b: [f64; 2]| {
-            (a[0] - b[0]).abs() < 170.0 && (a[1] - b[1]).abs() < 120.0
-        };
-        for i in 0..positions.len() {
-            for j in (i + 1)..positions.len() {
-                assert!(
-                    !overlaps(positions[i], positions[j]),
-                    "nodes at {:?} and {:?} overlap",
-                    positions[i],
-                    positions[j],
-                );
-            }
-        }
-    }
-}
+#[path = "menu_actions_tests.rs"]
+mod menu_actions_tests;

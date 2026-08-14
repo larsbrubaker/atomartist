@@ -97,16 +97,17 @@ pub fn build_app(
                         );
                         continue;
                     };
+                    // Both import calls submit their read to the frame
+                    // pump and report failures as notices, so there is
+                    // no result to inspect here — a `file:` drop settles
+                    // inline, a future async provider a frame later.
                     let ext = crate::app_state_storage::uri_extension(&uri);
-                    let result = match ext.as_str() {
+                    match ext.as_str() {
                         "stl" | "obj" | "3mf" => {
-                            drop_state.import_mesh_file(&uri, canvas_pos).map(|_| ())
+                            drop_state.import_mesh_file(&uri, canvas_pos)
                         }
-                        "mcx" | "atmr" => drop_state.import_scene_file(&uri).map(|_| ()),
+                        "mcx" | "atmr" => drop_state.import_scene_file(&uri),
                         _ => continue,
-                    };
-                    if let Err(e) = result {
-                        eprintln!("drop import failed: {}", e);
                     }
                 }
             }),

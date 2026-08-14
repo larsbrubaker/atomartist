@@ -391,12 +391,7 @@ pub fn build_menu_bar(
     let dispatch_dialogs = dialogs;
     let dispatch_debug = debug;
     let bar = MenuBar::new(font, menus, move |action| {
-        handle_action(
-            &dispatch_state,
-            dispatch_dialogs.as_ref(),
-            &dispatch_debug,
-            action,
-        );
+        handle_action(&dispatch_state, &dispatch_dialogs, &dispatch_debug, action);
         agg_gui::animation::request_draw();
     })
     .with_font_size(13.0)

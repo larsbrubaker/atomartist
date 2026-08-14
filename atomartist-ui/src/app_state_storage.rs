@@ -1,92 +1,79 @@
-//! Storage access helpers shared by [`crate::app_state_files`].
+//! Storage access helpers shared by [`crate::app_state_files`] and
+//! [`crate::app_state_files_import`].
 //!
 //! Every project read / write in the UI layer funnels through here: the
 //! [`StorageUri`] is resolved against the [`AppState`](crate::AppState)'s
-//! [`StorageRegistry`], the provider is asked for the bytes, and the
-//! resulting [`Job`] is driven to completion.
+//! [`StorageRegistry`] and the provider is asked for a [`Job`].
 //!
-//! **Phase 3 caveat — synchronous providers only.** The plan
-//! (`docs/storage-architecture-plan.md` §3.3) puts a job pump in the frame
-//! loop; that lands in Phase 4. Until then these call sites are
-//! synchronous, and [`await_job`] supports exactly one class of provider:
-//! one that has already settled its job by the time it returns (`Job::ready`
-//! / `Job::from_result`), which is what `LocalFsProvider` and
-//! `MemoryProvider` do.
+//! **The job is where this module stops.** Nothing here waits for a
+//! result — Phase 4c moved every call site onto
+//! [`AppState::submit_op`](crate::AppState::submit_op), so the job goes
+//! straight into the frame pump ([`crate::storage_ops`]) and a
+//! continuation applies its outcome whenever it lands. A genuinely
+//! asynchronous provider (Phase 5's OPFS backend, Phase 8's HTTP one)
+//! therefore works at every call site; the local providers still settle
+//! inline, so `submit_op` applies their continuations immediately and the
+//! desktop path keeps its synchronous feel.
 //!
-//! A genuinely asynchronous provider — anything built on `spawn_blocking`
-//! or `spawn_local` — will *not* work here, and will most likely be
-//! **cancelled before its worker has a chance to run**: the bounded poll
-//! loop is a tight spin with no yield, so it exhausts its budget in
-//! microseconds and then cancels the job. That is deliberate. The
-//! alternative (block the UI thread waiting on the network) is worse, and
-//! failing fast with a clear message keeps the gap visible until Phase 4's
-//! pump removes the limitation for good.
+//! An unresolvable scheme is reported as a *failed job* rather than a
+//! separate error channel, so the call site has exactly one failure path
+//! to handle.
 
-use std::sync::Arc;
+use atomartist_storage::{
+    Blob, Entry, Job, Precondition, Stamp, StorageError, StorageRegistry, StorageUri,
+};
 
-use atomartist_storage::{Job, Precondition, StorageProvider, StorageRegistry, StorageUri};
-
-/// How many times [`await_job`] samples a job before giving up. Any
-/// synchronous provider settles on the first poll; the loop exists purely
-/// so a mistakenly-registered async provider fails loudly rather than
-/// hanging the UI thread.
-const MAX_POLLS: u32 = 1_000;
-
-/// Provider owning `uri`'s scheme, or a user-readable error naming the
-/// scheme that nothing is registered for.
-pub(crate) fn provider_for(
-    registry: &StorageRegistry,
-    uri: &StorageUri,
-) -> Result<Arc<dyn StorageProvider>, String> {
-    registry
-        .resolve(uri)
-        .ok_or_else(|| format!("no storage provider for scheme `{}`", uri.scheme()))
+/// A job that fails immediately because no provider claims `uri`'s
+/// scheme — a build without the provider that wrote a recent entry, for
+/// instance.
+fn no_provider<T>(uri: &StorageUri) -> Job<T> {
+    Job::failed(StorageError::Io(format!(
+        "no storage provider for scheme `{}`",
+        uri.scheme()
+    )))
 }
 
-/// Drive a job to completion. See the module docs for why this is a
-/// bounded spin rather than a wait.
-pub(crate) fn await_job<T>(job: Job<T>) -> Result<T, String> {
-    for _ in 0..MAX_POLLS {
-        if job.poll().is_settled() {
-            return match job.take() {
-                Some(Ok(value)) => Ok(value),
-                Some(Err(err)) => Err(err.to_string()),
-                // `take` only returns `None` for pending / already-taken,
-                // and this job handle is not shared with anyone else.
-                None => Err("storage job produced no result".to_string()),
-            };
-        }
+/// Job reading every byte stored at `uri`.
+pub(crate) fn read_job(registry: &StorageRegistry, uri: &StorageUri) -> Job<Blob> {
+    match registry.resolve(uri) {
+        Some(provider) => provider.read(uri),
+        None => no_provider(uri),
     }
-    job.cancel();
-    Err("storage backend did not complete synchronously".to_string())
 }
 
-/// Read every byte stored at `uri`.
-pub(crate) fn read_bytes(registry: &StorageRegistry, uri: &StorageUri) -> Result<Vec<u8>, String> {
-    let provider = provider_for(registry, uri)?;
-    await_job(provider.read(uri))
-}
-
-/// Store `bytes` at `uri`, overwriting unconditionally. Preconditions
-/// (conflict detection) arrive with the remote providers in Phase 8.
-pub(crate) fn write_bytes(
+/// Job storing `bytes` at `uri`, overwriting unconditionally.
+/// Preconditions (conflict detection) arrive with the remote providers in
+/// Phase 8.
+pub(crate) fn write_job(
     registry: &StorageRegistry,
     uri: &StorageUri,
     bytes: Vec<u8>,
-) -> Result<(), String> {
-    let provider = provider_for(registry, uri)?;
-    await_job(provider.write(uri, bytes, Precondition::None)).map(|_stamp| ())
+) -> Job<Stamp> {
+    match registry.resolve(uri) {
+        Some(provider) => provider.write(uri, bytes, Precondition::None),
+        None => no_provider(uri),
+    }
 }
 
-/// Whether something is stored at `uri`. An unresolvable scheme or a
-/// failed `stat` both read as "not there" — the caller's recovery
-/// (dropping a stale recent entry, falling back to the starter graph) is
-/// the same either way.
-pub fn uri_exists(registry: &StorageRegistry, uri: &StorageUri) -> bool {
-    let Ok(provider) = provider_for(registry, uri) else {
-        return false;
-    };
-    matches!(await_job(provider.stat(uri)), Ok(Some(_)))
+/// Job answering "is anything stored at `uri`?". `Ok(None)` and any
+/// failure both mean "you cannot open this" — callers (the recent list,
+/// auto-reopen) recover the same way either way.
+pub(crate) fn stat_job(registry: &StorageRegistry, uri: &StorageUri) -> Job<Option<Entry>> {
+    match registry.resolve(uri) {
+        Some(provider) => provider.stat(uri),
+        None => no_provider(uri),
+    }
+}
+
+/// Short name for a storage operation's status-bar label — the URI's last
+/// segment, falling back to the whole URI for a segment-less location.
+///
+/// Deliberately *not* [`display_uri`]: the status bar has room for
+/// `Opening bracket.atmr`, not for a full Windows path.
+pub(crate) fn uri_label(uri: &StorageUri) -> String {
+    uri.file_name()
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| uri.to_string())
 }
 
 /// Lower-cased extension of the URI's last path segment, without the dot
@@ -147,8 +134,9 @@ pub fn display_uri(uri: &StorageUri) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atomartist_storage::{MemoryProvider, StorageError};
+    use atomartist_storage::MemoryProvider;
     use std::path::Path;
+    use std::sync::Arc;
 
     fn registry_with_memory() -> StorageRegistry {
         let mut registry = StorageRegistry::new();
@@ -158,39 +146,40 @@ mod tests {
         registry
     }
 
+    /// Settled-job helper: the local providers under test resolve before
+    /// they return, which is exactly the case `submit_op` applies inline.
+    fn settled<T>(job: Job<T>) -> Result<T, atomartist_storage::StorageError> {
+        assert!(job.poll().is_settled(), "local providers settle inline");
+        job.take().expect("a settled job yields its result")
+    }
+
     #[test]
     fn round_trips_bytes_through_a_provider() {
         let registry = registry_with_memory();
         let uri: StorageUri = "mem:///projects/a.atmr".parse().unwrap();
-        write_bytes(&registry, &uri, b"hello".to_vec()).unwrap();
-        assert!(uri_exists(&registry, &uri));
-        assert_eq!(read_bytes(&registry, &uri).unwrap(), b"hello");
+        settled(write_job(&registry, &uri, b"hello".to_vec())).unwrap();
+        assert!(settled(stat_job(&registry, &uri)).unwrap().is_some());
+        assert_eq!(settled(read_job(&registry, &uri)).unwrap(), b"hello");
     }
 
+    /// The error a user sees when the URI's scheme belongs to a provider
+    /// this build does not register has to name that scheme.
     #[test]
     fn unregistered_scheme_names_itself_in_the_error() {
         let registry = registry_with_memory();
         let uri: StorageUri = "nope:///a.atmr".parse().unwrap();
-        let err = read_bytes(&registry, &uri).unwrap_err();
+        let err = settled(read_job(&registry, &uri)).unwrap_err().to_string();
         assert!(err.contains("nope"), "error should name the scheme: {err}");
-        assert!(!uri_exists(&registry, &uri));
+        // `stat` fails the same way, which is what prunes the entry from
+        // the recent list.
+        assert!(settled(stat_job(&registry, &uri)).is_err());
     }
 
-    /// A never-settling job must return an error rather than spinning
-    /// forever — the frame-loop pump (Phase 4) is what makes real async
-    /// providers usable.
+    /// The status-bar label is the file name, not the whole URI.
     #[test]
-    fn a_job_that_never_settles_reports_an_error() {
-        let (job, completer) = Job::<u32>::pending();
-        let err = await_job(job).unwrap_err();
-        assert_eq!(err, "storage backend did not complete synchronously");
-        drop(completer);
-    }
-
-    #[test]
-    fn a_failed_job_surfaces_the_storage_error_text() {
-        let err = await_job(Job::<u32>::failed(StorageError::NotFound)).unwrap_err();
-        assert_eq!(err, StorageError::NotFound.to_string());
+    fn labels_use_the_last_segment() {
+        let uri: StorageUri = "mem:///projects/bracket.atmr".parse().unwrap();
+        assert_eq!(uri_label(&uri), "bracket.atmr");
     }
 
     #[test]

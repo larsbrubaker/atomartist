@@ -327,6 +327,28 @@ account UI is shown, no network code is reachable.
    "Offline — changes saved locally" / conflict badge.
 5. **Conflict dialog**: Keep mine (save as new version) / Take theirs
    (reload) / Save as copy. Never auto-merge graphs.
+
+   **Failure-reporting policy (settled in Phase 4c).** Once storage calls
+   became asynchronous, every failure had a natural home in the status-bar
+   notice queue — and that turned out to be too quiet for the operations
+   that matter. The rule we landed on: **save and open failures raise a
+   modal `show_error` *in addition to* the notice; export, import, and the
+   recent-list prune stay notice-only.** The split is about what losing the
+   result costs. A failed save loses work the user cannot get back by
+   repeating the action, and it most often happens on the window-close path
+   where the next thing to happen is the app disappearing; a failed open
+   that only writes a status line is indistinguishable from the app
+   ignoring the click. Export, import, and pruning are non-destructive and
+   land immediately after an explicit user action, so the status bar is
+   enough — a modal there is just a second click. Mechanically the modal is
+   raised from the operation's continuation, which the frame pump runs on
+   the main thread (where `rfd` needs to be anyway); `menu_actions` gets the
+   `FileDialogProvider` as an `Arc<dyn …>` so it can be cloned into that
+   continuation, which is why the trait carries `Send + Sync`. The
+   startup auto-reopen is deliberately *outside* this policy: nobody asked
+   for it, so `AppState::reopen_last_project` reports at `Info` and prunes
+   the stale entry rather than parking a sticky error in the one display
+   slot.
 6. **Web gets Open/Save for the first time** — even without any cloud, the
    `browser:` provider plus this UI fixes today's `NoFileDialogs` gap.
    Native file-system access on web also gets a `file:` bridge where the
