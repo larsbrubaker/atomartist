@@ -12,8 +12,8 @@ use atomartist_lib::graph::node::{NodeId, PortValue};
 use atomartist_lib::graph::undo_commands::AddNodeCmd;
 use atomartist_lib::nodes::mesh::mesh_node;
 use atomartist_lib::serialization::{
-    export_3mf, export_obj, export_stl, import_mcx, load_project_with_assets_from_path,
-    save_project_with_assets_to_path,
+    export_3mf, export_obj, export_stl, import_mcx, read_project_from_bytes,
+    write_project_to_bytes,
 };
 use atomartist_lib::Graph;
 
@@ -61,13 +61,21 @@ impl AppState {
     /// viewport repopulates. Returns `Err` with a user-readable message
     /// on parse / IO failure.
     ///
-    /// Dispatches on file extension: `.atmr` loads through the zip
-    /// container, `.json` reads the raw JSON file. Unknown / missing
-    /// extensions try ATMR first — see `serialization::atmr` for
-    /// the full dispatch rules.
+    /// The bytes are read off disk here and decoded by the format
+    /// layer; `.atmr` (a zip archive) is the only project format, and
+    /// the decoder ignores the file name entirely — see
+    /// `serialization::atmr`.
     pub fn load_graph_from_path(&self, path: &Path) -> Result<(), String> {
-        let (result, assets) = load_project_with_assets_from_path(path, &self.registry)
+        let bytes = std::fs::read(path)
             .map_err(|e| format!("open {}: {}", path.display(), e))?;
+        let (result, assets) = read_project_from_bytes(&bytes, &self.registry)
+            .map_err(|e| format!("open {}: {}", path.display(), e))?;
+        // Decode warnings first (schema-version mismatch, unknown node
+        // types that were skipped) — they explain missing nodes, so
+        // swallowing them turns a partial load into a silent one.
+        for w in &result.warnings {
+            eprintln!("project load: {}", w);
+        }
         let mut graph = result.graph;
         // Resolve every MeshNode's asset reference into a live MeshGL
         // before swapping the graph in — once the executor sees the new
@@ -95,19 +103,19 @@ impl AppState {
         Ok(())
     }
 
-    /// Save the current graph to `path`. Picks the on-disk format
-    /// from the file extension — `.atmr` writes a zip archive
-    /// containing `graph.json`, `.json` writes plain JSON, anything
-    /// else (including no extension at all) defaults to `.atmr`.
-    /// Updates `current_file` on success so subsequent `Save` actions
-    /// reuse the chosen path without re-prompting.
+    /// Save the current graph to `path`. Always writes the `.atmr` zip
+    /// archive (graph + assets) regardless of the file name. Updates
+    /// `current_file` on success so subsequent `Save` actions reuse the
+    /// chosen path without re-prompting.
     pub fn save_graph_to_path(&self, path: &Path) -> Result<(), String> {
-        let graph = self.graph.lock().unwrap();
-        let assets = self.assets.lock().unwrap();
-        save_project_with_assets_to_path(path, &graph, &assets)
+        let bytes = {
+            let graph = self.graph.lock().unwrap();
+            let assets = self.assets.lock().unwrap();
+            write_project_to_bytes(&graph, &assets)
+                .map_err(|e| format!("write {}: {}", path.display(), e))?
+        };
+        std::fs::write(path, bytes)
             .map_err(|e| format!("write {}: {}", path.display(), e))?;
-        drop(graph);
-        drop(assets);
         *self.current_file.lock().unwrap() = Some(path.to_path_buf());
         self.mark_saved_baseline();
         self.note_recent_project(path);
@@ -246,9 +254,9 @@ impl AppState {
     ///   [`Self::import_mesh_file`].
     /// - `.mcx` — MatterControl scene: every visible surface becomes a
     ///   MeshNode with its world transform + color preserved.
-    /// - `.atmr` / `.json` — AtomArtist project: the graph is merged
-    ///   in beside the existing nodes and its Output feeders rewired
-    ///   into this scene's Output.
+    /// - `.atmr` — AtomArtist project: the graph is merged in beside
+    ///   the existing nodes and its Output feeders rewired into this
+    ///   scene's Output.
     ///
     /// Returns the number of nodes added.
     pub fn import_scene_file(&self, path: &Path) -> Result<usize, String> {
@@ -263,7 +271,7 @@ impl AppState {
                 Ok(1)
             }
             "mcx" => self.import_mcx_file(path),
-            "atmr" | "json" => self.import_project_file(path),
+            "atmr" => self.import_project_file(path),
             other => Err(format!(
                 "unsupported import format: .{other} (expected .stl, .obj, .3mf, .mcx, or .atmr)"
             )),
@@ -306,8 +314,13 @@ impl AppState {
     /// Output node is dropped and everything that fed it is rewired
     /// into this scene's Output so the imported geometry renders.
     fn import_project_file(&self, path: &Path) -> Result<usize, String> {
-        let (result, src_assets) = load_project_with_assets_from_path(path, &self.registry)
+        let bytes = std::fs::read(path)
             .map_err(|e| format!("open {}: {}", path.display(), e))?;
+        let (result, src_assets) = read_project_from_bytes(&bytes, &self.registry)
+            .map_err(|e| format!("open {}: {}", path.display(), e))?;
+        for w in &result.warnings {
+            eprintln!("project import: {}", w);
+        }
         let mut src_graph = result.graph;
         let warnings = mesh_node::resolve_mesh_assets(&mut src_graph, &src_assets);
         for w in &warnings {
@@ -517,9 +530,12 @@ impl AppState {
     /// `current_file`, the recent list, and the unsaved-changes
     /// baseline all stay put, unlike [`Self::save_graph_to_path`].
     pub fn export_project_copy_to_path(&self, path: &Path) -> Result<(), String> {
-        let graph = self.graph.lock().unwrap();
-        let assets = self.assets.lock().unwrap();
-        save_project_with_assets_to_path(path, &graph, &assets)
-            .map_err(|e| format!("write {}: {}", path.display(), e))
+        let bytes = {
+            let graph = self.graph.lock().unwrap();
+            let assets = self.assets.lock().unwrap();
+            write_project_to_bytes(&graph, &assets)
+                .map_err(|e| format!("write {}: {}", path.display(), e))?
+        };
+        std::fs::write(path, bytes).map_err(|e| format!("write {}: {}", path.display(), e))
     }
 }

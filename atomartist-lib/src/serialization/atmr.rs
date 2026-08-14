@@ -19,10 +19,20 @@
 //!   `graph.json` you can read or hand-edit; `zip foo.atmr graph.json`
 //!   makes it again.
 //!
-//! The plain-JSON path (`.json`) is still supported for backwards
-//! compatibility with files saved by earlier builds — see
-//! [`save_project_to_path`] / [`load_project_from_path`] for the
-//! extension-aware dispatch.
+//! ## Bytes in, bytes out
+//!
+//! This module deals only in byte buffers: [`write_project_to_bytes`]
+//! encodes a project into a `Vec<u8>` and [`read_project_from_bytes`]
+//! decodes one from a `&[u8]`. Deciding *where* those bytes live
+//! (local filesystem, browser storage, a remote service) is the
+//! storage layer's job, not the format layer's — which is what lets
+//! the same encoder serve the native shell and the WASM build.
+//!
+//! The zip archive is the *only* project format — there is no bare
+//! `.json` project any more, on either the read or the write side.
+//! Reading therefore ignores file extensions entirely (there may not
+//! be a filename at all behind a byte stream) and simply parses the
+//! buffer as an archive.
 //!
 //! ## Layout
 //!
@@ -35,9 +45,7 @@
 //! get their own top-level entries; readers must therefore tolerate
 //! unknown entries.
 
-use std::fs::File;
-use std::io::{Read, Seek, Write};
-use std::path::Path;
+use std::io::{Cursor, Read, Seek, Write};
 
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
@@ -72,10 +80,6 @@ pub enum AtmrError {
     MissingGraphJson,
     /// `graph.json` was present but `serde_json` rejected its contents.
     BadJson(serde_json::Error),
-    /// The caller tried to save a non-empty asset bundle to a plain
-    /// `.json` project. JSON files can't carry binary assets; switch
-    /// to `.atmr` (or call [`save_atmr_with_assets_to_path`] directly).
-    AssetsRequireZip,
 }
 
 impl std::fmt::Display for AtmrError {
@@ -89,10 +93,6 @@ impl std::fmt::Display for AtmrError {
                 GRAPH_ENTRY_NAME
             ),
             AtmrError::BadJson(e) => write!(f, "graph JSON parse failed: {}", e),
-            AtmrError::AssetsRequireZip => write!(
-                f,
-                "asset bundle requires .atmr format; .json projects cannot embed binary assets"
-            ),
         }
     }
 }
@@ -109,29 +109,37 @@ impl From<serde_json::Error> for AtmrError {
     fn from(e: serde_json::Error) -> Self { AtmrError::BadJson(e) }
 }
 
-/// Save `graph` as an `.atmr` archive at `path`. Convenience wrapper
-/// for projects without embedded assets; equivalent to
-/// `save_project_with_assets_to_path(path, graph, &AssetStore::new())`.
-pub fn save_atmr_to_path(path: &Path, graph: &Graph) -> Result<(), AtmrError> {
-    save_atmr_with_assets_to_path(path, graph, &AssetStore::new())
-}
-
-/// Save `graph` + `assets` as an `.atmr` archive at `path`.
+/// Encode `graph` + `assets` as a complete `.atmr` archive in memory.
 ///
-/// The archive is overwritten if it already exists. `graph.json` is
-/// always written first so streaming readers can pull the topology
-/// without scanning the entire file; assets come after in deterministic
-/// hash order. An archive with an empty `AssetStore` is byte-compatible
-/// with the pre-asset format.
-pub fn save_atmr_with_assets_to_path(
-    path: &Path,
+/// This is the only project-writing entry point: there is no
+/// plain-JSON output format any more. `graph.json` is written first so
+/// streaming readers can pull the topology without scanning the whole
+/// buffer; assets follow in deterministic hash order. A project with an
+/// empty `AssetStore` is byte-compatible with the pre-asset format.
+pub fn write_project_to_bytes(
     graph: &Graph,
     assets: &AssetStore,
-) -> Result<(), AtmrError> {
+) -> Result<Vec<u8>, AtmrError> {
     let json = graph_to_json_string(graph);
-    let file = File::create(path)?;
-    write_atmr_into(file, &json, assets)?;
-    Ok(())
+    let cursor = write_atmr_into(Cursor::new(Vec::new()), &json, assets)?;
+    Ok(cursor.into_inner())
+}
+
+/// Decode a project from raw bytes.
+///
+/// The buffer must be an `.atmr` archive: graph JSON at
+/// [`GRAPH_ENTRY_NAME`] plus any embedded assets. Anything else fails
+/// — a buffer that isn't a zip surfaces `AtmrError::Zip`, and a zip
+/// without the graph entry surfaces `AtmrError::MissingGraphJson`.
+pub fn read_project_from_bytes(
+    bytes: &[u8],
+    registry: &NodeRegistry,
+) -> Result<(LoadResult, AssetStore), AtmrError> {
+    let mut archive = ZipArchive::new(Cursor::new(bytes))?;
+    let json = read_graph_json_entry(&mut archive)?;
+    let assets = AssetStore::read_from_zip(&mut archive)?;
+    let load = graph_from_json_str(&json, registry)?;
+    Ok((load, assets))
 }
 
 /// Encode an ATMR archive containing the graph JSON + every asset in
@@ -157,36 +165,6 @@ pub fn write_atmr_into<W: Write + Seek>(
     Ok(writer)
 }
 
-/// Load a graph from an `.atmr` archive at `path`. Returns the parsed
-/// `LoadResult` (graph + non-fatal warnings) on success. Use
-/// [`load_atmr_with_assets_from_path`] when you also need the embedded
-/// asset bytes.
-pub fn load_atmr_from_path(
-    path: &Path,
-    registry: &NodeRegistry,
-) -> Result<LoadResult, AtmrError> {
-    let (result, _) = load_atmr_with_assets_from_path(path, registry)?;
-    Ok(result)
-}
-
-/// Load the graph **and** the embedded asset bundle from an `.atmr`
-/// archive at `path`.
-///
-/// Asset-aware callers (the app shell, anything that needs MeshNode to
-/// resolve its bytes) should prefer this entry point. Archives that
-/// pre-date the asset feature simply yield an empty `AssetStore`.
-pub fn load_atmr_with_assets_from_path(
-    path: &Path,
-    registry: &NodeRegistry,
-) -> Result<(LoadResult, AssetStore), AtmrError> {
-    let file = File::open(path)?;
-    let mut archive = ZipArchive::new(file)?;
-    let json = read_graph_json_entry(&mut archive)?;
-    let assets = AssetStore::read_from_zip(&mut archive)?;
-    let load = graph_from_json_str(&json, registry)?;
-    Ok((load, assets))
-}
-
 /// Extract the `graph.json` entry from an open zip reader and return
 /// its contents as a `String`. Surfaces `MissingGraphJson` if the
 /// archive opened but didn't contain the expected entry.
@@ -206,72 +184,6 @@ fn read_graph_json_entry<R: Read + Seek>(
     let mut json = String::with_capacity(entry.size() as usize);
     entry.read_to_string(&mut json)?;
     Ok(json)
-}
-
-/// Convenience: save `graph` to `path` choosing the file format from
-/// the path's extension. `.atmr` (or no extension at all) writes a
-/// zip archive; `.json` writes the legacy plain-JSON file. Unknown
-/// extensions are treated as `.atmr` so the user always gets the
-/// modern format by default.
-///
-/// Asset-bearing projects must use [`save_project_with_assets_to_path`]
-/// — the plain-JSON path cannot carry binary assets.
-pub fn save_project_to_path(path: &Path, graph: &Graph) -> Result<(), AtmrError> {
-    save_project_with_assets_to_path(path, graph, &AssetStore::new())
-}
-
-/// Save `graph` + `assets` to `path`. Extension-dispatched (see
-/// [`save_project_to_path`]). When the target is `.json` (legacy plain
-/// JSON) the asset store must be empty — JSON has nowhere to put the
-/// bytes — otherwise `AtmrError::AssetsRequireZip` is raised.
-pub fn save_project_with_assets_to_path(
-    path: &Path,
-    graph: &Graph,
-    assets: &AssetStore,
-) -> Result<(), AtmrError> {
-    if has_extension(path, "json") {
-        if !assets.is_empty() {
-            return Err(AtmrError::AssetsRequireZip);
-        }
-        let json = graph_to_json_string(graph);
-        std::fs::write(path, json)?;
-        Ok(())
-    } else {
-        save_atmr_with_assets_to_path(path, graph, assets)
-    }
-}
-
-/// Convenience: load a graph from `path`, picking the parser based on
-/// the file extension. Falls back to "try ATMR first, then JSON" when
-/// the extension is missing or unrecognised so users who renamed a
-/// file by hand still get a useful result.
-pub fn load_project_from_path(
-    path: &Path,
-    registry: &NodeRegistry,
-) -> Result<LoadResult, AtmrError> {
-    let (load, _) = load_project_with_assets_from_path(path, registry)?;
-    Ok(load)
-}
-
-/// Load the graph + asset bundle from `path`. Extension-dispatched;
-/// `.json` projects always yield an empty `AssetStore`.
-pub fn load_project_with_assets_from_path(
-    path: &Path,
-    registry: &NodeRegistry,
-) -> Result<(LoadResult, AssetStore), AtmrError> {
-    if has_extension(path, "json") {
-        let s = std::fs::read_to_string(path)?;
-        Ok((graph_from_json_str(&s, registry)?, AssetStore::new()))
-    } else {
-        load_atmr_with_assets_from_path(path, registry)
-    }
-}
-
-fn has_extension(path: &Path, want: &str) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case(want))
-        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -308,34 +220,16 @@ mod tests {
             Some("3mf".into()),
         );
 
-        let dir = std::env::temp_dir();
-        let path = dir.join("__atmr_assets_round_trip.atmr");
-        save_atmr_with_assets_to_path(&path, &Graph::new(), &assets).expect("save");
+        let bytes = write_project_to_bytes(&Graph::new(), &assets).expect("write");
 
-        let reg = NodeRegistry::new();
-        let (_, recovered) =
-            load_atmr_with_assets_from_path(&path, &reg).expect("load");
+        let reg = empty_registry();
+        let (_, recovered) = read_project_from_bytes(&bytes, &reg).expect("read");
         assert_eq!(recovered.len(), 1);
         let entry = recovered.get(&r).expect("asset survives the round trip");
         assert_eq!(entry.bytes, b"<fake 3mf bytes>".to_vec());
         assert_eq!(entry.original_filename, "bunny.stl");
         assert_eq!(entry.extension, "3mf");
         assert_eq!(entry.label.as_deref(), Some("Bunny"));
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn save_project_to_json_rejects_non_empty_assets() {
-        let mut assets = AssetStore::new();
-        assets.insert(vec![1, 2, 3], "x.bin".into(), None, None);
-        let dir = std::env::temp_dir();
-        let path = dir.join("__atmr_reject.json");
-        let err = save_project_with_assets_to_path(&path, &Graph::new(), &assets)
-            .expect_err("should refuse assets in .json");
-        assert!(matches!(err, AtmrError::AssetsRequireZip));
-        // Don't leave a partial write behind.
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -359,37 +253,54 @@ mod tests {
     }
 
     #[test]
-    fn save_project_to_path_dispatches_on_extension() {
-        let dir = std::env::temp_dir();
-        let json_path = dir.join("__atmr_test.json");
-        let atmr_path = dir.join("__atmr_test.atmr");
-        let no_ext_path = dir.join("__atmr_test_noext");
+    fn write_project_always_emits_zip_bytes() {
+        let bytes = write_project_to_bytes(&Graph::new(), &AssetStore::new())
+            .expect("write project");
+        assert_eq!(&bytes[..4], b"PK\x03\x04");
 
-        let g = Graph::new();
-        save_project_to_path(&json_path, &g).expect("save json");
-        save_project_to_path(&atmr_path, &g).expect("save atmr");
-        save_project_to_path(&no_ext_path, &g).expect("save no ext");
-
-        // .json: plain text starting with `{`
-        let raw = std::fs::read(&json_path).unwrap();
-        assert_eq!(raw.first(), Some(&b'{'));
-
-        // .atmr: zip "PK\x03\x04" local file header.
-        let raw = std::fs::read(&atmr_path).unwrap();
-        assert_eq!(&raw[..4], b"PK\x03\x04");
-
-        // No extension defaults to atmr (zip).
-        let raw = std::fs::read(&no_ext_path).unwrap();
-        assert_eq!(&raw[..4], b"PK\x03\x04");
-
-        // Round trip: load each one back through the dispatcher.
+        // And those bytes read back through the project reader.
         let reg = empty_registry();
-        let _ = load_project_from_path(&json_path, &reg).expect("load json");
-        let _ = load_project_from_path(&atmr_path, &reg).expect("load atmr");
-        let _ = load_project_from_path(&no_ext_path, &reg).expect("load no ext");
+        let _ = read_project_from_bytes(&bytes, &reg).expect("read zip bytes");
+    }
 
-        let _ = std::fs::remove_file(json_path);
-        let _ = std::fs::remove_file(atmr_path);
-        let _ = std::fs::remove_file(no_ext_path);
+    #[test]
+    fn decode_warnings_reach_the_caller() {
+        // Skipped nodes must be reported, not silently dropped: the UI
+        // prints `LoadResult::warnings` after a load, so a project
+        // referencing a node type this build doesn't know about has to
+        // surface a warning naming it.
+        let json = r#"{
+            "version": 1,
+            "next_socket_uid": 0,
+            "nodes": [
+                {"id": 0, "type_id": "WidgetFromTheFuture", "position": [0,0], "inputs": [], "outputs": [], "properties": {}}
+            ],
+            "noodles": []
+        }"#;
+        let buf = write_atmr_into(Cursor::new(Vec::new()), json, &AssetStore::new())
+            .expect("write atmr")
+            .into_inner();
+
+        let reg = empty_registry();
+        let (load, _) = read_project_from_bytes(&buf, &reg).expect("read project");
+        assert_eq!(load.graph.node_count(), 0);
+        assert!(
+            load.warnings.iter().any(|w| w.contains("WidgetFromTheFuture")),
+            "expected a warning naming the skipped node type, got {:?}",
+            load.warnings
+        );
+    }
+
+    #[test]
+    fn read_project_rejects_bare_graph_json_bytes() {
+        // The bare-JSON project format is gone: only zip archives are
+        // projects, so plain graph JSON must be refused rather than
+        // silently accepted.
+        let json = graph_to_json_string(&Graph::new());
+        let reg = empty_registry();
+        match read_project_from_bytes(json.as_bytes(), &reg) {
+            Ok(_) => panic!("bare JSON must not load as a project"),
+            Err(e) => assert!(matches!(e, AtmrError::Zip(_)), "unexpected error: {e}"),
+        }
     }
 }

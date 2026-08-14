@@ -2,7 +2,7 @@
 //!
 //! ## Format
 //!
-//! Schema v2: per-node socket layouts and uid-keyed noodles. Every socket
+//! Schema v1: per-node socket layouts and uid-keyed noodles. Every socket
 //! carries a stable [`SocketUid`](crate::graph::socket::SocketUid) that
 //! survives renames and reorder; noodles reference uids, not names.
 //!
@@ -14,9 +14,9 @@
 //! Forward compatibility: unknown node types are skipped with a warning
 //! (returned in `LoadResult.warnings`), not a hard error.
 //!
-//! Backward compatibility: schema v1 is **not** loadable. The user
-//! explicitly authorized the break during the Stage 1 engine refactor.
-//! v1 saves can be opened by the previous binary if needed.
+//! Backward compatibility: version 1 is the first shipped schema, so
+//! there is no older format to read. Files carrying a different version
+//! number load with a warning rather than a hard error.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -116,7 +116,7 @@ impl JsonPortValue {
     }
 }
 
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 1;
 
 fn socket_to_file(s: &Socket) -> SocketFile {
     SocketFile {
@@ -407,7 +407,7 @@ mod tests {
     fn unknown_node_type_is_skipped_with_warning() {
         let reg = registry();
         let json = r#"{
-            "version": 2,
+            "version": 1,
             "next_socket_uid": 0,
             "nodes": [
                 {"id": 0, "type_id": "WidgetFromTheFuture", "position": [0,0], "inputs": [], "outputs": [], "properties": {}},

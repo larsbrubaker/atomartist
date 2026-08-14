@@ -285,8 +285,8 @@ pub struct UiSettings {
     /// before writing to disk.
     pub debug_windows: DebugWindowsState,
     /// Absolute path to the last project file the user opened or
-    /// saved (typically `.atmr`, occasionally `.json` for legacy
-    /// saves). The shell auto-reopens this on launch so the user
+    /// saved — always an `.atmr` archive, the only project format.
+    /// The shell auto-reopens this on launch so the user
     /// resumes where they left off; `None` means there's nothing
     /// to reopen and the starter graph stays loaded.
     pub last_project_path: Option<PathBuf>,

@@ -11,21 +11,21 @@ use atomartist_ui::top_menu_bar::{FileDialogProvider, UnsavedChoice};
 /// up, and the user's response unblocks it.
 ///
 /// Filter ordering matters: rfd uses the first filter as the default
-/// "Save as type" so we list `.atmr` first and keep `.json` as a
-/// secondary entry for opening / converting legacy projects.
+/// "Save as type", so `.atmr` — the only project format — comes first.
+/// Open additionally offers "All files" for users whose projects are
+/// named something else; Save does not, because the extension decides
+/// the name the file ends up with.
 pub struct NativeDialogs;
 impl FileDialogProvider for NativeDialogs {
     fn pick_open_project(&self) -> Option<PathBuf> {
         rfd::FileDialog::new()
             .add_filter("AtomArtist project", &["atmr"])
-            .add_filter("AtomArtist project (legacy JSON)", &["json"])
             .add_filter("All files", &["*"])
             .pick_file()
     }
     fn pick_save_project(&self, default_name: &str) -> Option<PathBuf> {
         rfd::FileDialog::new()
             .add_filter("AtomArtist project", &["atmr"])
-            .add_filter("AtomArtist project (legacy JSON)", &["json"])
             .set_file_name(default_name)
             .save_file()
     }
