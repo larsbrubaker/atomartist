@@ -459,6 +459,14 @@ fn main() {
                             );
                         }
                     }
+                    // Last chance for in-flight storage work: the event
+                    // loop is about to stop calling `pump_storage`, so a
+                    // save whose job has not settled yet would be lost
+                    // without a word. Bounded so a wedged provider can't
+                    // hang the close; on timeout the remaining ops are
+                    // cancelled, pumped once so their continuations
+                    // observe `Cancelled`, and named on stderr.
+                    state_for_save.drain_pending_ops(std::time::Duration::from_secs(5));
                     elwt.exit();
                 }
                 Event::WindowEvent {
@@ -685,6 +693,11 @@ fn main() {
                             } else {
                                 eprintln!("screenshot capture returned no pixels");
                             }
+                            // Deliberately no `drain_pending_ops` here:
+                            // `--screenshot-to` is a headless capture run
+                            // that never touches a user's document, so
+                            // there is no in-flight save worth waiting on
+                            // — and waiting would only slow the harness.
                             elwt.exit();
                         } else {
                             window.request_redraw();

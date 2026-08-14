@@ -17,26 +17,69 @@
 //!
 //! A continuation runs outside the widget tree, so it has no dialog
 //! provider to talk to. Instead it leaves a [`Notice`] on the state
-//! ([`AppState::notify`]) and the UI drains it
-//! ([`AppState::drain_notices`]) when it next paints.
+//! ([`AppState::notify`]); [`AppState::pump_notices`] — called from
+//! [`AppState::pump_storage`], i.e. once per frame on every shell —
+//! drains the queue, prints errors to stderr, and parks the newest
+//! message in [`AppState::last_notice`] for the status bar to paint.
 //!
 //! Synchronous providers (`LocalFsProvider`, `MemoryProvider`) settle their
 //! jobs before `submit_op` returns, so `submit_op` applies those inline and
 //! the desktop path never waits a frame — the pump exists for the providers
 //! that cannot do that.
 //!
-//! Known deferred items, for Phase 4b to pick up:
+//! # Wakeup strategy (resolves 4a's deferred item 2)
 //!
-//! 1. The keep-alive uses `agg_gui::animation::request_draw`, which bumps
-//!    the invalidation epoch on every frame an operation is in flight —
-//!    a long download would re-layout the whole tree each frame for no
-//!    reason. `request_draw_without_invalidation` is the likely fix, but
-//!    per CLAUDE.md it needs a measurement before it counts as one.
-//! 2. [`AppState::notify`] and [`AppState::submit_op`] are main-thread
-//!    only, because agg-gui's draw-request flag is thread-local: calling
-//!    them from a worker sets a flag nobody reads. A cross-thread wakeup
-//!    (`agg_gui::animation::signal_async_state_change`, or an
-//!    `EventLoopProxy`) lands in 4b alongside the status-bar readout.
+//! Both wakeups go through `agg_gui::animation::signal_async_state_change`,
+//! which bumps a **process-global atomic** that the main thread merges into
+//! its thread-local draw flags on its next `wants_draw` /
+//! `invalidation_epoch` / `async_state_epoch` read. A plain `request_draw`
+//! would only set a thread-local the signalling thread itself never reads.
+//!
+//! What that does and does not buy, precisely:
+//!
+//! - [`AppState::notify`] only touches the notice mutex and that signal,
+//!   so it is safe from any thread.
+//! - [`AppState::submit_op`] is safe from any thread **only for a job that
+//!   is genuinely still pending** — that path just parks the operation on
+//!   the queue. When the job may already be settled, which is every
+//!   operation on every local provider, the continuation runs *inline on
+//!   the calling thread*, mutating [`AppState`] and touching agg-gui
+//!   thread-locals, so it must be called on the main thread.
+//! - In practice both are main-thread calls today regardless: [`AppState`]
+//!   is `!Send` (agg-gui's `UndoBuffer` holds `Box<dyn UndoRedoCommand>`
+//!   with no `Send` bound), so a worker cannot hold one. The global signal
+//!   is still the right primitive — it is what a future `Send` handle, or
+//!   a provider that wakes us from its own thread, will need.
+//!
+//! That signal also bumps the async-state epoch, which makes `App::paint`
+//! mark the whole tree dirty once — correct here, because a submitted or
+//! finished operation is exactly the kind of out-of-band change retained
+//! backbuffers cannot otherwise see, and it happens per *operation*, not
+//! per frame.
+//!
+//! [`atomartist_storage::JobCompleter`] completions deliberately push **no**
+//! wakeup of their own: a job only settles while an operation is queued
+//! here, and a queued operation keeps the pump's keep-alive requesting the
+//! next frame, so the completion is observed on that frame. The loop only
+//! sleeps once the queue is empty.
+//!
+//! # Keep-alive cost (resolves 4a's deferred item 1)
+//!
+//! The per-frame keep-alive uses `request_draw_without_invalidation`,
+//! reserving `request_draw` for the frames that actually apply a
+//! continuation. Reasoning, from the agg-gui sources rather than a guess:
+//! nothing re-rasters off `invalidation_epoch` — retained backbuffers key
+//! on their dirty flag, the theme / typography / async-state epochs, and
+//! `Widget::needs_draw` (`widget/paint/offscreen.rs`); `invalidation_epoch`
+//! is read only by `dispatch_event` (to dirty ancestors of a widget that
+//! changed during event delivery) and, in this app, by `demo-native`'s
+//! debug-inspector snapshot cache, where every bump costs a full
+//! `collect_inspector_nodes()` walk. Bumping it once per frame for the
+//! whole duration of a download therefore buys nothing and costs that
+//! walk whenever the inspector is open. The status bar still animates
+//! because [`crate::status_bar::StatusBar`] reports `needs_draw()` while
+//! an operation is in flight — the trait's purpose-built channel for an
+//! ongoing draw need, which propagates into retained ancestors.
 //!
 //! Relationship to [`crate::app_state_storage`]: that module's `await_job`
 //! is the *synchronous-only* bridge the current call sites in
@@ -157,23 +200,151 @@ pub type PendingOps = Arc<Mutex<Vec<Box<dyn PendingOp>>>>;
 /// Queue of messages awaiting the next paint.
 pub type Notices = Arc<Mutex<Vec<Notice>>>;
 
+/// The most recently drained message, held for display.
+pub type LastNotice = Arc<Mutex<Option<Notice>>>;
+
+/// Hard cap on the undrained notice queue.
+///
+/// The UI drains once per frame, so in a running app the queue never holds
+/// more than one frame's worth. A headless embedder that never pumps would
+/// otherwise grow it without bound; past the cap the oldest messages are
+/// dropped, because the newest are the ones worth showing.
+pub const NOTICE_CAP: usize = 100;
+
+/// How many cancel-and-pump rounds [`AppState::drain_pending_ops`] runs
+/// after its deadline. Enough for a continuation to chain a follow-up (and
+/// for that one to chain another); short enough that a runaway chain
+/// cannot hold the window open.
+#[cfg(not(target_arch = "wasm32"))]
+pub const FINAL_PUMP_ROUNDS: usize = 4;
+
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 impl AppState {
     /// Post a message for the UI to show on its next paint.
+    ///
+    /// Any-thread safe (it only takes the notice mutex and signals the
+    /// process-global wakeup) — see the module docs on the wakeup
+    /// strategy. Drops the oldest messages once the queue exceeds
+    /// [`NOTICE_CAP`], so an embedder that never drains cannot leak.
     pub fn notify(&self, level: NoticeLevel, text: impl Into<String>) {
-        lock(&self.notices).push(Notice {
-            level,
-            text: text.into(),
-        });
-        agg_gui::animation::request_draw();
+        {
+            let mut queue = lock(&self.notices);
+            if queue.len() >= NOTICE_CAP {
+                let overflow = queue.len() + 1 - NOTICE_CAP;
+                queue.drain(0..overflow);
+            }
+            queue.push(Notice {
+                level,
+                text: text.into(),
+            });
+        }
+        agg_gui::animation::signal_async_state_change();
     }
 
     /// Take every queued message, leaving the queue empty.
     pub fn drain_notices(&self) -> Vec<Notice> {
         std::mem::take(&mut *lock(&self.notices))
+    }
+
+    /// Drain the notice queue into the UI, once per frame.
+    ///
+    /// Called from the top of [`Self::pump_storage`] — before its
+    /// empty-queue early return — so a message posted by an *inline*
+    /// continuation (which never touches the pending queue) still reaches
+    /// the screen. Errors additionally go to stderr, because a failed save
+    /// deserves a record that outlives the status bar.
+    ///
+    /// # Which message wins the single display slot
+    ///
+    /// Severity outranks recency, because the worst failure mode this seam
+    /// has is a failed save vanishing behind the next operation's
+    /// confirmation:
+    ///
+    /// - Within one drained batch the highest-severity message wins, and
+    ///   the newest among equals.
+    /// - An [`NoticeLevel::Info`] never displaces an undismissed
+    ///   [`NoticeLevel::Error`] already in the slot — the error stays until
+    ///   another error replaces it or the user dismisses it
+    ///   ([`Self::dismiss_notice`], which clears the slot for anything).
+    ///
+    /// Deliberately still the simplest thing that works; the toast /
+    /// dialog treatment (with a real message history) arrives with the
+    /// file-browser phase.
+    ///
+    /// Returns how many messages were drained. A notice posted *by* a
+    /// continuation therefore surfaces on the following frame — which the
+    /// pump has already requested, since applying a continuation always
+    /// asks for a draw.
+    ///
+    /// Errors also go to stderr. On wasm that print is a no-op: the crate
+    /// has no `web_sys` dependency, and giving it one just for this is
+    /// plumbing that belongs with the Phase 5 browser provider, which
+    /// needs a real error channel anyway.
+    pub fn pump_notices(&self) -> usize {
+        let drained = self.drain_notices();
+        if drained.is_empty() {
+            return 0;
+        }
+        for notice in &drained {
+            if notice.level == NoticeLevel::Error {
+                eprintln!("storage error: {}", notice.text);
+            }
+        }
+        // Highest severity wins; `rposition` keeps the newest among equals.
+        let winner = drained
+            .iter()
+            .rposition(|n| n.level == NoticeLevel::Error)
+            .or_else(|| drained.len().checked_sub(1))
+            .map(|i| &drained[i]);
+        if let Some(winner) = winner {
+            let mut slot = lock(&self.last_notice);
+            let displacing_an_error = matches!(
+                slot.as_ref(),
+                Some(shown) if shown.level == NoticeLevel::Error
+            ) && winner.level != NoticeLevel::Error;
+            if !displacing_an_error {
+                *slot = Some(winner.clone());
+            }
+        }
+        // The status bar's text just changed, and this runs outside event
+        // dispatch, so nothing else will invalidate it.
+        agg_gui::animation::request_draw();
+        drained.len()
+    }
+
+    /// The message currently on display, if any.
+    pub fn last_notice(&self) -> Option<Notice> {
+        lock(&self.last_notice).clone()
+    }
+
+    /// Clear the displayed message — the status bar calls this when the
+    /// user clicks the text.
+    pub fn dismiss_notice(&self) {
+        *lock(&self.last_notice) = None;
+        agg_gui::animation::request_draw();
+    }
+
+    /// The status bar's storage readout: the first in-flight operation's
+    /// label, its progress when the provider reports any, and how many
+    /// other operations are queued behind it. `None` when nothing is in
+    /// flight, in which case the status bar reserves no space at all.
+    ///
+    /// Lives here rather than in the widget so tests can assert on the
+    /// exact string the widget paints without reading pixels.
+    pub fn storage_activity_text(&self) -> Option<String> {
+        let ops = self.pending_op_status();
+        let (label, progress) = ops.first()?;
+        let mut text = format!("{label}…");
+        if let Some(progress) = progress {
+            text.push_str(&format!(" {}%", (progress * 100.0).round() as i64));
+        }
+        if ops.len() > 1 {
+            text.push_str(&format!(" (+{} more)", ops.len() - 1));
+        }
+        Some(text)
     }
 
     /// Hand a storage operation to the frame pump.
@@ -203,17 +374,24 @@ impl AppState {
     ///   [`Self::pump_storage`]. They must not assume the state they saw
     ///   at submit time is still current, and must not assume any
     ///   particular lock is free or held.
+    ///
+    /// That inline path is also why this is **not** unconditionally
+    /// any-thread: parking a still-pending job is, but running a
+    /// continuation is main-thread work. Call it on the main thread
+    /// unless you know the job cannot already be settled.
     pub fn submit_op(&self, op: Box<dyn PendingOp>) {
         if op.poll().is_settled() {
             op.apply(self);
             // The continuation just changed something the user can see;
             // the pending-op branch below is not the only path that owes
             // the window a paint.
-            agg_gui::animation::request_draw();
+            agg_gui::animation::signal_async_state_change();
             return;
         }
         lock(&self.pending_ops).push(op);
-        agg_gui::animation::request_draw();
+        // Cross-thread-safe: a worker that submits an operation must be
+        // able to wake the main loop, which a thread-local flag cannot do.
+        agg_gui::animation::signal_async_state_change();
     }
 
     /// Apply every settled operation. Called once per frame by each shell,
@@ -234,6 +412,10 @@ impl AppState {
     /// continuation is allowed to call [`Self::submit_op`] itself (a chained
     /// operation), and re-entering the lock would deadlock.
     pub fn pump_storage(&self) -> bool {
+        // Ahead of the early return below: an inline continuation posts
+        // its message without ever queueing an operation, so notices must
+        // drain even on frames where the pending queue is empty.
+        self.pump_notices();
         let settled: Vec<Box<dyn PendingOp>> = {
             let mut ops = lock(&self.pending_ops);
             if ops.is_empty() {
@@ -252,8 +434,14 @@ impl AppState {
         // Re-read rather than reusing the count above: a continuation may
         // have queued a follow-up operation while the lock was released.
         let pending = !lock(&self.pending_ops).is_empty();
-        if applied || pending {
+        if applied {
+            // A continuation swapped in a loaded graph or a new title;
+            // that is a content change, so invalidate properly.
             agg_gui::animation::request_draw();
+        } else if pending {
+            // Pure keep-alive: nothing changed, we just need the loop to
+            // come back next frame. No epoch bump — see the module docs.
+            agg_gui::animation::request_draw_without_invalidation();
         }
         pending
     }
@@ -292,332 +480,81 @@ impl AppState {
         }
         agg_gui::animation::request_draw();
     }
+
+    /// Run the pump until the queue drains or `timeout` elapses — the
+    /// app-shutdown path.
+    ///
+    /// Without this, closing the window between the submit and the settle
+    /// of a save silently discards it: the event loop stops calling
+    /// [`Self::pump_storage`] and the continuation that would have
+    /// re-baselined (or reported the failure) never runs.
+    ///
+    /// Returns `true` when everything drained. On timeout it cancels
+    /// whatever is left and pumps — a cancelled job settles as
+    /// [`StorageError::Cancelled`], so continuations still observe an
+    /// outcome — reports the abandoned labels on stderr, and returns
+    /// `false`.
+    ///
+    /// That cancel-and-pump repeats up to [`FINAL_PUMP_ROUNDS`] times,
+    /// because a continuation is allowed to chain a follow-up operation
+    /// ("save, then verify"): a single final pump would leave the
+    /// follow-up queued and drop it silently, which is exactly the failure
+    /// this method exists to prevent. The bound keeps a continuation that
+    /// re-submits forever from wedging the close.
+    ///
+    /// Native-only: the browser has no exit path to drain on, and
+    /// blocking its single thread would stop the very worker the jobs
+    /// depend on.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn drain_pending_ops(&self, timeout: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if !self.pump_storage() {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            // Providers settle on their own threads; yield rather than
+            // spin so they get the CPU.
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        let abandoned: Vec<String> = self
+            .pending_op_status()
+            .into_iter()
+            .map(|(label, _progress)| label)
+            .collect();
+        // Let the continuations observe `Cancelled` before we walk away —
+        // including any follow-up operation they chain while doing so.
+        for _ in 0..FINAL_PUMP_ROUNDS {
+            self.cancel_pending_ops();
+            if !self.pump_storage() {
+                break;
+            }
+        }
+        eprintln!(
+            "storage: abandoned {} operation(s) after waiting {:?} at exit: {}",
+            abandoned.len(),
+            timeout,
+            abandoned.join(", ")
+        );
+        let left_over = self.pending_op_status();
+        if !left_over.is_empty() {
+            let labels: Vec<String> = left_over.into_iter().map(|(l, _)| l).collect();
+            eprintln!(
+                "storage: {} operation(s) still queued after {FINAL_PUMP_ROUNDS} \
+                 cancel rounds and dropped at exit: {}",
+                labels.len(),
+                labels.join(", ")
+            );
+        }
+        false
+    }
 }
 
+// Tests live in `storage_ops_tests.rs` so this file stays under the
+// 800-line cap.
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use atomartist_storage::{
-        FlakyConfig, FlakyProvider, MemoryProvider, Precondition, StorageProvider, StorageRegistry,
-        StorageUri,
-    };
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    fn state() -> AppState {
-        AppState::new(
-            atomartist_lib::Graph::new(),
-            atomartist_lib::registry::NodeRegistry::new(),
-        )
-    }
-
-    /// A memory provider wrapped in `latency` pump-ticks of simulated
-    /// delay, plus the URI of its root.
-    fn flaky(config: FlakyConfig) -> (Arc<FlakyProvider>, StorageUri) {
-        let inner = MemoryProvider::new("mem", "Memory");
-        let root = inner.root();
-        (Arc::new(FlakyProvider::new(Arc::new(inner), config)), root)
-    }
-
-    fn sync_registry() -> Arc<StorageRegistry> {
-        let mut registry = StorageRegistry::new();
-        registry
-            .register(Arc::new(MemoryProvider::new("mem", "Memory")))
-            .expect("fresh registry");
-        Arc::new(registry)
-    }
-
-    /// The desktop path: a provider that settles immediately must not cost
-    /// a frame, so `submit_op` applies the continuation before it returns.
-    #[test]
-    fn a_synchronous_op_is_applied_inline_at_submit_time() {
-        let registry = sync_registry();
-        let state = AppState::with_storage(
-            atomartist_lib::Graph::new(),
-            atomartist_lib::registry::NodeRegistry::new(),
-            registry.clone(),
-        );
-        let uri: StorageUri = "mem:///a.bin".parse().unwrap();
-        let provider = registry.resolve(&uri).expect("memory provider");
-        provider
-            .write(&uri, b"payload".to_vec(), Precondition::None)
-            .take()
-            .expect("synchronous write settles")
-            .expect("write succeeds");
-
-        let seen = Arc::new(Mutex::new(None::<Vec<u8>>));
-        let sink = seen.clone();
-        state.submit_op(Box::new(JobOp::new(
-            "Opening a.bin",
-            provider.read(&uri),
-            move |_state, result| {
-                *lock(&sink) = result.ok();
-            },
-        )));
-
-        assert_eq!(state.pending_op_count(), 0, "nothing should be queued");
-        assert_eq!(lock(&seen).as_deref(), Some(&b"payload"[..]));
-    }
-
-    /// The whole point of the pump: a provider that needs time gets its
-    /// continuation run on a later frame, exactly once.
-    #[test]
-    fn a_delayed_op_is_parked_until_the_pump_sees_it_settle() {
-        let state = state();
-        let (provider, root) = flaky(FlakyConfig::default().with_latency(2));
-        let at = root.join("a.bin");
-        provider
-            .write(&at, b"payload".to_vec(), Precondition::None)
-            .poll();
-        provider.pump_until_idle();
-
-        let runs = Arc::new(AtomicUsize::new(0));
-        let counter = runs.clone();
-        state.submit_op(Box::new(JobOp::new(
-            "Opening a.bin",
-            provider.read(&at),
-            move |_state, result| {
-                assert_eq!(result.expect("read succeeds"), b"payload".to_vec());
-                counter.fetch_add(1, Ordering::Relaxed);
-            },
-        )));
-
-        assert_eq!(state.pending_op_count(), 1, "latency parks the op");
-        assert_eq!(
-            state.pending_op_status(),
-            vec![("Opening a.bin".to_string(), None)]
-        );
-
-        // Frame 1: the provider's clock has not delivered yet.
-        provider.pump();
-        assert!(state.pump_storage(), "still in flight after one tick");
-        assert_eq!(runs.load(Ordering::Relaxed), 0);
-
-        // Frame 2: the result lands and the continuation runs.
-        provider.pump();
-        assert!(!state.pump_storage(), "queue drains on the settling frame");
-        assert_eq!(runs.load(Ordering::Relaxed), 1);
-        assert_eq!(state.pending_op_count(), 0);
-
-        // Further frames must not re-run it.
-        state.pump_storage();
-        assert_eq!(runs.load(Ordering::Relaxed), 1);
-    }
-
-    /// Chained operations are the reason `pump_storage` releases the queue
-    /// lock before applying: without that this test deadlocks.
-    #[test]
-    fn a_continuation_can_submit_another_op_without_deadlocking() {
-        let state = state();
-        let (provider, root) = flaky(FlakyConfig::default().with_latency(1));
-        let at = root.join("a.bin");
-        let child_provider = provider.clone();
-        let child_at = at.clone();
-
-        let child_done = Arc::new(AtomicUsize::new(0));
-        let child_counter = child_done.clone();
-        state.submit_op(Box::new(JobOp::new(
-            "Saving a.bin",
-            provider.write(&at, b"payload".to_vec(), Precondition::None),
-            move |state, result| {
-                result.expect("write succeeds");
-                let counter = child_counter.clone();
-                state.submit_op(Box::new(JobOp::new(
-                    "Verifying a.bin",
-                    child_provider.read(&child_at),
-                    move |_state, result| {
-                        assert_eq!(result.expect("read back"), b"payload".to_vec());
-                        counter.fetch_add(1, Ordering::Relaxed);
-                    },
-                )));
-            },
-        )));
-
-        provider.pump();
-        assert!(
-            state.pump_storage(),
-            "the child op queued by the parent keeps the pump alive"
-        );
-        assert_eq!(state.pending_op_count(), 1);
-
-        provider.pump();
-        assert!(!state.pump_storage());
-        assert_eq!(child_done.load(Ordering::Relaxed), 1);
-    }
-
-    /// A failure reaches the continuation as `Err`, and the continuation's
-    /// message reaches the UI through the notice queue.
-    #[test]
-    fn a_failed_op_delivers_its_error_and_can_post_a_notice() {
-        let state = state();
-        let (provider, root) = flaky(FlakyConfig::default().with_latency(1));
-        let at = root.join("missing.bin");
-
-        state.submit_op(Box::new(JobOp::new(
-            "Opening missing.bin",
-            provider.read(&at),
-            |state, result| {
-                let err = result.err().expect("reading a missing file fails");
-                assert_eq!(err, StorageError::NotFound);
-                state.notify(NoticeLevel::Error, format!("could not open: {err}"));
-            },
-        )));
-
-        // The failure travels through the pump exactly like a success.
-        assert_eq!(state.pending_op_count(), 1);
-        provider.pump();
-        assert!(!state.pump_storage());
-        assert_eq!(state.pending_op_count(), 0);
-        let notices = state.drain_notices();
-        assert_eq!(notices.len(), 1);
-        assert_eq!(notices[0].level, NoticeLevel::Error);
-        assert!(
-            notices[0].text.starts_with("could not open:"),
-            "unexpected notice: {}",
-            notices[0].text
-        );
-        assert!(state.drain_notices().is_empty(), "draining is destructive");
-    }
-
-    #[test]
-    fn cancelling_settles_pending_ops_as_cancelled() {
-        let state = state();
-        let (provider, root) = flaky(FlakyConfig::default().with_latency(5));
-        let at = root.join("a.bin");
-
-        let seen = Arc::new(Mutex::new(None::<StorageError>));
-        let sink = seen.clone();
-        state.submit_op(Box::new(JobOp::new(
-            "Opening a.bin",
-            provider.read(&at),
-            move |_state, result| {
-                *lock(&sink) = result.err();
-            },
-        )));
-        assert_eq!(state.pending_op_count(), 1);
-
-        state.cancel_pending_ops();
-        // Cancellation settles the job, so the very next pump — with no
-        // further provider ticks — applies the continuation.
-        assert!(!state.pump_storage());
-        assert_eq!(*lock(&seen), Some(StorageError::Cancelled));
-        assert_eq!(state.pending_op_count(), 0);
-    }
-
-    /// Applying a continuation changes what the window shows (a loaded
-    /// graph swaps in, a title updates), so the frame that applies it must
-    /// also ask for a paint. The keep-alive request only covers frames
-    /// where work *remains*; on the settling frame there is nothing left
-    /// to keep alive and the window would otherwise stay stale until the
-    /// next input event.
-    #[test]
-    fn the_pump_requests_a_draw_on_the_frame_it_applies_an_op() {
-        let state = state();
-        let (provider, root) = flaky(FlakyConfig::default().with_latency(1));
-        let at = root.join("a.bin");
-
-        let runs = Arc::new(AtomicUsize::new(0));
-        let counter = runs.clone();
-        state.submit_op(Box::new(JobOp::new(
-            "Saving a.bin",
-            provider.write(&at, b"payload".to_vec(), Precondition::None),
-            move |_state, result| {
-                result.expect("write succeeds");
-                counter.fetch_add(1, Ordering::Relaxed);
-            },
-        )));
-
-        provider.pump();
-        // Clear *after* the provider tick so only the pump's own request
-        // can set the flag. The continuation deliberately posts no notice,
-        // because `notify` requests a draw of its own.
-        agg_gui::animation::clear_draw_request();
-        assert!(!state.pump_storage(), "the queue drains on this frame");
-        assert_eq!(runs.load(Ordering::Relaxed), 1, "continuation ran");
-        assert!(
-            agg_gui::animation::wants_draw(),
-            "applying a continuation must repaint the window"
-        );
-    }
-
-    /// The inline fast path has the same obligation: a synchronous
-    /// provider's continuation runs during event handling, and whatever it
-    /// changed has to reach the screen.
-    #[test]
-    fn an_inline_op_requests_a_draw() {
-        let registry = sync_registry();
-        let state = AppState::with_storage(
-            atomartist_lib::Graph::new(),
-            atomartist_lib::registry::NodeRegistry::new(),
-            registry.clone(),
-        );
-        let uri: StorageUri = "mem:///a.bin".parse().unwrap();
-        let provider = registry.resolve(&uri).expect("memory provider");
-
-        let runs = Arc::new(AtomicUsize::new(0));
-        let counter = runs.clone();
-        let job = provider.write(&uri, b"payload".to_vec(), Precondition::None);
-        agg_gui::animation::clear_draw_request();
-        state.submit_op(Box::new(JobOp::new(
-            "Saving a.bin",
-            job,
-            move |_state, result| {
-                result.expect("write succeeds");
-                counter.fetch_add(1, Ordering::Relaxed);
-            },
-        )));
-
-        assert_eq!(state.pending_op_count(), 0, "applied inline");
-        assert_eq!(runs.load(Ordering::Relaxed), 1);
-        assert!(
-            agg_gui::animation::wants_draw(),
-            "an inline continuation must repaint the window"
-        );
-    }
-
-    /// Documents the re-entrancy contract of [`AppState::submit_op`]: the
-    /// continuation may run on the caller's own stack, so it may take any
-    /// `AppState` lock *provided the caller holds none*. The mirror case —
-    /// caller holding `state.graph` across `submit_op` — self-deadlocks and
-    /// is therefore a rule in the doc comment rather than a test.
-    #[test]
-    fn an_inline_continuation_may_lock_app_state() {
-        let registry = sync_registry();
-        let state = AppState::with_storage(
-            atomartist_lib::Graph::new(),
-            atomartist_lib::registry::NodeRegistry::new(),
-            registry.clone(),
-        );
-        let uri: StorageUri = "mem:///a.bin".parse().unwrap();
-        let provider = registry.resolve(&uri).expect("memory provider");
-
-        let node_count = Arc::new(AtomicUsize::new(usize::MAX));
-        let sink = node_count.clone();
-        state.submit_op(Box::new(JobOp::new(
-            "Saving a.bin",
-            provider.write(&uri, b"payload".to_vec(), Precondition::None),
-            move |state, result| {
-                result.expect("write succeeds");
-                // Runs inline, on this very stack. Legal because the
-                // caller above holds no lock.
-                let graph = lock(&state.graph);
-                sink.store(graph.nodes().count(), Ordering::Relaxed);
-            },
-        )));
-
-        assert_eq!(node_count.load(Ordering::Relaxed), 0, "continuation ran");
-    }
-
-    /// The common case, run every single frame: an empty queue must be
-    /// cheap and must not ask for another frame, or the app would never
-    /// go idle.
-    #[test]
-    fn pumping_an_empty_queue_is_a_no_op() {
-        let state = state();
-        agg_gui::animation::clear_draw_request();
-        assert!(!state.pump_storage());
-        assert!(
-            !agg_gui::animation::wants_draw(),
-            "an idle pump must not keep the reactive loop awake"
-        );
-    }
-}
+#[path = "storage_ops_tests.rs"]
+mod storage_ops_tests;

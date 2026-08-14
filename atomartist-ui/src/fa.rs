@@ -53,6 +53,9 @@ pub const PLUG: char = '\u{f1e6}'; // fa-plug (output)
 pub const CHEVRON_LEFT: char = '\u{f053}'; // fa-chevron-left
 pub const CHEVRON_RIGHT: char = '\u{f054}'; // fa-chevron-right
 
+// Status-bar chrome — the cancel affordance on an in-flight storage op.
+pub const TIMES: char = '\u{f00d}'; // fa-times
+
 /// Every icon constant paired with its name. The coverage test iterates this,
 /// so adding a new icon above without listing it here (or with a code point
 /// absent from the font) fails loudly.
@@ -81,6 +84,7 @@ pub(crate) const ALL_ICONS: &[(&str, char)] = &[
     ("PLUG", PLUG),
     ("CHEVRON_LEFT", CHEVRON_LEFT),
     ("CHEVRON_RIGHT", CHEVRON_RIGHT),
+    ("TIMES", TIMES),
 ];
 
 #[cfg(test)]

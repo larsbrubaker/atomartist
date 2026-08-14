@@ -173,6 +173,13 @@ pub struct AppState {
     /// outside the widget tree and so have no dialog provider to talk
     /// to. Drained by the UI on its next paint.
     pub(crate) notices: crate::storage_ops::Notices,
+    /// The most recent drained [`Notice`](crate::storage_ops::Notice),
+    /// kept so the status bar has something to paint after the queue is
+    /// emptied. Written by
+    /// [`AppState::pump_notices`](crate::storage_ops), cleared by
+    /// [`AppState::dismiss_notice`](crate::storage_ops) when the user
+    /// clicks the message.
+    pub(crate) last_notice: crate::storage_ops::LastNotice,
 }
 
 impl AppState {
@@ -228,6 +235,7 @@ impl AppState {
             storage,
             pending_ops: Arc::new(Mutex::new(Vec::new())),
             notices: Arc::new(Mutex::new(Vec::new())),
+            last_notice: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -579,6 +587,7 @@ impl Clone for AppState {
             // same in-flight operations the shell's pump drains.
             pending_ops: self.pending_ops.clone(),
             notices: self.notices.clone(),
+            last_notice: self.last_notice.clone(),
         }
     }
 }
