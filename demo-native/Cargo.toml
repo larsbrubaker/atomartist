@@ -14,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 agg-gui             = { path = "../../agg-gui/agg-gui", default-features = false, features = ["winit-adapter"] }
 atomartist-lib      = { path = "../atomartist-lib" }
+atomartist-storage  = { path = "../atomartist-storage" }
 atomartist-renderer = { path = "../atomartist-renderer" }
 atomartist-ui       = { path = "../atomartist-ui" }
 demo-wgpu           = { path = "../../agg-gui/demo-wgpu", default-features = false }

@@ -31,4 +31,4 @@
 
 pub mod harness;
 
-pub use harness::TestHarness;
+pub use harness::{memory_uri, test_storage_registry, TestHarness, MEMORY_SCHEME};

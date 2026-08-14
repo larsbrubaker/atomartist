@@ -79,20 +79,30 @@ pub fn build_app(
             // Import. Other extensions are ignored silently — future
             // asset-backed nodes (image, vector, …) can be routed
             // here once they exist.
+            //
+            // The OS hands agg-gui `PathBuf`s (a fixed API), so this is
+            // the boundary where a dropped file becomes a `file:`
+            // [`StorageUri`] — the only representation the rest of the
+            // app deals in.
             .with_file_drop_handler(move |paths, canvas_pos| {
                 for path in paths {
-                    let ext = path
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .map(|s| s.to_ascii_lowercase())
-                        .unwrap_or_default();
+                    // A UNC / verbatim path has no round-trippable URI
+                    // form (see `StorageUri::from_local_path`); skip it
+                    // loudly rather than importing the wrong file.
+                    let Some(uri) = atomartist_storage::StorageUri::from_local_path(path) else {
+                        eprintln!(
+                            "drop import skipped: {} is a network (UNC) or verbatim path, \
+                             which is not supported yet — map the share to a drive letter",
+                            path.display()
+                        );
+                        continue;
+                    };
+                    let ext = crate::app_state_storage::uri_extension(&uri);
                     let result = match ext.as_str() {
-                        "stl" | "obj" | "3mf" => drop_state
-                            .import_mesh_file(path.as_path(), canvas_pos)
-                            .map(|_| ()),
-                        "mcx" | "atmr" => drop_state
-                            .import_scene_file(path.as_path())
-                            .map(|_| ()),
+                        "stl" | "obj" | "3mf" => {
+                            drop_state.import_mesh_file(&uri, canvas_pos).map(|_| ())
+                        }
+                        "mcx" | "atmr" => drop_state.import_scene_file(&uri).map(|_| ()),
                         _ => continue,
                     };
                     if let Err(e) = result {
@@ -187,13 +197,24 @@ pub fn build_app(
 }
 
 /// Convenience: build a fresh `AppState` with all built-in node types
-/// pre-registered. Callers (demo-native / demo-wasm) typically pass this
-/// straight to `build_app`.
+/// pre-registered and an **empty** storage registry — project IO fails
+/// until a shell registers a provider. Tests that never touch storage
+/// use this directly.
 pub fn fresh_state_with_builtins() -> AppState {
+    fresh_state_with_builtins_and_storage(Arc::new(atomartist_storage::StorageRegistry::new()))
+}
+
+/// Same, with the shell's storage providers supplied. `demo-native`
+/// passes a registry holding `LocalFsProvider`; the test harness passes
+/// a `MemoryProvider` (plus `LocalFsProvider` on native). This crate
+/// never picks a backend for its callers.
+pub fn fresh_state_with_builtins_and_storage(
+    storage: Arc<atomartist_storage::StorageRegistry>,
+) -> AppState {
     use atomartist_lib::{nodes, registry::NodeRegistry, Graph};
     let mut reg = NodeRegistry::new();
     nodes::register_all(&mut reg);
-    AppState::new(Graph::new(), reg)
+    AppState::with_storage(Graph::new(), reg, storage)
 }
 
 /// Same as `fresh_state_with_builtins`, but seeds the graph with the
@@ -201,8 +222,18 @@ pub fn fresh_state_with_builtins() -> AppState {
 /// NodeDesigner reference scene) and runs the first evaluation so the
 /// 3D viewport shows a rounded extruded plate on app start.
 pub fn fresh_state_with_starter_graph() -> AppState {
+    fresh_state_with_starter_graph_and_storage(Arc::new(
+        atomartist_storage::StorageRegistry::new(),
+    ))
+}
+
+/// Starter graph over a caller-supplied storage registry — the shape
+/// both demo shells and the UI test harness use.
+pub fn fresh_state_with_starter_graph_and_storage(
+    storage: Arc<atomartist_storage::StorageRegistry>,
+) -> AppState {
     use atomartist_lib::graph::graph::Noodle;
-    let state = fresh_state_with_builtins();
+    let state = fresh_state_with_builtins_and_storage(storage);
     let display_target = {
         let mut g = state.graph.lock().unwrap();
 

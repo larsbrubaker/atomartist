@@ -9,9 +9,11 @@
 
 use agg_gui::theme::{AccentColor, ThemePreference};
 use atomartist_lib::graph::undo_commands::AddNodeCmd;
+use atomartist_storage::StorageUri;
 
 use crate::app_state::AppState;
 use crate::app_state_files::MeshExportFormat;
+use crate::app_state_storage::{display_uri, uri_exists, uri_file_stem};
 use crate::debug_windows::DebugWindowHandles;
 use crate::top_menu_bar::{FileDialogProvider, UnsavedChoice};
 
@@ -33,16 +35,16 @@ pub fn confirm_discard_unsaved(state: &AppState, dialogs: &dyn FileDialogProvide
     }
 }
 
-/// Save to the current file, prompting for a path when the project has
+/// Save to the current location, prompting for one when the project has
 /// never been saved. Returns `true` on a completed save.
 pub fn save_current(state: &AppState, dialogs: &dyn FileDialogProvider) -> bool {
     let existing = state.current_file.lock().unwrap().clone();
-    let path = match existing {
-        Some(p) => Some(p),
+    let target = match existing {
+        Some(uri) => Some(uri),
         None => dialogs.pick_save_project("untitled.atmr"),
     };
-    let Some(p) = path else { return false };
-    match state.save_graph_to_path(&p) {
+    let Some(uri) = target else { return false };
+    match state.save_graph_to_uri(&uri) {
         Ok(()) => true,
         Err(e) => {
             dialogs.show_error(&format!("Save failed: {}", e));
@@ -59,13 +61,13 @@ fn export_default_name(state: &AppState, ext: &str) -> String {
         .lock()
         .unwrap()
         .as_ref()
-        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .and_then(uri_file_stem)
         .unwrap_or_else(|| "export".to_string());
     format!("{stem}.{ext}")
 }
 
-fn open_project_at(state: &AppState, dialogs: &dyn FileDialogProvider, path: &std::path::Path) {
-    if let Err(e) = state.load_graph_from_path(path) {
+fn open_project_at(state: &AppState, dialogs: &dyn FileDialogProvider, uri: &StorageUri) {
+    if let Err(e) = state.load_graph_from_uri(uri) {
         dialogs.show_error(&format!("Open failed: {}", e));
     }
 }
@@ -151,23 +153,27 @@ pub(crate) fn handle_action(
     }
     // Recent-file opens: the index refers into the live MRU list.
     if let Some(idx) = action.strip_prefix("file.recent.") {
-        let Some(path) = idx
+        let Some(uri) = idx
             .parse::<usize>()
             .ok()
             .and_then(|i| state.recent_projects.lock().unwrap().get(i).cloned())
         else {
             return;
         };
-        if !path.exists() {
+        // Ask the provider whether the project is still there. An
+        // unknown scheme (a provider the current build doesn't
+        // register) reads the same as a deleted file: the entry can't
+        // be opened, so it leaves the list.
+        if !uri_exists(&state.storage, &uri) {
             dialogs.show_error(&format!(
                 "{} no longer exists — removing it from the recent list.",
-                path.display()
+                display_uri(&uri)
             ));
-            state.recent_projects.lock().unwrap().retain(|p| p != &path);
+            state.recent_projects.lock().unwrap().retain(|u| u != &uri);
             return;
         }
         if confirm_discard_unsaved(state, dialogs) {
-            open_project_at(state, dialogs, &path);
+            open_project_at(state, dialogs, &uri);
         }
         return;
     }
@@ -180,15 +186,15 @@ pub(crate) fn handle_action(
         };
         if let Some(format) = format {
             let name = export_default_name(state, format.extension());
-            if let Some(path) = dialogs.pick_save_export(format.extension(), &name) {
-                if let Err(e) = state.export_mesh_to_path(&path, format) {
+            if let Some(uri) = dialogs.pick_save_export(format.extension(), &name) {
+                if let Err(e) = state.export_mesh_to_uri(&uri, format) {
                     dialogs.show_error(&format!("Export failed: {}", e));
                 }
             }
         } else if ext == "atmr" {
             let name = export_default_name(state, "atmr");
-            if let Some(path) = dialogs.pick_save_export("atmr", &name) {
-                if let Err(e) = state.export_project_copy_to_path(&path) {
+            if let Some(uri) = dialogs.pick_save_export("atmr", &name) {
+                if let Err(e) = state.export_project_copy_to_uri(&uri) {
                     dialogs.show_error(&format!("Export failed: {}", e));
                 }
             }
@@ -215,8 +221,8 @@ pub(crate) fn handle_action(
             if !confirm_discard_unsaved(state, dialogs) {
                 return;
             }
-            if let Some(path) = dialogs.pick_open_project() {
-                open_project_at(state, dialogs, &path);
+            if let Some(uri) = dialogs.pick_open_project() {
+                open_project_at(state, dialogs, &uri);
             }
         }
         "file.save" => {
@@ -228,10 +234,10 @@ pub(crate) fn handle_action(
                 .lock()
                 .unwrap()
                 .as_ref()
-                .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()))
+                .and_then(|uri| uri.file_name().map(|n| n.to_string()))
                 .unwrap_or_else(|| "untitled.atmr".to_string());
-            if let Some(path) = dialogs.pick_save_project(&suggested) {
-                if let Err(e) = state.save_graph_to_path(&path) {
+            if let Some(uri) = dialogs.pick_save_project(&suggested) {
+                if let Err(e) = state.save_graph_to_uri(&uri) {
                     dialogs.show_error(&format!("Save failed: {}", e));
                 }
             }
@@ -239,8 +245,8 @@ pub(crate) fn handle_action(
         "file.import" => {
             // Import adds to the scene rather than replacing it, so no
             // unsaved-changes gate.
-            if let Some(path) = dialogs.pick_import_file() {
-                if let Err(e) = state.import_scene_file(&path) {
+            if let Some(uri) = dialogs.pick_import_file() {
+                if let Err(e) = state.import_scene_file(&uri) {
                     dialogs.show_error(&format!("Import failed: {}", e));
                 }
             }

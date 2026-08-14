@@ -1,6 +1,11 @@
 //! Drag-and-drop integration: dropping a mesh file on the node canvas
 //! should add a `MeshNode` that immediately produces geometry.
 //!
+//! These keep using real temp files (and `file:` URIs) on purpose: a
+//! drag-and-drop payload arrives from the OS as a `PathBuf`, so the
+//! filesystem is genuinely part of what is under test here. Every other
+//! file test runs against the in-memory provider.
+//!
 //! Tests against the real `App` event path — `App::on_file_dropped` is
 //! the same entry point `demo-native`'s `WindowEvent::DroppedFile`
 //! handler invokes — so a passing test here means dragging the same
@@ -9,6 +14,7 @@
 use std::path::PathBuf;
 
 use atomartist_lib::graph::node::PortValue;
+use atomartist_storage::StorageUri;
 use atomartist_lib::nodes::mesh::mesh_node;
 use atomartist_ui_test::TestHarness;
 
@@ -205,8 +211,12 @@ fn dropping_an_atmr_project_merges_into_the_scene() {
     // Scene formats route through import_scene_file: dropping a saved
     // project merges its nodes (minus Output) into the current graph.
     let mut h = TestHarness::with_starter_graph();
+    // OS drops deliver a `PathBuf`, so this project has to be a real
+    // file: save it through the harness's `file:` provider and drop the
+    // same path the shell would hand us.
     let proj = std::env::temp_dir().join("__atmr_drop_project.atmr");
-    h.state().save_graph_to_path(&proj).unwrap();
+    let proj_uri = StorageUri::from_local_path(&proj).expect("temp path has a URI form");
+    h.state().save_graph_to_uri(&proj_uri).unwrap();
     let before = h.state().graph.lock().unwrap().node_count();
 
     let canvas = h.find_by_id("node-canvas").expect("canvas widget");

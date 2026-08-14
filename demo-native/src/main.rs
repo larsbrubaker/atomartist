@@ -14,9 +14,10 @@ use std::sync::Arc;
 use agg_gui::{
     persistence::AutoSave, App, DrawCtx, Key, Modifiers, MouseButton,
 };
+use atomartist_storage::{LocalFsProvider, StorageRegistry};
 use atomartist_ui::{
-    build_app, fresh_state_with_starter_graph, install_theme_and_fonts,
-    top_menu_bar::FileDialogProvider, MainWindowState, UiSettings, WindowPlacement,
+    build_app, fresh_state_with_starter_graph_and_storage, install_theme_and_fonts,
+    top_menu_bar::FileDialogProvider, uri_exists, MainWindowState, UiSettings, WindowPlacement,
 };
 use demo_wgpu::WgpuGfxCtx;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
@@ -320,8 +321,19 @@ fn main() {
         init_h,
     );
 
+    // Storage backends this shell offers. Native gets the real
+    // filesystem under the `file:` scheme; `atomartist-ui` itself
+    // registers nothing, so the choice lives here in the shell.
+    let storage = {
+        let mut registry = StorageRegistry::new();
+        registry
+            .register(Arc::new(LocalFsProvider::new()))
+            .expect("fresh registry accepts the local filesystem provider");
+        Arc::new(registry)
+    };
+
     // Build the AtomArtist UI with a starter Box visible in the viewport.
-    let state = fresh_state_with_starter_graph();
+    let state = fresh_state_with_starter_graph_and_storage(storage);
     // Apply the HUD button states (perspective / turntable / bed /
     // render style / snap) that were read from disk at the top of
     // `main`, *before* mounting the widget tree so the first paint
@@ -339,18 +351,18 @@ fn main() {
         .as_ref()
         .and_then(|s| s.last_project_path.as_ref())
     {
-        if last.exists() {
-            if let Err(e) = state.load_graph_from_path(last) {
-                eprintln!(
-                    "warning: could not reopen last project {}: {}",
-                    last.display(),
-                    e
-                );
+        // Existence is a question for the provider that owns the URI's
+        // scheme, not for `std::fs` — a project saved to a backend this
+        // build no longer registers reads as "not there" and we start
+        // fresh instead of failing.
+        if uri_exists(&state.storage, last) {
+            if let Err(e) = state.load_graph_from_uri(last) {
+                eprintln!("warning: could not reopen last project {}: {}", last, e);
             }
         } else {
             eprintln!(
                 "info: last project {} no longer exists, starting fresh",
-                last.display()
+                last
             );
         }
     }

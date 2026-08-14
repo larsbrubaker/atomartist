@@ -7,6 +7,11 @@
 
 use super::*;
 
+/// Parse a URI literal in tests; every one here is well-formed.
+fn uri(text: &str) -> StorageUri {
+    StorageUri::from_str(text).expect("valid storage URI")
+}
+
 #[test]
 fn defaults_round_trip_through_text() {
     let s = UiSettings::default();
@@ -46,12 +51,12 @@ fn non_default_values_round_trip() {
                 height: 140.0,
             },
         },
-        last_project_path: Some(PathBuf::from("C:/users/bob/projects/widget.atmr")),
+        last_project_path: Some(uri("file:///C:/users/bob/projects/widget.atmr")),
         theme: ThemePreference::Dark,
         accent_color: AccentColor::Purple,
         recent_projects: vec![
-            PathBuf::from("C:/users/bob/projects/widget.atmr"),
-            PathBuf::from("C:/users/bob/projects/older.atmr"),
+            uri("file:///C:/users/bob/projects/widget.atmr"),
+            uri("mem:///projects/older.atmr"),
         ],
     };
     let parsed = UiSettings::from_text(&s.to_text());
@@ -68,13 +73,74 @@ fn last_project_path_round_trips_when_present_and_absent() {
     assert_eq!(parsed.last_project_path, None);
 
     // Present: serialized and parsed back through.
-    s.last_project_path = Some(PathBuf::from("/tmp/atomartist/test.atmr"));
+    s.last_project_path = Some(uri("file:///tmp/atomartist/test.atmr"));
     let parsed = UiSettings::from_text(&s.to_text());
     assert_eq!(parsed.last_project_path, s.last_project_path);
 
     // Empty value explicitly clears the slot.
     let parsed = UiSettings::from_text("last_project_path=\n");
     assert_eq!(parsed.last_project_path, None);
+}
+
+/// Pre-release rule (plan §3.1): project locations that are not valid
+/// `StorageUri`s are *discarded*, not migrated. A developer's stale
+/// settings file holds path-style values; rather than guessing a scheme
+/// for them we let them vanish — the user loses a menu entry, and never
+/// opens the wrong file.
+#[test]
+fn unparseable_project_locations_are_silently_discarded() {
+    let parsed = UiSettings::from_text(
+        "last_project_path=C:\\users\\bob\\widget.atmr\n\
+         recent_project_0=/home/bob/older.atmr\n\
+         recent_project_1=:::not a uri:::\n\
+         recent_project_2=mem:///kept.atmr\n",
+    );
+    assert_eq!(
+        parsed.last_project_path, None,
+        "a path-style last_project_path must not survive as a bogus URI"
+    );
+    assert_eq!(
+        parsed.recent_projects,
+        vec![uri("mem:///kept.atmr")],
+        "only the well-formed recent entry survives"
+    );
+
+    // The rest of the file still parses — one bad location must not
+    // knock the whole settings blob back to defaults.
+    let parsed = UiSettings::from_text("last_project_path=nonsense\nturntable=false\n");
+    assert_eq!(parsed.last_project_path, None);
+    assert!(!parsed.turntable);
+}
+
+/// The recent list is capped on read as well as on write, so a hand-
+/// edited (or corrupted) file cannot grow the File → Open Recent menu
+/// without bound.
+#[test]
+fn recent_projects_are_truncated_to_the_cap() {
+    let over_cap = MAX_RECENT_PROJECTS + 5;
+    let text: String = (0..over_cap)
+        .map(|i| format!("recent_project_{i}=mem:///p{i}.atmr\n"))
+        .collect();
+
+    let parsed = UiSettings::from_text(&text);
+    assert_eq!(parsed.recent_projects.len(), MAX_RECENT_PROJECTS);
+    // Truncation keeps the front of the index-sorted list — the most
+    // recent projects, which is what the menu should show.
+    assert_eq!(parsed.recent_projects[0], uri("mem:///p0.atmr"));
+    assert_eq!(
+        parsed.recent_projects[MAX_RECENT_PROJECTS - 1],
+        uri(&format!("mem:///p{}.atmr", MAX_RECENT_PROJECTS - 1))
+    );
+
+    // And on write: an over-long in-memory list emits only the cap.
+    let s = UiSettings {
+        recent_projects: (0..over_cap)
+            .map(|i| uri(&format!("mem:///p{i}.atmr")))
+            .collect(),
+        ..UiSettings::default()
+    };
+    let round_tripped = UiSettings::from_text(&s.to_text());
+    assert_eq!(round_tripped.recent_projects.len(), MAX_RECENT_PROJECTS);
 }
 
 #[test]

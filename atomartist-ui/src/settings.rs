@@ -30,16 +30,27 @@
 //! performance_h=160
 //! ```
 //!
+//! Project *locations* inside these settings (`last_project_path`,
+//! `recent_projects`) are [`StorageUri`]s and are read / written through
+//! a storage provider like every other project reference. The settings
+//! file **itself** is shell-owned application configuration, not project
+//! storage, so [`UiSettings::read_from_file`] /
+//! [`UiSettings::write_to_file`] keep using `Path` + `std::fs` — this
+//! module is on the documented allowlist in
+//! `atomartist-lib/tests/no_fs_outside_provider.rs`.
+//!
 //! `read_from_str` is forgiving: unknown keys are skipped, missing
 //! keys default to the documented "first launch" defaults (matching
 //! `UiSettings::default`), and malformed values fall back to the
 //! default for that field. The intent is that an old or
 //! hand-edited file never blocks app startup.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::str::FromStr;
 
 use agg_gui::theme::{AccentColor, ThemePreference};
 use atomartist_renderer::RenderStyle;
+use atomartist_storage::StorageUri;
 
 /// Persisted geometry + maximized flag for the host OS window the
 /// app paints into. Coordinates are **physical pixels** in the OS's
@@ -284,12 +295,13 @@ pub struct UiSettings {
     /// shell composes them in via [`crate::debug_windows::DebugWindowHandles`]
     /// before writing to disk.
     pub debug_windows: DebugWindowsState,
-    /// Absolute path to the last project file the user opened or
-    /// saved — always an `.atmr` archive, the only project format.
-    /// The shell auto-reopens this on launch so the user
-    /// resumes where they left off; `None` means there's nothing
-    /// to reopen and the starter graph stays loaded.
-    pub last_project_path: Option<PathBuf>,
+    /// Location of the last project the user opened or saved — always
+    /// an `.atmr` archive, the only project format. A [`StorageUri`],
+    /// so a project restored on launch can live on disk, in browser
+    /// storage, or on a remote provider. The shell auto-reopens this so
+    /// the user resumes where they left off; `None` means there's
+    /// nothing to reopen and the starter graph stays loaded.
+    pub last_project_path: Option<StorageUri>,
     /// User's chosen theme (light / dark / system). Persisted so the
     /// View → Theme selection survives across runs.
     pub theme: ThemePreference,
@@ -300,7 +312,7 @@ pub struct UiSettings {
     /// the File → Open Recent submenu; capped at
     /// [`MAX_RECENT_PROJECTS`] on both write and read so a hand-
     /// edited file can't grow the menu unboundedly.
-    pub recent_projects: Vec<PathBuf>,
+    pub recent_projects: Vec<StorageUri>,
 }
 
 /// Upper bound on the persisted / displayed recent-projects list.
@@ -347,16 +359,14 @@ impl UiSettings {
         write_debug_window(&mut out, "performance", &self.debug_windows.performance);
         out.push_str(&format!("theme={}\n", self.theme.key()));
         out.push_str(&format!("accent_color={}\n", self.accent_color.key()));
-        if let Some(p) = self.last_project_path.as_ref() {
-            // `to_string_lossy` is good enough — projects with
-            // non-UTF-8 paths (rare) round-trip in their lossy form,
-            // which is no worse than the alternative of dropping the
-            // line silently. The auto-reopen path will fall back to
-            // the starter graph if the on-disk file no longer
-            // exists, so a corrupted path here can't break startup.
-            out.push_str(&format!("last_project_path={}\n", p.to_string_lossy()));
+        if let Some(uri) = self.last_project_path.as_ref() {
+            // A URI renders as `scheme:///path`, which round-trips
+            // exactly through `StorageUri::from_str`. The auto-reopen
+            // path asks the provider whether the project still exists
+            // before loading, so a stale entry can't break startup.
+            out.push_str(&format!("last_project_path={}\n", uri));
         }
-        for (i, p) in self
+        for (i, uri) in self
             .recent_projects
             .iter()
             .take(MAX_RECENT_PROJECTS)
@@ -365,7 +375,7 @@ impl UiSettings {
             // Indexed keys keep the format line-per-value; the parser
             // sorts by index so a hand-shuffled file still round-trips
             // in a deterministic order.
-            out.push_str(&format!("recent_project_{}={}\n", i, p.to_string_lossy()));
+            out.push_str(&format!("recent_project_{}={}\n", i, uri));
         }
         out
     }
@@ -376,7 +386,7 @@ impl UiSettings {
         let mut out = Self::default();
         // Collected out-of-line so shuffled / duplicated indices in a
         // hand-edited file still produce a stable, capped list.
-        let mut recent: Vec<(usize, PathBuf)> = Vec::new();
+        let mut recent: Vec<(usize, StorageUri)> = Vec::new();
         for line in text.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -427,20 +437,20 @@ impl UiSettings {
                 }
                 "last_project_path" => {
                     // Empty value clears the slot — same as missing
-                    // line. Anything non-empty is taken at face
-                    // value; the shell rechecks existence on
-                    // startup before trying to open it.
-                    if value.is_empty() {
-                        out.last_project_path = None;
-                    } else {
-                        out.last_project_path = Some(PathBuf::from(value));
-                    }
+                    // line. A value that is not a valid `StorageUri`
+                    // is *discarded*: pre-release there is no path-
+                    // style form to migrate, so a stale settings file
+                    // simply loses the entry (plan §3.1). The shell
+                    // rechecks existence on startup before opening.
+                    out.last_project_path = StorageUri::from_str(value).ok();
                 }
                 _ => {
                     if let Some(idx) = key.strip_prefix("recent_project_") {
                         if let Ok(i) = idx.parse::<usize>() {
-                            if !value.is_empty() {
-                                recent.push((i, PathBuf::from(value)));
+                            // Same rule: unparseable entries vanish
+                            // rather than poisoning the recent list.
+                            if let Ok(uri) = StorageUri::from_str(value) {
+                                recent.push((i, uri));
                             }
                         }
                         continue;
@@ -453,7 +463,7 @@ impl UiSettings {
             }
         }
         recent.sort_by_key(|(i, _)| *i);
-        out.recent_projects = recent.into_iter().map(|(_, p)| p).collect();
+        out.recent_projects = recent.into_iter().map(|(_, uri)| uri).collect();
         out.recent_projects.dedup();
         out.recent_projects.truncate(MAX_RECENT_PROJECTS);
         out

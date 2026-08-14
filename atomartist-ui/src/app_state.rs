@@ -7,11 +7,11 @@
 //! computed mesh into `last_mesh_output`). On WASM the evaluator is invoked
 //! synchronously each frame, but the same shape works without modification.
 
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use agg_gui::undo::UndoBuffer;
+use atomartist_storage::{StorageRegistry, StorageUri};
 use atomartist_lib::geometry::Geometry3d;
 use atomartist_lib::graph::executor::evaluate_dirty;
 use atomartist_lib::graph::node::{NodeId, PortValue};
@@ -90,9 +90,11 @@ pub struct AppState {
     /// a node) and the viewport (left-click on a mesh).  `None` when nothing
     /// is selected.
     pub selection: Arc<Mutex<Option<NodeId>>>,
-    /// Path of the currently-open project file (`Save` writes here without
-    /// re-prompting). `None` when the project has never been saved.
-    pub current_file: Arc<Mutex<Option<PathBuf>>>,
+    /// Location of the currently-open project (`Save` writes here without
+    /// re-prompting). `None` when the project has never been saved. A
+    /// [`StorageUri`], not a path — the project may live on disk, in
+    /// browser storage, or behind a remote provider.
+    pub current_file: Arc<Mutex<Option<StorageUri>>>,
     /// Latest known node-canvas zoom — written by `NodeCanvas` on each
     /// wheel event and read by `StatusBar` for the bottom-bar percentage.
     pub canvas_zoom: Arc<Mutex<f64>>,
@@ -152,11 +154,30 @@ pub struct AppState {
     /// capped at [`crate::settings::MAX_RECENT_PROJECTS`]. Fed from
     /// persisted settings at startup; updated on every successful
     /// load / save; rendered as the File → Open Recent submenu.
-    pub recent_projects: Arc<Mutex<Vec<PathBuf>>>,
+    pub recent_projects: Arc<Mutex<Vec<StorageUri>>>,
+    /// Scheme -> storage-provider lookup used by every project IO
+    /// operation (`app_state_files`). The shell decides what is in it:
+    /// `demo-native` registers `LocalFsProvider`, the test harness a
+    /// `MemoryProvider`, `demo-wasm` (for now) nothing at all. This
+    /// crate deliberately registers no provider of its own — hard-coding
+    /// a platform backend here is exactly what the storage seam exists
+    /// to prevent.
+    pub storage: Arc<StorageRegistry>,
 }
 
 impl AppState {
+    /// State with an **empty** storage registry: every project IO
+    /// operation will fail with "no storage provider for scheme …".
+    /// Shells and tests use [`Self::with_storage`] to supply backends.
     pub fn new(graph: Graph, registry: NodeRegistry) -> Self {
+        Self::with_storage(graph, registry, Arc::new(StorageRegistry::new()))
+    }
+
+    pub fn with_storage(
+        graph: Graph,
+        registry: NodeRegistry,
+        storage: Arc<StorageRegistry>,
+    ) -> Self {
         // Baseline the tracker on the graph we're handed so "unsaved
         // changes" means "diverged from launch state" until the first
         // save / load establishes a real on-disk baseline.
@@ -194,6 +215,7 @@ impl AppState {
             accent_color: Arc::new(Mutex::new(agg_gui::theme::AccentColor::default())),
             change_tracker: Arc::new(Mutex::new(change_tracker)),
             recent_projects: Arc::new(Mutex::new(Vec::new())),
+            storage,
         }
     }
 
@@ -223,12 +245,12 @@ impl AppState {
         self.change_tracker.lock().unwrap().has_unsaved_changes(&graph)
     }
 
-    /// Record `path` as the most recent project, deduping and capping
+    /// Record `uri` as the most recent project, deduping and capping
     /// the list. Called on every successful load / save.
-    pub fn note_recent_project(&self, path: &Path) {
+    pub fn note_recent_project(&self, uri: &StorageUri) {
         let mut recent = self.recent_projects.lock().unwrap();
-        recent.retain(|p| p != path);
-        recent.insert(0, path.to_path_buf());
+        recent.retain(|u| u != uri);
+        recent.insert(0, uri.clone());
         recent.truncate(crate::settings::MAX_RECENT_PROJECTS);
     }
 
@@ -540,6 +562,7 @@ impl Clone for AppState {
             accent_color: self.accent_color.clone(),
             change_tracker: self.change_tracker.clone(),
             recent_projects: self.recent_projects.clone(),
+            storage: self.storage.clone(),
         }
     }
 }

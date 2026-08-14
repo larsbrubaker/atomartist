@@ -7,8 +7,9 @@
 //! projects list) changes — `MenuItem::radio` marks are baked in at
 //! construction, so a static bar would go stale after the first change.
 
-use std::path::PathBuf;
 use std::sync::Arc;
+
+use atomartist_storage::StorageUri;
 
 use agg_gui::{
     text::Font,
@@ -37,18 +38,25 @@ pub enum UnsavedChoice {
 /// Platform-supplied file-picker hooks. demo-native provides an `rfd`-
 /// backed implementation; demo-wasm will provide a browser File API
 /// version. The trait is invoked from the menu's action callback so the
-/// platform can put up a modal dialog and return the chosen path.
+/// platform can put up a modal dialog and return the chosen location.
+///
+/// Pickers answer with a [`StorageUri`], not a path: a native shell
+/// converts its `PathBuf` with `StorageUri::from_local_path`, while a
+/// cloud-backed picker names an object in its own scheme. The calls stay
+/// blocking for now — `rfd` blocks, and the whole app loop is paused
+/// while a modal is up; the `Job`-returning form lands with the in-app
+/// file browser in Phase 6.
 pub trait FileDialogProvider: Send + Sync {
-    fn pick_open_project(&self) -> Option<PathBuf>;
-    fn pick_save_project(&self, default_name: &str) -> Option<PathBuf>;
+    fn pick_open_project(&self) -> Option<StorageUri>;
+    fn pick_save_project(&self, default_name: &str) -> Option<StorageUri>;
     /// Destination picker for File → Export. `extension` is the
     /// lowercase format extension without the dot ("stl", "3mf",
     /// "obj", "atmr"); implementations use it for the dialog filter.
-    fn pick_save_export(&self, extension: &str, default_name: &str) -> Option<PathBuf>;
+    fn pick_save_export(&self, extension: &str, default_name: &str) -> Option<StorageUri>;
     /// Source picker for File → Import — meshes (`.stl` / `.obj` /
     /// `.3mf`), MatterControl scenes (`.mcx`), and AtomArtist projects
     /// (`.atmr`).
-    fn pick_import_file(&self) -> Option<PathBuf>;
+    fn pick_import_file(&self) -> Option<StorageUri>;
     /// "You have unsaved changes" — Save / Discard / Cancel. Shown
     /// before New / Open / recent-open and by the shell before close.
     fn confirm_unsaved_changes(&self) -> UnsavedChoice;
@@ -64,10 +72,10 @@ pub trait FileDialogProvider: Send + Sync {
 /// changes prompt answers `Discard` so scripted flows never block.
 pub struct NoFileDialogs;
 impl FileDialogProvider for NoFileDialogs {
-    fn pick_open_project(&self) -> Option<PathBuf> { None }
-    fn pick_save_project(&self, _name: &str) -> Option<PathBuf> { None }
-    fn pick_save_export(&self, _ext: &str, _name: &str) -> Option<PathBuf> { None }
-    fn pick_import_file(&self) -> Option<PathBuf> { None }
+    fn pick_open_project(&self) -> Option<StorageUri> { None }
+    fn pick_save_project(&self, _name: &str) -> Option<StorageUri> { None }
+    fn pick_save_export(&self, _ext: &str, _name: &str) -> Option<StorageUri> { None }
+    fn pick_import_file(&self) -> Option<StorageUri> { None }
     fn confirm_unsaved_changes(&self) -> UnsavedChoice { UnsavedChoice::Discard }
     fn show_error(&self, _message: &str) {}
     fn show_info(&self, _title: &str, _message: &str) {}
@@ -130,11 +138,14 @@ fn build_file_entries(state: &AppState) -> Vec<MenuEntry> {
         recent
             .iter()
             .enumerate()
-            .map(|(i, p)| {
-                let label = p
+            .map(|(i, uri)| {
+                // Last URI segment reads like a file name for every
+                // scheme; the full URI is the fallback for a project
+                // that sits at a provider root.
+                let label = uri
                     .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| p.to_string_lossy().into_owned());
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| uri.to_string());
                 MenuEntry::Item(MenuItem::action(label, format!("file.recent.{i}")))
             })
             .collect()
@@ -281,11 +292,11 @@ pub struct MenuChrome {
     children: Vec<Box<dyn Widget>>, // intentionally empty — see struct docs
     bar: MenuBar,
     state: AppState,
-    last_snapshot: Option<(ThemePreference, AccentColor, Vec<PathBuf>)>,
+    last_snapshot: Option<(ThemePreference, AccentColor, Vec<StorageUri>)>,
 }
 
 impl MenuChrome {
-    fn snapshot(&self) -> (ThemePreference, AccentColor, Vec<PathBuf>) {
+    fn snapshot(&self) -> (ThemePreference, AccentColor, Vec<StorageUri>) {
         (
             *self.state.theme.lock().unwrap(),
             *self.state.accent_color.lock().unwrap(),

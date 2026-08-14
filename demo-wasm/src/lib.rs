@@ -277,6 +277,10 @@ async fn init_wgpu() -> Result<(), String> {
     // path yet, so we always start with the documented defaults — the
     // View → Debug windows are toggled off and laid out in their
     // first-launch positions.
+    // No storage provider is registered on the web yet: the default
+    // registry is empty, so project open / save report "no storage
+    // provider for scheme …" until `BrowserProvider` (OPFS +
+    // IndexedDB) lands in Phase 5 of the storage plan.
     let state = fresh_state_with_starter_graph();
     let dialogs: Arc<dyn FileDialogProvider> = Arc::new(NoFileDialogs);
     let (root, debug) = build_app(state, dialogs, None);

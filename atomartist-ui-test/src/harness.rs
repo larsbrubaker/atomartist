@@ -23,9 +23,10 @@ use agg_gui::widget::{
     find_widget_by_id, find_widget_by_id_mut, find_widget_by_type, InspectorNode,
 };
 use agg_gui::{App, Key, Modifiers, MouseButton, Size, Widget};
+use atomartist_storage::{MemoryProvider, StorageRegistry};
 use atomartist_ui::{
-    build_app, fresh_state_with_builtins, fresh_state_with_starter_graph, AppState,
-    DebugWindowHandles,
+    build_app, fresh_state_with_builtins_and_storage, fresh_state_with_starter_graph_and_storage,
+    AppState, DebugWindowHandles,
 };
 use atomartist_ui::top_menu_bar::NoFileDialogs;
 
@@ -38,6 +39,30 @@ pub const DEFAULT_HEIGHT: f64 = 720.0;
 /// the harness produces a layout that exactly matches running natives.
 const FONT_BYTES: &[u8] =
     include_bytes!("../../../agg-gui/agg-gui/assets/fonts/NotoSans-Regular.ttf");
+
+/// Scheme of the harness's in-memory store. Tests address projects as
+/// `mem:///whatever.atmr` and never touch the filesystem.
+pub const MEMORY_SCHEME: &str = "mem";
+
+/// Storage registry every harness state is built over: an in-memory
+/// provider for project IO plus, on native, the real filesystem for the
+/// `file:` URIs that OS file-drops produce.
+pub fn test_storage_registry() -> Arc<StorageRegistry> {
+    let mut registry = StorageRegistry::new();
+    registry
+        .register(Arc::new(MemoryProvider::new(MEMORY_SCHEME, "Test Memory")))
+        .expect("fresh registry accepts the memory provider");
+    #[cfg(not(target_arch = "wasm32"))]
+    registry
+        .register(Arc::new(atomartist_storage::LocalFsProvider::new()))
+        .expect("fresh registry accepts the local filesystem provider");
+    Arc::new(registry)
+}
+
+/// `mem:///name` — the canonical way for a test to name a project.
+pub fn memory_uri(name: &str) -> atomartist_storage::StorageUri {
+    atomartist_storage::StorageUri::new(MEMORY_SCHEME, name)
+}
 
 /// State + driver for one UI test scenario.
 pub struct TestHarness {
@@ -60,14 +85,18 @@ impl TestHarness {
     /// mock — so anything tested here exercises the same code paths as
     /// `cargo dev`.
     pub fn new() -> Self {
-        Self::from_state(fresh_state_with_builtins())
+        Self::from_state(fresh_state_with_builtins_and_storage(
+            test_storage_registry(),
+        ))
     }
 
     /// Same as [`Self::new`] but the graph is preloaded with the
     /// canonical "Box → Output" starter graph from
     /// `fresh_state_with_starter_graph`.
     pub fn with_starter_graph() -> Self {
-        Self::from_state(fresh_state_with_starter_graph())
+        Self::from_state(fresh_state_with_starter_graph_and_storage(
+            test_storage_registry(),
+        ))
     }
 
     /// Boot the real widget tree over a caller-supplied [`AppState`].
@@ -124,6 +153,13 @@ impl TestHarness {
     /// share the same `Arc`s.
     pub fn state(&self) -> &AppState {
         &self.state
+    }
+
+    /// The state's storage registry — for tests that want to seed or
+    /// inspect bytes directly (`storage().by_scheme("mem")`) rather
+    /// than going through an `AppState` file operation.
+    pub fn storage(&self) -> &Arc<StorageRegistry> {
+        &self.state.storage
     }
 
     /// Synchronous evaluator — `AppState::evaluate_now` runs in the

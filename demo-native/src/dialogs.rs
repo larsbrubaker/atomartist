@@ -2,8 +2,7 @@
 //! `atomartist_ui::top_menu_bar::FileDialogProvider`. Split from
 //! `main.rs` to keep it under the 800-line cap.
 
-use std::path::PathBuf;
-
+use atomartist_storage::StorageUri;
 use atomartist_ui::top_menu_bar::{FileDialogProvider, UnsavedChoice};
 
 /// File-dialog provider for native — backed by `rfd`. Blocking dialogs
@@ -15,21 +14,35 @@ use atomartist_ui::top_menu_bar::{FileDialogProvider, UnsavedChoice};
 /// Open additionally offers "All files" for users whose projects are
 /// named something else; Save does not, because the extension decides
 /// the name the file ends up with.
+///
+/// `rfd` answers with a `PathBuf`; this is the shell boundary that turns
+/// it into a `file:` [`StorageUri`], the only project identity the app
+/// layer knows about. A path with no round-trippable URI form (a UNC
+/// share or a verbatim prefix) is reported to the user and the pick is
+/// treated as cancelled — see [`uri_or_explain`].
 pub struct NativeDialogs;
+
+/// Message shown when the user picks a location AtomArtist cannot yet
+/// address. Stated as a workaround rather than a flat refusal, because
+/// mapping the share to a drive letter genuinely works.
+const UNC_NOT_SUPPORTED: &str =
+    "Network (UNC) paths are not yet supported — map the share to a drive letter";
 impl FileDialogProvider for NativeDialogs {
-    fn pick_open_project(&self) -> Option<PathBuf> {
+    fn pick_open_project(&self) -> Option<StorageUri> {
         rfd::FileDialog::new()
             .add_filter("AtomArtist project", &["atmr"])
             .add_filter("All files", &["*"])
             .pick_file()
+            .and_then(uri_or_explain)
     }
-    fn pick_save_project(&self, default_name: &str) -> Option<PathBuf> {
+    fn pick_save_project(&self, default_name: &str) -> Option<StorageUri> {
         rfd::FileDialog::new()
             .add_filter("AtomArtist project", &["atmr"])
             .set_file_name(default_name)
             .save_file()
+            .and_then(uri_or_explain)
     }
-    fn pick_save_export(&self, extension: &str, default_name: &str) -> Option<PathBuf> {
+    fn pick_save_export(&self, extension: &str, default_name: &str) -> Option<StorageUri> {
         let label = match extension {
             "stl" => "Binary STL",
             "3mf" => "3MF model",
@@ -41,8 +54,9 @@ impl FileDialogProvider for NativeDialogs {
             .add_filter(label, &[extension])
             .set_file_name(default_name)
             .save_file()
+            .and_then(uri_or_explain)
     }
-    fn pick_import_file(&self) -> Option<PathBuf> {
+    fn pick_import_file(&self) -> Option<StorageUri> {
         rfd::FileDialog::new()
             .add_filter(
                 "All importable files",
@@ -52,6 +66,7 @@ impl FileDialogProvider for NativeDialogs {
             .add_filter("MatterControl scene", &["mcx"])
             .add_filter("AtomArtist project", &["atmr"])
             .pick_file()
+            .and_then(uri_or_explain)
     }
     fn confirm_unsaved_changes(&self) -> UnsavedChoice {
         // Yes = save first, No = discard, Cancel = keep working.
@@ -83,5 +98,26 @@ impl FileDialogProvider for NativeDialogs {
             .set_description(message)
             .set_level(rfd::MessageLevel::Info)
             .show();
+    }
+}
+
+/// Convert a picked path to a `file:` URI, or put up an explanatory
+/// dialog and return `None` (which every caller already treats as
+/// "the user cancelled").
+fn uri_or_explain(path: std::path::PathBuf) -> Option<StorageUri> {
+    match StorageUri::from_local_path(&path) {
+        Some(uri) => Some(uri),
+        None => {
+            rfd::MessageDialog::new()
+                .set_title("AtomArtist")
+                .set_description(format!(
+                    "{}\n\n{}",
+                    path.display(),
+                    UNC_NOT_SUPPORTED
+                ))
+                .set_level(rfd::MessageLevel::Error)
+                .show();
+            None
+        }
     }
 }

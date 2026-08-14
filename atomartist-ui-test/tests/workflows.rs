@@ -8,7 +8,19 @@
 //! - `MatterHackers/FDS/NodeDesigner/tests/unit/node-menu-coverage.test.ts`
 
 use atomartist_lib::serialization::{graph_from_json_str, graph_to_json_string};
-use atomartist_ui_test::TestHarness;
+use atomartist_storage::StorageUri;
+use atomartist_ui_test::{memory_uri, TestHarness};
+
+/// Bytes the harness's storage provider holds at `uri`. Jobs from the
+/// in-memory provider are always settled on return.
+fn read_stored(h: &TestHarness, uri: &StorageUri) -> Vec<u8> {
+    let provider = h.storage().resolve(uri).expect("provider for test URI");
+    provider
+        .read(uri)
+        .take()
+        .expect("memory provider completes synchronously")
+        .expect("stored project readable")
+}
 
 #[test]
 fn save_then_load_round_trips_starter_graph_topology() {
@@ -29,48 +41,46 @@ fn save_then_load_round_trips_starter_graph_topology() {
 
 #[test]
 fn save_then_load_atmr_round_trips_through_app_state() {
-    // Exercises the public `AppState::save_graph_to_path` →
-    // `AppState::load_graph_from_path` pipeline through the new ATMR
-    // (zip) container. Confirms `current_file` is updated, the on-disk
-    // file is a real zip (PK header), and the round-tripped graph
-    // preserves node + edge counts.
+    // Exercises the public `AppState::save_graph_to_uri` →
+    // `AppState::load_graph_from_uri` pipeline through the ATMR (zip)
+    // container. Confirms `current_file` is updated, the stored blob is
+    // a real zip (PK header), and the round-tripped graph preserves node
+    // + edge counts. Storage is the harness's `MemoryProvider`, so this
+    // never touches the filesystem.
     let h = TestHarness::with_starter_graph();
     let nodes_before = h.state().graph.lock().unwrap().nodes().count();
     let noodles_before = h.state().graph.lock().unwrap().noodles().len();
 
-    // Unique name avoids cross-test interference when run in parallel.
-    let path = std::env::temp_dir().join(format!(
-        "atomartist_ui_test_{}.atmr",
-        std::process::id()
-    ));
+    let uri = memory_uri("round_trip.atmr");
 
-    h.state()
-        .save_graph_to_path(&path)
-        .expect("save_graph_to_path");
+    h.state().save_graph_to_uri(&uri).expect("save_graph_to_uri");
     assert_eq!(
-        h.state().current_file.lock().unwrap().as_deref(),
-        Some(path.as_path()),
-        "save should record the path on AppState.current_file",
+        h.state().current_file.lock().unwrap().clone(),
+        Some(uri.clone()),
+        "save should record the URI on AppState.current_file",
     );
 
-    // Quick smoke check that we wrote a real zip: every zip starts
-    // with the local-file-header signature `PK\x03\x04`.
-    let bytes = std::fs::read(&path).expect("read saved atmr");
-    assert!(bytes.len() >= 4 && &bytes[..4] == b"PK\x03\x04", "expected zip magic");
+    // Quick smoke check that we wrote a real zip: every zip starts with
+    // the four-byte local-file-header signature 50 4B 03 04 ("PK" plus
+    // two control bytes), spelled here with explicit escapes so the
+    // source stays plain ASCII.
+    let bytes = read_stored(&h, &uri);
+    assert!(
+        bytes.len() >= 4 && &bytes[..4] == b"PK\x03\x04",
+        "expected the 4-byte zip signature"
+    );
 
-    // Wipe the in-memory graph, then load back from disk and assert
+    // Wipe the in-memory graph, then load back from storage and assert
     // the topology survived the round trip.
     h.state().new_empty_project();
     assert_eq!(h.state().graph.lock().unwrap().nodes().count(), 0);
     h.state()
-        .load_graph_from_path(&path)
-        .expect("load_graph_from_path");
+        .load_graph_from_uri(&uri)
+        .expect("load_graph_from_uri");
     let nodes_after = h.state().graph.lock().unwrap().nodes().count();
     let noodles_after = h.state().graph.lock().unwrap().noodles().len();
     assert_eq!(nodes_before, nodes_after);
     assert_eq!(noodles_before, noodles_after);
-
-    let _ = std::fs::remove_file(path);
 }
 
 #[test]
@@ -80,21 +90,13 @@ fn ui_settings_surface_current_file_as_last_project_path() {
     // launch reads `last_project_path` back from there, so this is
     // the contract that lets the user resume where they left off.
     let h = TestHarness::with_starter_graph();
-    // Before any save, no project path is associated.
+    // Before any save, no project location is associated.
     assert_eq!(h.state().ui_settings().last_project_path, None);
 
-    let path = std::env::temp_dir().join(format!(
-        "atomartist_ui_test_settings_{}.atmr",
-        std::process::id()
-    ));
-    h.state()
-        .save_graph_to_path(&path)
-        .expect("save_graph_to_path");
+    let uri = memory_uri("settings_surface.atmr");
+    h.state().save_graph_to_uri(&uri).expect("save_graph_to_uri");
 
-    let surfaced = h.state().ui_settings().last_project_path;
-    assert_eq!(surfaced.as_deref(), Some(path.as_path()));
-
-    let _ = std::fs::remove_file(path);
+    assert_eq!(h.state().ui_settings().last_project_path, Some(uri));
 }
 
 #[test]

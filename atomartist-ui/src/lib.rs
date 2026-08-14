@@ -9,6 +9,7 @@ pub mod app_state;
 pub mod app_state_drill;
 pub mod app_state_files;
 pub mod app_state_model;
+pub mod app_state_storage;
 pub mod breadcrumb_bar;
 pub mod circular_dropdown;
 pub mod circular_icon_button;
@@ -30,6 +31,7 @@ pub mod viewport_overlay;
 pub use app_state::AppState;
 pub use app_state_files::MeshExportFormat;
 pub use app_state_model::{shared_model_for, AppStateModel};
+pub use app_state_storage::{display_uri, uri_exists, uri_file_stem};
 pub use debug_windows::{build_debug_windows, DebugWindowHandles};
 pub use first_paint::FirstPaintGate;
 pub use floating_overlay::{FloatingOverlayHandle, FloatingOverlayHost};
@@ -38,7 +40,10 @@ pub use settings::{
     DebugWindowState, DebugWindowsState, MainWindowState, UiSettings, WindowPlacement,
 };
 pub use shell_init::install_theme_and_fonts;
-pub use top_level::{build_app, fresh_state_with_builtins, fresh_state_with_starter_graph};
+pub use top_level::{
+    build_app, fresh_state_with_builtins, fresh_state_with_builtins_and_storage,
+    fresh_state_with_starter_graph, fresh_state_with_starter_graph_and_storage,
+};
 pub use viewport_overlay::{build_viewport_overlay, ViewportOverlay};
 
 /// Phase 0 placeholder kept so `demo-native` / `demo-wasm` stubs continue to

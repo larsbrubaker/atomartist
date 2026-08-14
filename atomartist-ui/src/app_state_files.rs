@@ -3,9 +3,16 @@
 //! and the File → Export formats. Split from `app_state.rs` to keep
 //! both files under the 800-line cap; invoked from the menu action
 //! handlers in `menu_actions`.
+//!
+//! Every operation addresses a project by [`StorageUri`] and moves its
+//! bytes through the [`AppState::storage`] registry — this module never
+//! touches `std::fs` (enforced by
+//! `atomartist-lib/tests/no_fs_outside_provider.rs`). The provider
+//! plumbing lives in [`crate::app_state_storage`].
 
-use std::path::Path;
 use std::sync::Arc;
+
+use atomartist_storage::StorageUri;
 
 use atomartist_lib::graph::merge::merge_graph;
 use atomartist_lib::graph::node::{NodeId, PortValue};
@@ -18,6 +25,7 @@ use atomartist_lib::serialization::{
 use atomartist_lib::Graph;
 
 use crate::app_state::AppState;
+use crate::app_state_storage::{display_uri, read_bytes, uri_extension, write_bytes};
 
 /// Mesh formats offered by File → Export. `.atmr` export is separate —
 /// it saves the whole project (graph + assets), not baked geometry.
@@ -56,20 +64,20 @@ impl AppState {
         self.mark_viewport_dirty();
     }
 
-    /// Load a graph from `path`. Replaces the current graph wholesale,
+    /// Load a graph from `uri`. Replaces the current graph wholesale,
     /// clears undo history, and runs an initial evaluation so the
     /// viewport repopulates. Returns `Err` with a user-readable message
     /// on parse / IO failure.
     ///
-    /// The bytes are read off disk here and decoded by the format
-    /// layer; `.atmr` (a zip archive) is the only project format, and
-    /// the decoder ignores the file name entirely — see
-    /// `serialization::atmr`.
-    pub fn load_graph_from_path(&self, path: &Path) -> Result<(), String> {
-        let bytes = std::fs::read(path)
-            .map_err(|e| format!("open {}: {}", path.display(), e))?;
+    /// The bytes come from the storage provider that owns the URI's
+    /// scheme and are decoded by the format layer; `.atmr` (a zip
+    /// archive) is the only project format, and the decoder ignores the
+    /// name entirely — see `serialization::atmr`.
+    pub fn load_graph_from_uri(&self, uri: &StorageUri) -> Result<(), String> {
+        let bytes =
+            read_bytes(&self.storage, uri).map_err(|e| format!("open {}: {}", display_uri(uri), e))?;
         let (result, assets) = read_project_from_bytes(&bytes, &self.registry)
-            .map_err(|e| format!("open {}: {}", path.display(), e))?;
+            .map_err(|e| format!("open {}: {}", display_uri(uri), e))?;
         // Decode warnings first (schema-version mismatch, unknown node
         // types that were skipped) — they explain missing nodes, so
         // swallowing them turns a partial load into a silent one.
@@ -92,9 +100,9 @@ impl AppState {
         // clear the stack directly (no exit-sync against a discarded
         // graph).
         self.edit_stack.lock().unwrap().clear();
-        *self.current_file.lock().unwrap() = Some(path.to_path_buf());
+        *self.current_file.lock().unwrap() = Some(uri.clone());
         self.mark_saved_baseline();
-        self.note_recent_project(path);
+        self.note_recent_project(uri);
         // Pick a default display node — the highest-id node with a
         // Geometry3d output, matching what evaluate_now does.
         *self.display_node.lock().unwrap() = None;
@@ -103,29 +111,29 @@ impl AppState {
         Ok(())
     }
 
-    /// Save the current graph to `path`. Always writes the `.atmr` zip
+    /// Save the current graph to `uri`. Always writes the `.atmr` zip
     /// archive (graph + assets) regardless of the file name. Updates
     /// `current_file` on success so subsequent `Save` actions reuse the
-    /// chosen path without re-prompting.
-    pub fn save_graph_to_path(&self, path: &Path) -> Result<(), String> {
+    /// chosen location without re-prompting.
+    pub fn save_graph_to_uri(&self, uri: &StorageUri) -> Result<(), String> {
         let bytes = {
             let graph = self.graph.lock().unwrap();
             let assets = self.assets.lock().unwrap();
             write_project_to_bytes(&graph, &assets)
-                .map_err(|e| format!("write {}: {}", path.display(), e))?
+                .map_err(|e| format!("write {}: {}", display_uri(uri), e))?
         };
-        std::fs::write(path, bytes)
-            .map_err(|e| format!("write {}: {}", path.display(), e))?;
-        *self.current_file.lock().unwrap() = Some(path.to_path_buf());
+        write_bytes(&self.storage, uri, bytes)
+            .map_err(|e| format!("write {}: {}", display_uri(uri), e))?;
+        *self.current_file.lock().unwrap() = Some(uri.clone());
         self.mark_saved_baseline();
-        self.note_recent_project(path);
+        self.note_recent_project(uri);
         Ok(())
     }
 
     /// Import a mesh file (`.stl`, `.obj`, or `.3mf`) and spawn a
     /// `MeshNode` at the supplied canvas-space position.
     ///
-    /// 1. Reads the file bytes off disk.
+    /// 1. Reads the bytes from the URI's storage provider.
     /// 2. Decodes into a `MeshGL` via the format-detecting
     ///    [`mesh_node::decode_mesh`].
     /// 3. Re-encodes the mesh as `.3mf` so the project always persists
@@ -143,20 +151,16 @@ impl AppState {
     /// Returns the new `NodeId` on success.
     pub fn import_mesh_file(
         &self,
-        path: &Path,
+        uri: &StorageUri,
         canvas_pos: [f64; 2],
     ) -> Result<NodeId, String> {
-        let bytes = std::fs::read(path)
-            .map_err(|e| format!("read {}: {}", path.display(), e))?;
-        let original_filename = path
+        let bytes =
+            read_bytes(&self.storage, uri).map_err(|e| format!("read {}: {}", display_uri(uri), e))?;
+        let original_filename = uri
             .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
+            .map(|n| n.to_string())
             .unwrap_or_else(|| "mesh".to_string());
-        let extension = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
+        let extension = uri_extension(uri);
         let mesh =
             mesh_node::decode_mesh(&bytes, &extension).map_err(|e| format!("import: {}", e))?;
         let new_id = self.spawn_mesh_node(mesh, original_filename, None, None, canvas_pos)?;
@@ -246,7 +250,7 @@ impl AppState {
         Ok(new_id)
     }
 
-    /// File → Import entry point: bring `path` into the *current*
+    /// File → Import entry point: bring `uri` into the *current*
     /// scene (unlike Open, which replaces it). Dispatches on
     /// extension:
     ///
@@ -259,19 +263,15 @@ impl AppState {
     ///   scene's Output.
     ///
     /// Returns the number of nodes added.
-    pub fn import_scene_file(&self, path: &Path) -> Result<usize, String> {
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
+    pub fn import_scene_file(&self, uri: &StorageUri) -> Result<usize, String> {
+        let ext = uri_extension(uri);
         match ext.as_str() {
             "stl" | "obj" | "3mf" => {
-                self.import_mesh_file(path, self.next_import_position(0))?;
+                self.import_mesh_file(uri, self.next_import_position(0))?;
                 Ok(1)
             }
-            "mcx" => self.import_mcx_file(path),
-            "atmr" => self.import_project_file(path),
+            "mcx" => self.import_mcx_file(uri),
+            "atmr" => self.import_project_file(uri),
             other => Err(format!(
                 "unsupported import format: .{other} (expected .stl, .obj, .3mf, .mcx, or .atmr)"
             )),
@@ -280,9 +280,9 @@ impl AppState {
 
     /// Import a MatterControl `.mcx` scene: one MeshNode per visible
     /// surface, transforms baked into each node's `matrix` property.
-    fn import_mcx_file(&self, path: &Path) -> Result<usize, String> {
-        let bytes = std::fs::read(path)
-            .map_err(|e| format!("read {}: {}", path.display(), e))?;
+    fn import_mcx_file(&self, uri: &StorageUri) -> Result<usize, String> {
+        let bytes =
+            read_bytes(&self.storage, uri).map_err(|e| format!("read {}: {}", display_uri(uri), e))?;
         let mut warnings = Vec::new();
         let parts = import_mcx(&bytes, &mut warnings).map_err(|e| e.to_string())?;
         for w in &warnings {
@@ -313,11 +313,11 @@ impl AppState {
     /// imported graph lands to the right of the existing nodes; its
     /// Output node is dropped and everything that fed it is rewired
     /// into this scene's Output so the imported geometry renders.
-    fn import_project_file(&self, path: &Path) -> Result<usize, String> {
-        let bytes = std::fs::read(path)
-            .map_err(|e| format!("open {}: {}", path.display(), e))?;
+    fn import_project_file(&self, uri: &StorageUri) -> Result<usize, String> {
+        let bytes =
+            read_bytes(&self.storage, uri).map_err(|e| format!("open {}: {}", display_uri(uri), e))?;
         let (result, src_assets) = read_project_from_bytes(&bytes, &self.registry)
-            .map_err(|e| format!("open {}: {}", path.display(), e))?;
+            .map_err(|e| format!("open {}: {}", display_uri(uri), e))?;
         for w in &result.warnings {
             eprintln!("project import: {}", w);
         }
@@ -431,7 +431,7 @@ impl AppState {
             snap_amount: *self.snap_amount.lock().unwrap(),
             main_window: crate::MainWindowState::default(),
             debug_windows: crate::DebugWindowsState::default(),
-            // Forward the path of the currently-open project so the
+            // Forward the URI of the currently-open project so the
             // shell's AutoSave loop persists it on every paint where
             // it changed. The native shell uses this on next launch
             // to auto-reopen the same file.
@@ -495,9 +495,9 @@ impl AppState {
     /// renderer uses. Multi-body groups are concatenated into a single
     /// mesh before encoding (none of the three formats carries the
     /// per-body split we'd need to keep them apart).
-    pub fn export_mesh_to_path(
+    pub fn export_mesh_to_uri(
         &self,
-        path: &Path,
+        uri: &StorageUri,
         format: MeshExportFormat,
     ) -> Result<(), String> {
         let geom = self
@@ -515,27 +515,20 @@ impl AppState {
                 export_3mf(&merged).map_err(|e| format!("encode 3MF: {}", e))?
             }
         };
-        std::fs::write(path, bytes).map_err(|e| format!("write {}: {}", path.display(), e))?;
-        Ok(())
-    }
-
-    /// Back-compat alias for the pre-submenu Export STL action; tests
-    /// and older callers still use it.
-    pub fn export_stl_to_path(&self, path: &Path) -> Result<(), String> {
-        self.export_mesh_to_path(path, MeshExportFormat::Stl)
+        write_bytes(&self.storage, uri, bytes).map_err(|e| format!("write {}: {}", display_uri(uri), e))
     }
 
     /// File → Export → AtomArtist Project: write a copy of the whole
-    /// project (graph + assets) to `path` WITHOUT retargeting Save —
+    /// project (graph + assets) to `uri` WITHOUT retargeting Save —
     /// `current_file`, the recent list, and the unsaved-changes
-    /// baseline all stay put, unlike [`Self::save_graph_to_path`].
-    pub fn export_project_copy_to_path(&self, path: &Path) -> Result<(), String> {
+    /// baseline all stay put, unlike [`Self::save_graph_to_uri`].
+    pub fn export_project_copy_to_uri(&self, uri: &StorageUri) -> Result<(), String> {
         let bytes = {
             let graph = self.graph.lock().unwrap();
             let assets = self.assets.lock().unwrap();
             write_project_to_bytes(&graph, &assets)
-                .map_err(|e| format!("write {}: {}", path.display(), e))?
+                .map_err(|e| format!("write {}: {}", display_uri(uri), e))?
         };
-        std::fs::write(path, bytes).map_err(|e| format!("write {}: {}", path.display(), e))
+        write_bytes(&self.storage, uri, bytes).map_err(|e| format!("write {}: {}", display_uri(uri), e))
     }
 }
