@@ -562,6 +562,20 @@ impl Widget for Viewport3dWidget {
             } else {
                 [0.55, 0.58, 0.66, 0.55]
             };
+            // Translucent wash over the whole bed — MatterCAD's
+            // `BedShadowTextureRenderer` fills the bed texture with
+            // `theme.BackgroundColor.WithAlpha(80)` before stroking the
+            // grid. Reusing the viewport background keeps the bed
+            // reading as "the same surface, slightly denser", and the
+            // 80/255 alpha is what lets shadows, lines, and anything
+            // below the bed blend through it.
+            const BED_FILL_ALPHA: f32 = 80.0 / 255.0;
+            s.grid_fill_color = [
+                self.bg_color.r,
+                self.bg_color.g,
+                self.bg_color.b,
+                BED_FILL_ALPHA,
+            ];
             // Theme flag drives the contact-shadow composite — black
             // shadows for light bg, bright shadows for dark.
             s.grid_dark_mode = dark;

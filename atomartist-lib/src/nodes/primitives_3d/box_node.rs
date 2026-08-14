@@ -21,7 +21,7 @@ pub struct BoxNode;
 /// the chosen display convention (matching Extrude / Cylinder), set via
 /// `socket_named` since the property keys are lowercase.
 fn params() -> ParamSet {
-    ParamSet::geometry()
+    ParamSet::primitive("Cube", 10.0)
         .number("width", "Width", 20.0, 0.001..=10_000.0)
         .socket_named("Width")
         .number("height", "Height", 20.0, 0.001..=10_000.0)

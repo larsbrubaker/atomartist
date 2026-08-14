@@ -87,9 +87,35 @@ fn show_fatal(message: &str) {
 
 /// Browser entry point. Spawns the async wgpu init; until that resolves,
 /// `render()` is a no-op (JS's animation loop just keeps polling).
+/// Toggle the renderer's diagnostic logging at runtime. Callable from
+/// the browser console (`wasm.set_render_log(true)`) or automatically
+/// via a `?log=1` query parameter — see [`start`]. Enables the
+/// per-second scene-timing summary and the offscreen allocation report,
+/// both of which are otherwise silent.
+///
+/// The native shell uses `ATOMARTIST_SCENE_LOG=1` for the same thing;
+/// there is no environment to read on wasm, hence this export.
+#[wasm_bindgen]
+pub fn set_render_log(on: bool) {
+    atomartist_renderer::diagnostics::set_logging(on);
+}
+
+/// True when the page URL carries `?log=1` (or `&log=1`), so a phone
+/// with no console access can still be told to emit diagnostics.
+fn log_requested_by_url() -> bool {
+    web_sys::window()
+        .and_then(|w| w.location().search().ok())
+        .map(|q| q.contains("log=1"))
+        .unwrap_or(false)
+}
+
 #[wasm_bindgen(start)]
 pub fn start() {
     console_error_panic_hook::set_once();
+
+    if log_requested_by_url() {
+        atomartist_renderer::diagnostics::set_logging(true);
+    }
 
     // Register the browser's device-pixel ratio as the agg-gui device scale
     // *before* installing fonts, so layout, hit-testing, and the LCD/hinting
@@ -179,6 +205,34 @@ async fn init_wgpu() -> Result<(), String> {
         })
         .await
         .map_err(|e| format!("request_device: {:?}", e))?;
+
+    // Uncaptured errors are the difference between "black canvas, no
+    // explanation" and a diagnosable bug. wgpu reports texture
+    // allocation failures, over-limit sizes, and shader-module
+    // rejections through this channel; without a handler they vanish
+    // and the frame silently produces nothing. This is the single most
+    // useful thing to have installed when triaging a blank page on a
+    // device we can't attach a debugger to.
+    device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
+        let text = format!("wgpu uncaptured error: {e}");
+        web_sys::console::error_1(&JsValue::from_str(&text));
+    }));
+
+    // One-shot capability dump — adapter, backend, and the limits the
+    // renderer's offscreen budget is measured against.
+    let info = adapter.get_info();
+    let limits = device.limits();
+    log(&format!(
+        "GPU: {} ({:?}, {:?}) | max_texture_dimension_2d={} \
+         max_buffer_size={} MiB | float32-blend={} | dpr={}",
+        info.name,
+        info.backend,
+        info.device_type,
+        limits.max_texture_dimension_2d,
+        limits.max_buffer_size / (1024 * 1024),
+        !float32_blend.is_empty(),
+        web_sys::window().map(|w| w.device_pixel_ratio()).unwrap_or(1.0),
+    ));
 
     let caps = surface.get_capabilities(&adapter);
     let surface_format = caps

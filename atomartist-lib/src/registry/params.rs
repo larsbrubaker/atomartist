@@ -36,7 +36,7 @@
 use std::ops::RangeInclusive;
 use std::sync::Arc;
 
-use crate::geometry::{DEFAULT_GEOMETRY_COLOR, INHERIT_COLOR};
+use crate::geometry::{primitive_color, DEFAULT_GEOMETRY_COLOR, INHERIT_COLOR};
 use crate::graph::node::{identity_matrix, PortValue};
 
 use super::{EditorKind, EvalCtx, NumberAttrs, PropDef, TemplateBuilder, VisibleWhen};
@@ -136,6 +136,32 @@ impl ParamSet {
             .color("color", "Color", DEFAULT_GEOMETRY_COLOR)
             .socket_named("Color")
             .matrix("matrix", "Matrix", identity_matrix())
+            .socket_named("Matrix")
+    }
+
+    /// Like [`ParamSet::geometry`], but seeded the way MatterCAD seeds a
+    /// freshly created primitive:
+    ///
+    ///   * `color` is the primitive's own hue from MatterCAD's
+    ///     `Object3DExtensions.PrimitiveColors` table (see
+    ///     [`primitive_color`]) rather than the generic grey-blue, so a
+    ///     scene of mixed shapes reads at a glance; and
+    ///   * `matrix` lifts the shape by `bed_offset_z` so it *sits on
+    ///     the bed* instead of being half-buried. Our generators build
+    ///     Z-centred meshes exactly like MatterCAD's
+    ///     `PlatonicSolids.CreateCube`, and MatterCAD likewise carries
+    ///     the drop-to-bed translation on the item's own `Matrix`.
+    ///
+    /// `name` is MatterCAD's primitive name (`"Cube"`, `"Torus"`, …),
+    /// which is not always our node's `type_id` — Box is MatterCAD's
+    /// Cube. Pass half the shape's default height as `bed_offset_z`.
+    pub fn primitive(name: &str, bed_offset_z: f32) -> Self {
+        let mut m = identity_matrix();
+        m[14] = bed_offset_z;
+        Self::new()
+            .color("color", "Color", primitive_color(name))
+            .socket_named("Color")
+            .matrix("matrix", "Matrix", m)
             .socket_named("Matrix")
     }
 

@@ -14,13 +14,18 @@ use crate::socket_types::SocketType;
 pub struct TorusNode;
 
 /// The Torus node's parameter schema. Shared `Color` / `Matrix` (via
-/// [`ParamSet::geometry`]) lead; the major/minor radii and segment counts
+/// [`ParamSet::primitive`]) lead; the major/minor radii and segment counts
 /// follow on capitalized sockets, matching the "socket-or-property" shape.
+///
+/// Radii are MatterCAD's `TorusObject3D` defaults expressed in our
+/// radius form: outer Ø20 / inner Ø10 gives a 2.5 tube radius riding a
+/// 7.5 toroid radius — so the torus is 20 across, like every other
+/// default primitive.
 fn params() -> ParamSet {
-    ParamSet::geometry()
-        .number("major_radius", "Major Radius", 10.0, 0.001..=10_000.0)
+    ParamSet::primitive("Torus", 2.5)
+        .number("major_radius", "Major Radius", 7.5, 0.001..=10_000.0)
         .socket_named("Major Radius")
-        .number("minor_radius", "Minor Radius", 3.0, 0.001..=10_000.0)
+        .number("minor_radius", "Minor Radius", 2.5, 0.001..=10_000.0)
         .socket_named("Minor Radius")
         .number("segments_major", "Segments Major", 32.0, 3.0..=256.0)
         .socket_named("Segments Major")

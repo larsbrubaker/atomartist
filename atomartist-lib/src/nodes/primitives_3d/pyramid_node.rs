@@ -17,7 +17,7 @@ pub struct PyramidNode;
 /// [`ParamSet::geometry`]) lead; the width/height/depth dimensions follow
 /// on capitalized sockets, matching the "socket-or-property" shape.
 fn params() -> ParamSet {
-    ParamSet::geometry()
+    ParamSet::primitive("Pyramid", 10.0)
         .number("width", "Width", 20.0, 0.001..=10_000.0)
         .socket_named("Width")
         .number("height", "Height", 20.0, 0.001..=10_000.0)

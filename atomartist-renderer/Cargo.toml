@@ -47,4 +47,11 @@ features = ["wgsl", "vulkan", "dx12", "metal"]
 [target.'cfg(target_arch = "wasm32")'.dependencies.wgpu]
 version = "29"
 default-features = false
-features = ["wgsl", "webgl"]
+features = ["wgsl", "webgpu"]
+
+# Browser console sink for `diagnostics` — a failing WASM frame produces
+# a black canvas and no panic, so the render telemetry has to reach
+# somewhere the developer can actually read it.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { version = "0.3", features = ["console"] }
+wasm-bindgen = "0.2"

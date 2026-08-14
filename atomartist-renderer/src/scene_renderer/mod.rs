@@ -198,12 +198,97 @@ pub struct BodyGpu {
     pub opaque: bool,
 }
 
-/// Linear SSAA scale: every offscreen scene target is allocated at
-/// `SSAA_SCALE × {on-screen w, h}` and box-downsampled on the final
-/// composite. `3` → a 3×3 (9×) supersample, matching agg-gui's
-/// [`SsaaFramebuffer::blit_downsample_3x_to`] kernel — all 9 source
-/// texels under each output pixel contribute equally.
-pub const SSAA_SCALE: u32 = 3;
+/// Best linear SSAA scale we will ever use: every offscreen scene
+/// target is allocated at `scale × {on-screen w, h}` and box-downsampled
+/// on the final composite. `3` → a 3×3 (9×) supersample, matching
+/// agg-gui's [`SsaaFramebuffer::blit_downsample_3x_to`] kernel — all 9
+/// source texels under each output pixel contribute equally.
+///
+/// The scale actually used is chosen per device by
+/// [`choose_ssaa_scale`], because this used to be a hard constant and
+/// that is what made the app unusable on phones — see that function.
+pub const MAX_SSAA_SCALE: u32 = 3;
+
+/// Ceiling on total offscreen VRAM for the scene targets. Past this the
+/// supersample factor steps down.
+///
+/// Anti-aliasing is not worth an unbounded memory budget: at 3× a
+/// 2560×1440 viewport wants ~2.4 GiB of offscreen targets, which is
+/// absurd on any GPU and fatal on most. 768 MiB comfortably covers a
+/// desktop viewport at 3× (a 1280×400 pane measures ~330 MiB) while
+/// forcing high-DPI and large-viewport cases down a step.
+const SSAA_MEMORY_BUDGET_BYTES: u64 = 768 * 1024 * 1024;
+
+/// Per-supersampled-pixel cost of the scene's offscreen targets, in
+/// bytes. Single source of truth for both the budget check in
+/// [`choose_ssaa_scale`] and the diagnostic report in
+/// [`report_offscreen_budget`], so the two can't drift.
+///
+/// `dual_depth_bpp` is 16 with 32-bit blendable float, 8 with the
+/// half-float fallback (see [`depth_peel::dual_depth_format`]).
+fn scene_bytes_per_pixel(dual_depth_bpp: u32) -> u32 {
+    // framebuffer + scene_depth + scene_depth_color
+    4 + 4 + 4
+        // dual_depth ping-pong pair
+        + dual_depth_bpp * 2
+        // front + back peel accumulators
+        + 8 * 2
+        // HDR scene composite
+        + 8
+        // outline ID + blur targets
+        + 4 * 2
+}
+
+/// Pick the supersample factor for this device.
+///
+/// The scene's offscreen targets are sized `scale × widget size`, and
+/// the widget size is **already in device pixels**. A fixed 3× is fine
+/// at device-pixel-ratio 1, but on a phone at ratio 3 it multiplies an
+/// already-tripled resolution: a 9× area factor on top of a 9× pixel
+/// count. That overruns `max_texture_dimension_2d` on tall screens and
+/// exhausts GPU memory everywhere else, and because a failed texture
+/// allocation just yields an empty frame, the visible symptom is a
+/// black canvas rather than an error.
+///
+/// So we treat `MAX_SSAA_SCALE` as a *quality target expressed per CSS
+/// pixel* and subtract what the display already provides, then step
+/// down further until the result fits the device's texture limit and
+/// the memory budget. A high-DPI screen needs little or no
+/// supersampling — it already has the samples.
+fn choose_ssaa_scale(
+    device_scale: f64,
+    screen_w: u32,
+    screen_h: u32,
+    max_texture_dim: u32,
+    bytes_per_pixel: u32,
+) -> u32 {
+    let dpr = if device_scale.is_finite() && device_scale >= 1.0 {
+        device_scale
+    } else {
+        1.0
+    };
+    let from_dpr = (MAX_SSAA_SCALE as f64 / dpr)
+        .round()
+        .clamp(1.0, MAX_SSAA_SCALE as f64) as u32;
+
+    let fits = |scale: u32| -> bool {
+        let w = screen_w.saturating_mul(scale);
+        let h = screen_h.saturating_mul(scale);
+        if w > max_texture_dim || h > max_texture_dim {
+            return false;
+        }
+        let bytes = w as u64 * h as u64 * bytes_per_pixel as u64;
+        bytes <= SSAA_MEMORY_BUDGET_BYTES
+    };
+
+    let mut scale = from_dpr;
+    while scale > 1 && !fits(scale) {
+        scale -= 1;
+    }
+    // Scale 1 may still not fit on an extreme display; nothing more we
+    // can trade away here, and the diagnostic report will say so.
+    scale
+}
 
 /// Linear HDR format for the offscreen scene composite target.
 /// `Rgba16Float` keeps the dual-peel resolve, outline, and gizmo
@@ -309,6 +394,12 @@ pub struct WgpuSceneRenderer {
     /// is skipped.
     pub bodies: Vec<Body>,
     pub viewport_size: (u32, u32),
+    /// Supersample factor in effect this frame, chosen per device by
+    /// [`choose_ssaa_scale`] and refreshed in `ensure_framebuffer`.
+    /// Read by the render impl to size the offscreen passes and to
+    /// select the matching downsample kernel. `1` means "no
+    /// supersampling" — the scene renders at native device resolution.
+    ssaa_scale: u32,
     /// Fallback tint used when `bodies` is empty (so the bed pass
     /// still has a sane background colour). Per-body tint lives on
     /// each `Body::color`.
@@ -345,9 +436,15 @@ pub struct WgpuSceneRenderer {
     /// Blinn-Phong shininess exponent (NodeDesigner default `30.0`).
     pub shininess: f32,
     /// Floor-grid line color — caller adapts to the active theme.
-    /// Forwarded to [`crate::bed::BedRenderer::set_line_color`] each
+    /// Forwarded to [`crate::bed::BedRenderer::set_colors`] each
     /// frame; cheap when unchanged.
     pub grid_line_color: [f32; 4],
+    /// Translucent wash painted across the whole bed, under the grid
+    /// lines — the alpha that makes the bed a surface rather than a
+    /// set of floating lines. MatterCAD's `BedShadowTextureRenderer`
+    /// uses `theme.BackgroundColor.WithAlpha(80)`; the viewport widget
+    /// forwards the themed equivalent.
+    pub grid_fill_color: [f32; 4],
     /// True when the bed should render dark-mode contact shadows
     /// (bright instead of black). Mirrored from the viewport theme by
     /// [`crate::viewport_widget::Viewport3dWidget::paint`].
@@ -403,6 +500,7 @@ impl WgpuSceneRenderer {
             camera: OrbitCamera::default(),
             bodies: Vec::new(),
             viewport_size: (0, 0),
+            ssaa_scale: MAX_SSAA_SCALE,
             base_color: [0.62, 0.66, 0.78, 1.0],
             // NodeDesigner `lightDir0 = (-1, -1, 1).normalize()`.
             light_dir: [-0.577_350_3, -0.577_350_3, 0.577_350_3],
@@ -417,6 +515,8 @@ impl WgpuSceneRenderer {
             material_specular: [1.0, 1.0, 1.0],
             shininess: 30.0,
             grid_line_color: [0.55, 0.58, 0.66, 0.7],
+            // 80/255 — MatterCAD's `BedFillAlpha`.
+            grid_fill_color: [0.985, 0.985, 0.99, 80.0 / 255.0],
             grid_dark_mode: false,
             draw_grid: true,
             grid_z: 0.0,
@@ -455,6 +555,7 @@ impl WgpuSceneRenderer {
             queue,
             surface_format,
             self.grid_line_color,
+            self.grid_fill_color,
         );
         bed.set_dark_mode(self.grid_dark_mode);
 
@@ -494,22 +595,44 @@ impl WgpuSceneRenderer {
     }
 
     /// Lazily allocate (or resize) every offscreen scene target at
-    /// `SSAA_SCALE × {w, h}` — the background framebuffer, the
+    /// `ssaa_scale × {w, h}` — the background framebuffer, the
     /// sample-able scene-depth texture, the dual-peel targets, the HDR
     /// scene composite (`scene_fb`), and the outline targets. `(w, h)`
-    /// is the **on-screen** widget size; this multiplies by
-    /// [`SSAA_SCALE`] so the whole scene supersamples. Cheap when the
-    /// size is stable.
+    /// is the **on-screen** widget size in device pixels; this
+    /// multiplies by the per-device supersample factor from
+    /// [`choose_ssaa_scale`]. Cheap when the size is stable.
+    ///
+    /// The factor is (re)chosen here rather than once at startup so it
+    /// tracks a window resize, a splitter drag, or a browser zoom that
+    /// changes the device-pixel ratio.
     fn ensure_framebuffer(&mut self, device: &wgpu::Device, w: u32, h: u32) {
+        // Chosen before the `state` borrow — `choose_ssaa_scale` needs
+        // the device limits, not renderer state.
+        let dual_depth_bpp = match depth_peel::dual_depth_format(device) {
+            wgpu::TextureFormat::Rgba32Float => 16,
+            _ => 8,
+        };
+        let scale = choose_ssaa_scale(
+            agg_gui::device_scale(),
+            w.max(1),
+            h.max(1),
+            device.limits().max_texture_dimension_2d,
+            scene_bytes_per_pixel(dual_depth_bpp),
+        );
+        self.ssaa_scale = scale;
+
         let s = match &mut self.state {
             Some(s) => s,
             None => return,
         };
         let format = s.surface_format;
+        // Kept for the allocation report below — `w` / `h` are about to
+        // be rewritten to their supersampled values.
+        let (screen_w, screen_h) = (w, h);
         // Supersample dimensions — every scene target renders at this
         // size; the final composite box-downsamples it to `(w, h)`.
-        let w = (w.max(1)) * SSAA_SCALE;
-        let h = (h.max(1)) * SSAA_SCALE;
+        let w = (w.max(1)) * scale;
+        let h = (h.max(1)) * scale;
         match &mut s.framebuffer {
             Some(fb) => fb.ensure_size(device, w, h),
             None => {
@@ -549,6 +672,13 @@ impl WgpuSceneRenderer {
             Some(t) => t.ensure_size(device, w, h),
             None => s.outline_targets = Some(OutlineTargets::new(device, w, h)),
         }
+
+        report_offscreen_budget(device, w, h, screen_w, screen_h, scale);
+    }
+
+    /// Supersample factor in effect — see [`choose_ssaa_scale`].
+    pub fn ssaa_scale(&self) -> u32 {
+        self.ssaa_scale
     }
 
     /// Bed-quad render-time Z. Temporarily locked to literal `0.0`
@@ -560,6 +690,55 @@ impl WgpuSceneRenderer {
     fn bed_render_z(&self) -> f32 {
         0.0
     }
+}
+
+/// Hand the offscreen target inventory to [`crate::diagnostics`] so a
+/// resize prints (or, when over the device limit, warns about) the full
+/// VRAM budget for the scene.
+///
+/// Every one of these is allocated at `SSAA_SCALE × widget size`, and
+/// the widget size is already in **device** pixels. On a desktop at
+/// DPR 1 that is a comfortable multiplier; on a phone at DPR 3 it is a
+/// 9× area multiplier on top of a screen that already has 3× the
+/// pixels, which is what makes this worth printing at all.
+///
+/// Byte counts are per-pixel for each target's format — see the
+/// matching allocation sites in `ensure_framebuffer`.
+fn report_offscreen_budget(
+    device: &wgpu::Device,
+    fb_w: u32,
+    fb_h: u32,
+    screen_w: u32,
+    screen_h: u32,
+    ssaa_scale: u32,
+) {
+    use crate::diagnostics::TargetDesc;
+
+    // `dual_depth` is Rgba32Float when the device can blend 32-bit
+    // float and Rgba16Float otherwise — the single biggest line item
+    // either way, since it is a ping-pong pair.
+    let dual_depth_bpp = match depth_peel::dual_depth_format(device) {
+        wgpu::TextureFormat::Rgba32Float => 16,
+        _ => 8,
+    };
+    let targets = [
+        TargetDesc { label: "framebuffer", bytes_per_pixel: 4, count: 1 },
+        TargetDesc { label: "scene_depth", bytes_per_pixel: 4, count: 1 },
+        TargetDesc { label: "scene_depth_color", bytes_per_pixel: 4, count: 1 },
+        TargetDesc { label: "dual_depth (ping-pong)", bytes_per_pixel: dual_depth_bpp, count: 2 },
+        TargetDesc { label: "peel accum (f/b)", bytes_per_pixel: 8, count: 2 },
+        TargetDesc { label: "scene_fb (HDR)", bytes_per_pixel: 8, count: 1 },
+        TargetDesc { label: "outline targets", bytes_per_pixel: 4, count: 2 },
+    ];
+    crate::diagnostics::report_target_allocation(
+        fb_w,
+        fb_h,
+        screen_w,
+        screen_h,
+        ssaa_scale,
+        &device.limits(),
+        &targets,
+    );
 }
 
 // `ensure_body_buffers` — the per-body GPU buffer builder — lives in

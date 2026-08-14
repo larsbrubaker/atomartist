@@ -13,8 +13,16 @@
 //!   composite texture and draws into the scene framebuffer.
 //!
 //! The exported entry points (`new`, `render_to_composite`,
-//! `draw_bed`, `set_line_color`, `set_dark_mode`) are the only API
+//! `draw_bed`, `set_colors`, `set_dark_mode`) are the only API
 //! the scene renderer needs.
+//!
+//! Like MatterCAD's `FloorDrawable`, the bed is a **transparent
+//! surface**, not an opaque plane with lines on it: the baked texture
+//! carries a translucent fill everywhere plus opaque grid lines, and
+//! the quad depth-tests without depth-writing so the fill, the grid,
+//! and the contact shadow all blend against whatever is behind them.
+//! The scene renderer draws it after the opaque bodies for that
+//! reason — see `scene_renderer::render_impl`.
 
 use std::cell::Cell;
 
@@ -52,8 +60,10 @@ struct CompositeKey {
     /// Grid-line colour packed as RGBA8. Re-baking the grid texture
     /// is what actually invalidates the composite — but tracking the
     /// colour here makes the dependency explicit and survives the
-    /// `colors_equal` quantisation step in `set_line_color`.
+    /// `colors_equal` quantisation step in `set_colors`.
     color_key: u32,
+    /// Bed fill colour packed as RGBA8; same rationale as `color_key`.
+    fill_key: u32,
 }
 
 #[repr(C)]
@@ -86,6 +96,10 @@ pub struct BedRenderer {
     /// we keep only the view (re-bake replaces it).
     grid_view: wgpu::TextureView,
     grid_line_color: [f32; 4],
+    /// Translucent wash covering the whole bed, under the grid lines.
+    /// MatterCAD's `BedShadowTextureRenderer` uses the theme background
+    /// at alpha 80/255; the host forwards the themed equivalent here.
+    bed_fill_color: [f32; 4],
     /// Tracks the current dark-mode flag for [`CompositeKey`] so the
     /// invalidation logic in `render_to_composite` can detect a
     /// theme flip without rereading the chain's private state.
@@ -125,11 +139,18 @@ impl BedRenderer {
         queue: &wgpu::Queue,
         surface_format: wgpu::TextureFormat,
         initial_line_color: [f32; 4],
+        initial_fill_color: [f32; 4],
     ) -> Self {
         let chain = ShadowChain::new(device, surface_format);
 
-        let grid_view = bake_grid_texture(device, queue, surface_format, initial_line_color)
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        let grid_view = bake_grid_texture(
+            device,
+            queue,
+            surface_format,
+            initial_line_color,
+            initial_fill_color,
+        )
+        .create_view(&wgpu::TextureViewDescriptor::default());
 
         // Trilinear filtering (mag + min + mipmap) on the composite
         // gives clean grid-line edges across the full zoom range —
@@ -208,6 +229,7 @@ impl BedRenderer {
             chain,
             grid_view,
             grid_line_color: initial_line_color,
+            bed_fill_color: initial_fill_color,
             is_dark: false,
             bed_pipeline,
             bed_vbuf,
@@ -227,23 +249,33 @@ impl BedRenderer {
         self.chain.shadow_opacity()
     }
 
-    /// Re-bake the grid texture with a new line colour. Cheap — single
-    /// CPU paint + mip box-downsample + upload, runs once per theme
-    /// change. The shadow chain's composite bind group references the
-    /// old grid view, so it must be invalidated here; the chain will
-    /// rebuild it lazily on its next `render` call.
-    pub fn set_line_color(
+    /// Re-bake the grid texture with a new line + bed-fill colour.
+    /// Cheap — single CPU paint + mip box-downsample + upload, runs
+    /// once per theme change. The shadow chain's composite bind group
+    /// references the old grid view, so it must be invalidated here;
+    /// the chain will rebuild it lazily on its next `render` call.
+    pub fn set_colors(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        new_color: [f32; 4],
+        line_color: [f32; 4],
+        fill_color: [f32; 4],
     ) {
-        if colors_equal(self.grid_line_color, new_color) {
+        if colors_equal(self.grid_line_color, line_color)
+            && colors_equal(self.bed_fill_color, fill_color)
+        {
             return;
         }
-        self.grid_line_color = new_color;
-        self.grid_view = bake_grid_texture(device, queue, self.surface_format, new_color)
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        self.grid_line_color = line_color;
+        self.bed_fill_color = fill_color;
+        self.grid_view = bake_grid_texture(
+            device,
+            queue,
+            self.surface_format,
+            line_color,
+            fill_color,
+        )
+        .create_view(&wgpu::TextureViewDescriptor::default());
         self.chain.invalidate_grid_binding();
     }
 
@@ -281,6 +313,7 @@ impl BedRenderer {
             mesh_id: if bodies.is_empty() { 0 } else { bodies_id },
             invert_flag: u8::from(self.is_dark),
             color_key: pack_rgba8(self.grid_line_color),
+            fill_key: pack_rgba8(self.bed_fill_color),
         };
         let prev = self.last_composite_key.get();
         if prev == Some(key) {
@@ -347,6 +380,7 @@ fn log_cache_miss(prev: Option<CompositeKey>, now: CompositeKey) {
             if p.mesh_id != now.mesh_id { diffs.push("mesh_id"); }
             if p.invert_flag != now.invert_flag { diffs.push("invert"); }
             if p.color_key != now.color_key { diffs.push("color"); }
+            if p.fill_key != now.fill_key { diffs.push("fill"); }
             eprintln!("[bed] cache miss — changed: {diffs:?}; prev={p:?} now={now:?}");
         }
     }
@@ -365,8 +399,8 @@ impl std::fmt::Debug for CompositeKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{{mesh=0x{:x} inv={} col=0x{:08x}}}",
-            self.mesh_id, self.invert_flag, self.color_key
+            "{{mesh=0x{:x} inv={} col=0x{:08x} fill=0x{:08x}}}",
+            self.mesh_id, self.invert_flag, self.color_key, self.fill_key
         )
     }
 }
@@ -447,9 +481,16 @@ fn build_bed_pipeline(
             cull_mode: None,
             ..Default::default()
         },
+        // The bed is a TRANSPARENT surface, so it depth-tests but never
+        // depth-writes — MatterCAD renders it as a transparent command
+        // (`RenderTransparentAlphaBlend` / the dual-peel bed pass) with
+        // `GetOrCreateDepthStencilState(true, LessEqual, false)`. The
+        // scene renderer draws it after the opaque bodies, so `Less`
+        // hides it wherever solid geometry is in front, while leaving
+        // the depth buffer untouched for the passes that follow.
         depth_stencil: Some(wgpu::DepthStencilState {
             format: wgpu::TextureFormat::Depth32Float,
-            depth_write_enabled: Some(true),
+            depth_write_enabled: Some(false),
             depth_compare: Some(wgpu::CompareFunction::Less),
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
@@ -461,17 +502,25 @@ fn build_bed_pipeline(
             targets: &[
                 Some(wgpu::ColorTargetState {
                     format: surface_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    // The composite texture is PREMULTIPLIED (see
+                    // `bed::texture::premultiplied_bytes` and the
+                    // composite shader). `ALPHA_BLENDING` would scale
+                    // by alpha a second time, which is what made the
+                    // translucent grid lines wash out against the bed.
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 }),
-                // Mirrors the bed plane's `clip.z` into the R32Float
-                // auxiliary depth attachment that the dual-peel chain
-                // samples. See `scene_renderer::opaque_shaders` for
-                // the design rationale.
+                // The R32Float attachment is the dual-peel chain's
+                // "opaque depth" reference. The bed must NOT appear in
+                // it — MatterCAD keeps the bed out of the opaque pass
+                // for the same reason: a translucent surface that
+                // seeds the opaque depth would clip every peeled layer
+                // behind it. Declared (the pass binds two attachments)
+                // but masked off.
                 Some(wgpu::ColorTargetState {
                     format: wgpu::TextureFormat::R32Float,
                     blend: None,
-                    write_mask: wgpu::ColorWrites::RED,
+                    write_mask: wgpu::ColorWrites::empty(),
                 }),
             ],
             compilation_options: Default::default(),
@@ -519,6 +568,7 @@ mod tests {
             &queue,
             wgpu::TextureFormat::Rgba8UnormSrgb,
             [0.55, 0.58, 0.66, 0.7],
+            [0.985, 0.985, 0.99, 80.0 / 255.0],
         );
         // Surface format round-trips through the renderer.
         assert_eq!(bed.surface_format(), wgpu::TextureFormat::Rgba8UnormSrgb);

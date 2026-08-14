@@ -54,6 +54,7 @@
 
 pub mod bed;
 pub mod camera;
+pub mod diagnostics;
 pub mod camera_animations;
 pub mod picking;
 pub mod scene_renderer;

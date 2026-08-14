@@ -225,3 +225,106 @@ fn dual_peel_draw_loops_bind_both_vertex_slots() {
         let _ = has_draw;
     }
 }
+
+// ---------------------------------------------------------------------------
+// Adaptive supersampling
+// ---------------------------------------------------------------------------
+//
+// The scene's offscreen targets are sized `scale × device pixels`, so a
+// fixed 3× multiplies an already-high device-pixel ratio. These pin the
+// behaviour that keeps that from producing an unallocatable frame (which
+// renders as a black canvas, with the error only reaching the console).
+
+use super::{choose_ssaa_scale, scene_bytes_per_pixel, MAX_SSAA_SCALE};
+
+/// WebGPU's default limit tier — what a browser guarantees.
+const WEBGPU_MAX_DIM: u32 = 8192;
+
+/// Bytes/px with the 32-bit blendable-float dual-depth slab (the
+/// expensive, common case).
+fn bpp() -> u32 {
+    scene_bytes_per_pixel(16)
+}
+
+#[test]
+fn desktop_at_dpr_1_keeps_full_quality() {
+    // The case the fixed 3× was tuned for must not regress.
+    assert_eq!(
+        choose_ssaa_scale(1.0, 1280, 400, WEBGPU_MAX_DIM, bpp()),
+        MAX_SSAA_SCALE,
+    );
+}
+
+#[test]
+fn high_dpi_screens_supersample_less() {
+    // A display that already has the samples doesn't need us to add
+    // them: the factor is the quality target divided by the ratio.
+    let small = (600u32, 400u32); // small enough that only the DPR term binds
+    assert_eq!(choose_ssaa_scale(1.5, small.0, small.1, WEBGPU_MAX_DIM, bpp()), 2);
+    assert_eq!(choose_ssaa_scale(2.0, small.0, small.1, WEBGPU_MAX_DIM, bpp()), 2);
+    assert_eq!(choose_ssaa_scale(3.0, small.0, small.1, WEBGPU_MAX_DIM, bpp()), 1);
+}
+
+/// The regression this whole change exists for. A phone viewport in
+/// device pixels at DPR 3: the old fixed 3× asked for targets past the
+/// texture limit and ~1.5 GB of VRAM, and the frame silently failed.
+#[test]
+fn phone_viewport_stays_within_the_texture_limit() {
+    // 390×932 CSS px at DPR 3 — a current large phone, full-height pane.
+    let (w, h) = (1170u32, 2796u32);
+    // What the old constant would have asked for:
+    assert!(
+        h * MAX_SSAA_SCALE > WEBGPU_MAX_DIM,
+        "precondition: fixed 3× must overrun the limit for this to be a regression test",
+    );
+    let scale = choose_ssaa_scale(3.0, w, h, WEBGPU_MAX_DIM, bpp());
+    assert!(w * scale <= WEBGPU_MAX_DIM && h * scale <= WEBGPU_MAX_DIM);
+}
+
+#[test]
+fn oversized_viewport_steps_down_to_fit_memory() {
+    // 4K-wide viewport at DPR 1: the DPR term alone would allow 3×,
+    // which is ~2.4 GiB of offscreen targets. The budget must bite.
+    let (w, h) = (3840u32, 2160u32);
+    let scale = choose_ssaa_scale(1.0, w, h, WEBGPU_MAX_DIM, bpp());
+    assert!(scale < MAX_SSAA_SCALE, "expected a step down, got {scale}");
+    let bytes = (w * scale) as u64 * (h * scale) as u64 * bpp() as u64;
+    assert!(
+        bytes <= super::SSAA_MEMORY_BUDGET_BYTES,
+        "chose {scale}× = {} MiB, over budget",
+        bytes / (1024 * 1024),
+    );
+}
+
+#[test]
+fn scale_is_never_zero_even_in_absurd_cases() {
+    // Nothing left to trade away — must still return a usable factor
+    // rather than 0, which would produce a zero-sized target.
+    let scale = choose_ssaa_scale(4.0, 16_000, 16_000, WEBGPU_MAX_DIM, bpp());
+    assert_eq!(scale, 1);
+}
+
+#[test]
+fn nonsense_device_scale_falls_back_to_full_quality() {
+    // A zero / NaN ratio from a shell that never set one must not
+    // produce a divide-by-zero or a 0 factor.
+    for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        let s = choose_ssaa_scale(bad, 800, 600, WEBGPU_MAX_DIM, bpp());
+        assert!((1..=MAX_SSAA_SCALE).contains(&s), "ratio {bad} gave {s}");
+    }
+}
+
+/// The byte-per-pixel figure drives the budget decision, so it must
+/// track the real target list. Cross-checked against the measured
+/// allocation report: a 3840×1179 frame reported 328.1 MiB.
+#[test]
+fn bytes_per_pixel_matches_the_measured_allocation() {
+    let measured_bytes = 328.1_f64 * 1024.0 * 1024.0;
+    let px = 3840.0_f64 * 1179.0;
+    let implied = measured_bytes / px;
+    let ours = bpp() as f64;
+    assert!(
+        (implied - ours).abs() < 1.0,
+        "bytes/px drifted from the measured report: implied {implied:.1}, ours {ours:.1}",
+    );
+}

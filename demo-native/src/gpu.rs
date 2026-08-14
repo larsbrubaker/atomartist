@@ -52,6 +52,15 @@ impl Gpu {
         }))
         .expect("request device");
 
+        // Mirror the WASM shell: route uncaptured wgpu errors to stderr
+        // rather than letting them vanish. Without a handler a failed
+        // texture allocation or rejected shader module just produces an
+        // empty frame, which reads as a renderer bug rather than a
+        // resource problem.
+        device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
+            eprintln!("wgpu uncaptured error: {e}");
+        }));
+
         let caps = surface.get_capabilities(&adapter);
         let surface_format = caps
             .formats

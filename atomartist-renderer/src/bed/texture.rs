@@ -37,22 +37,31 @@ pub const GRID_LINE_WIDTH: u32 = 3;
 /// `format` so it can be sampled by a pipeline whose target format is
 /// the surface format — caller passes the surface format through.
 ///
-/// `line_color` is the desired sRGB-space line colour with straight
-/// alpha. We premultiply before storing so the texture can be sampled
-/// and blended with `BlendState::ALPHA_BLENDING` without a per-fragment
-/// re-premultiply.
+/// `line_color` and `fill_color` are desired sRGB-space colours with
+/// straight alpha. We premultiply before storing so the texture can be
+/// sampled and blended with premultiplied-alpha blending without a
+/// per-fragment re-premultiply.
+///
+/// `fill_color` covers the whole bed (MatterCAD's
+/// `BedShadowTextureRenderer.BuildBaseTexture` fills the texture with
+/// `theme.BackgroundColor.WithAlpha(80)` before stroking the grid). It
+/// is what makes the bed a *translucent surface* rather than a set of
+/// floating lines — the alpha varies across the texture (fill alpha
+/// between lines, line alpha on them) so the whole bed blends against
+/// whatever is behind it.
 pub fn bake_grid_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     format: wgpu::TextureFormat,
     line_color: [f32; 4],
+    fill_color: [f32; 4],
 ) -> wgpu::Texture {
     let size = GRID_TEX_SIZE;
     let divisions = GRID_DIVISIONS;
     let line_width = GRID_LINE_WIDTH;
 
     let mip_count = mip_level_count(size, size);
-    let base = paint_grid_rgba(size, divisions, line_width, line_color, format);
+    let base = paint_grid_rgba(size, divisions, line_width, line_color, fill_color, format);
 
     let tex = device.create_texture_with_data(
         queue,
@@ -87,16 +96,32 @@ fn paint_grid_rgba(
     divisions: u32,
     line_width: u32,
     line_color_srgb: [f32; 4],
+    fill_color_srgb: [f32; 4],
     format: wgpu::TextureFormat,
 ) -> Vec<u8> {
-    let mut buf = vec![0u8; (size * size * 4) as usize];
-    let [pr, pg, pb, pa] = premultiplied_bytes(line_color_srgb);
     let bgra = matches!(
         format,
         wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
     );
     // Channel order in the destination buffer.
     let (cr, cg, cb) = if bgra { (2, 1, 0) } else { (0, 1, 2) };
+
+    // Translucent bed fill first, grid lines composited over it — same
+    // order as MatterCAD's `BuildBaseTexture` (FillRectangle then
+    // Line). The fill is what gives the bed its varying alpha.
+    let fill = premultiplied_bytes(fill_color_srgb);
+    let mut buf = vec![0u8; (size * size * 4) as usize];
+    for texel in buf.chunks_exact_mut(4) {
+        texel[cr] = fill[0];
+        texel[cg] = fill[1];
+        texel[cb] = fill[2];
+        texel[3] = fill[3];
+    }
+
+    // Source-over in premultiplied space: a partially transparent grid
+    // line tints the fill instead of punching a hole through it.
+    let line = premultiplied_bytes(line_color_srgb);
+    let [pr, pg, pb, pa] = over_premultiplied(line, fill);
 
     let cell = size as f32 / divisions as f32;
     let max_start = size.saturating_sub(line_width);
@@ -141,6 +166,20 @@ fn premultiplied_bytes(c: [f32; 4]) -> [u8; 4] {
     let b = (c[2].clamp(0.0, 1.0) * a * 255.0).round() as u8;
     let alpha = (a * 255.0).round() as u8;
     [r, g, b, alpha]
+}
+
+/// Composite premultiplied `src` over premultiplied `dst`:
+/// `out = src + dst * (1 - src.a)`. Both inputs and the result are
+/// 8-bit premultiplied RGBA in the same channel order.
+fn over_premultiplied(src: [u8; 4], dst: [u8; 4]) -> [u8; 4] {
+    let inv = 255u32 - src[3] as u32;
+    let mut out = [0u8; 4];
+    for c in 0..4 {
+        // +127 rounds the fixed-point divide to nearest.
+        let v = src[c] as u32 + (dst[c] as u32 * inv + 127) / 255;
+        out[c] = v.min(255) as u8;
+    }
+    out
 }
 
 /// Build the full mip chain by repeatedly box-downsampling and
@@ -212,13 +251,14 @@ mod tests {
             divisions,
             line_width,
             color,
+            [0.0, 0.0, 0.0, 0.0],
             wgpu::TextureFormat::Rgba8UnormSrgb,
         );
         // (0,0) is on the first horizontal+vertical line — opaque.
         let i0 = 0usize;
         assert_eq!(buf[i0 + 3], 255);
         // Centre of cell (1,1) at (size/divisions * 1.5) = 12 — should
-        // be empty.
+        // be empty when there is no bed fill.
         let cx = 12u32;
         let cy = 12u32;
         let ic = ((cy * size + cx) * 4) as usize;
@@ -229,6 +269,61 @@ mod tests {
         let last_x = size - 1;
         let il = ((0 * size + last_x) * 4) as usize;
         assert_eq!(buf[il + 3], 255);
+    }
+
+    /// MatterCAD's bed is a *translucent surface*, not floating lines:
+    /// `BuildBaseTexture` fills the whole texture with the theme
+    /// background at alpha 80/255 and strokes the grid over it. The
+    /// baked texture must therefore have a non-zero alpha everywhere,
+    /// higher on the lines than between them, so the whole bed blends
+    /// with what is behind it.
+    #[test]
+    fn bed_fill_gives_the_whole_texture_varying_alpha() {
+        let size = 64u32;
+        let fill_alpha = 80.0 / 255.0;
+        let buf = paint_grid_rgba(
+            size,
+            8,
+            2,
+            [0.2, 0.2, 0.2, 1.0],
+            [1.0, 1.0, 1.0, fill_alpha],
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        );
+        // Between the lines: the translucent fill, not a hole.
+        let between = ((12 * size + 12) * 4) as usize;
+        assert_eq!(buf[between + 3], 80);
+        // On a line: fully opaque, so lines still read crisply.
+        assert_eq!(buf[3], 255);
+    }
+
+    /// A grid line with straight alpha < 1 must tint the fill rather
+    /// than punch through it — the "lines blend with the bed" half of
+    /// MatterCAD's look.
+    #[test]
+    fn translucent_line_composites_over_the_fill() {
+        let size = 64u32;
+        let buf = paint_grid_rgba(
+            size,
+            8,
+            2,
+            [0.0, 0.0, 0.0, 0.5],
+            [1.0, 1.0, 1.0, 80.0 / 255.0],
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        );
+        // Line alpha 0.5 over fill alpha 80/255: 128 + 80*(1-0.5) = 168.
+        assert_eq!(buf[3], 168);
+        // ...and it is more opaque than the bare fill between lines.
+        let between = ((12 * size + 12) * 4) as usize;
+        assert!(buf[3] > buf[between + 3]);
+    }
+
+    #[test]
+    fn over_premultiplied_leaves_dst_alone_for_transparent_src() {
+        let dst = [10, 20, 30, 40];
+        assert_eq!(over_premultiplied([0, 0, 0, 0], dst), dst);
+        // Opaque src fully replaces dst.
+        let src = [1, 2, 3, 255];
+        assert_eq!(over_premultiplied(src, dst), src);
     }
 
     #[test]

@@ -32,4 +32,4 @@ features = ["wgsl", "webgpu"]
 
 [dependencies.web-sys]
 version  = "0.3"
-features = ["Window", "Document", "Element", "Node", "HtmlCanvasElement", "console"]
+features = ["Window", "Document", "Element", "Node", "HtmlCanvasElement", "console", "Location"]

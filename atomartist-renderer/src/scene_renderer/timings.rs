@@ -2,9 +2,16 @@
 //! `scene_renderer/mod.rs` to keep that file under the 800-line guardrail.
 //!
 //! Provides `SceneTimings`, the lightweight clock helper `elapsed_ms`, and
-//! the thread-local accumulator + 1-second summary logger gated on the
-//! `ATOMARTIST_SCENE_LOG` env var. Called from the WgpuCustomRender impl
-//! when the env var enables it; no-ops otherwise.
+//! the thread-local accumulator + 1-second summary logger gated on
+//! [`crate::diagnostics::logging_enabled`] (the `ATOMARTIST_SCENE_LOG`
+//! env var on native, `set_render_log(true)` from JS on wasm). Called
+//! from the WgpuCustomRender impl every frame; no-ops when disabled.
+//!
+//! Both the gate and the sink route through [`crate::diagnostics`]
+//! specifically so this works in a browser. The previous version read
+//! `std::env::var` (always `Err` on wasm) and wrote through `eprintln!`
+//! (discarded on wasm), which meant the renderer had *zero* telemetry
+//! on the platform where we can't attach a native profiler.
 
 pub(super) fn elapsed_ms(t: web_time::Instant) -> f32 {
     t.elapsed().as_secs_f32() * 1000.0
@@ -22,13 +29,10 @@ pub(super) struct SceneTimings {
     pub(super) blit_ms: f32,
 }
 
+use crate::diagnostics;
+
 fn scene_log_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("ATOMARTIST_SCENE_LOG")
-            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "on" | "yes"))
-            .unwrap_or(false)
-    })
+    diagnostics::logging_enabled()
 }
 
 thread_local! {
@@ -67,7 +71,7 @@ pub(super) fn log_scene_timings(t: SceneTimings) {
         let avg = |f: fn(&SceneTimings) -> f32| -> f32 { buf.iter().map(f).sum::<f32>() / n };
         let max_total = buf.iter().map(|t| t.total_ms).fold(0.0_f32, f32::max);
         let chain_hits = buf.iter().filter(|t| t.bed_ran_chain).count();
-        eprintln!(
+        diagnostics::log(&format!(
             "[scene {:>3} frames] total avg={:.2} max={:.2} ms | ensure={:.3} fb={:.3} mesh={:.3} bed_comp={:.3} peel={:.3} downsample={:.3} | chain_runs={}/{}",
             buf.len(),
             avg(|t| t.total_ms),
@@ -80,7 +84,7 @@ pub(super) fn log_scene_timings(t: SceneTimings) {
             avg(|t| t.blit_ms),
             chain_hits,
             buf.len(),
-        );
+        ));
         drop(buf);
         acc.borrow_mut().clear();
     });

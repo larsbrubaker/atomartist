@@ -41,7 +41,7 @@ use crate::socket_types::SocketType;
 /// an optional capitalized socket. This mirrors NodeDesigner's Cylinder.
 fn params() -> ParamSet {
     let def = CylinderProps::default();
-    ParamSet::geometry()
+    ParamSet::primitive("Cylinder", 10.0)
         .number("diameter", "Diameter", def.diameter, 1.0..=400.0)
         .ease_in(2.0)
         .snap_grid()

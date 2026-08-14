@@ -18,11 +18,13 @@ use super::timings::{elapsed_ms, log_scene_timings, SceneTimings};
 use super::util::normalize3;
 use super::WgpuSceneRenderer;
 
-/// Wireframe half-line width, in **framebuffer** pixels. The scene
-/// supersamples at [`super::SSAA_SCALE`]× (3×), so this is ~⅓ of a
-/// screen pixel per unit — `1.5` fb-px lands a ~1px line on screen after
-/// the box downsample. Passed to the edge shader's `fwidth` threshold.
-const EDGE_WIDTH_PX: f32 = 1.5;
+/// Wireframe half-line width in **screen** pixels, before the
+/// supersample multiplier. The edge shader works in framebuffer pixels,
+/// so the value handed to it is this scaled by the frame's supersample
+/// factor — `0.5 × 3` reproduces the previous fixed `1.5` at 3× while
+/// keeping the on-screen line the same weight when the factor drops to
+/// 2× or 1× on a high-DPI device.
+const EDGE_HALF_WIDTH_SCREEN_PX: f32 = 0.5;
 
 /// Cache key for the bed-shadow chain. Hashes mesh pointer + matrix
 /// per body so a drag (mesh ptr unchanged, matrix shifts) rolls the
@@ -165,13 +167,6 @@ impl WgpuCustomRender for WgpuSceneRenderer {
         if screen_w == 0 || screen_h == 0 {
             return;
         }
-        // Supersample dimensions — all scene render passes set their
-        // viewport / scissor / resolution uniform to these so
-        // pixel-space effects (outline width, fragment derivatives)
-        // scale with the oversized buffer.
-        let fb_w = screen_w * super::SSAA_SCALE;
-        let fb_h = screen_h * super::SSAA_SCALE;
-
         // Keep `viewport_size` in lockstep with the on-screen rect from
         // `ctx.screen_rect` — it feeds the projection's aspect ratio.
         // Without this assignment the field stays at its `(0, 0)`
@@ -180,10 +175,20 @@ impl WgpuCustomRender for WgpuSceneRenderer {
         self.viewport_size = (screen_w, screen_h);
 
         let t_fb = web_time::Instant::now();
-        // Pass the on-screen size — `ensure_framebuffer` multiplies by
-        // SSAA_SCALE to size the oversized scene targets.
+        // Pass the on-screen size — `ensure_framebuffer` picks this
+        // device's supersample factor and multiplies by it to size the
+        // oversized scene targets.
         self.ensure_framebuffer(ctx.device, screen_w, screen_h);
         let fb_ms = elapsed_ms(t_fb);
+
+        // Supersample dimensions — all scene render passes set their
+        // viewport / scissor / resolution uniform to these so
+        // pixel-space effects (outline width, fragment derivatives)
+        // scale with the oversized buffer. Read after
+        // `ensure_framebuffer`, which is what chooses the factor.
+        let ssaa = self.ssaa_scale();
+        let fb_w = screen_w * ssaa;
+        let fb_h = screen_h * ssaa;
         let t_mesh = web_time::Instant::now();
         let body_buffer_realloc = self.ensure_body_buffers(ctx.device, ctx.queue);
         // Rebuild the per-pipeline body bind groups whenever the
@@ -208,9 +213,11 @@ impl WgpuCustomRender for WgpuSceneRenderer {
         // composite-shadow chain track the active theme without extra
         // plumbing in the host widget.
         let grid_line = self.grid_line_color;
+        let grid_fill = self.grid_fill_color;
         let grid_dark = self.grid_dark_mode;
         if let Some(s) = &mut self.state {
-            s.bed.set_line_color(ctx.device, ctx.queue, grid_line);
+            s.bed
+                .set_colors(ctx.device, ctx.queue, grid_line, grid_fill);
             s.bed.set_dark_mode(grid_dark);
         }
 
@@ -263,9 +270,16 @@ impl WgpuCustomRender for WgpuSceneRenderer {
             global_ambient: to_vec4(self.global_ambient),
             material_specular: to_vec4(self.material_specular),
             base_color: self.base_color,
-            // params.y = wireframe half-line width (px) for the edge
-            // modes, folded into the surface shaders.
-            params: [self.shininess, EDGE_WIDTH_PX, 0.0, 0.0],
+            // params.y = wireframe half-line width in framebuffer px
+            // for the edge modes, folded into the surface shaders.
+            // Scaled by the frame's supersample factor so the line keeps
+            // a constant on-screen weight at any factor.
+            params: [
+                self.shininess,
+                EDGE_HALF_WIDTH_SCREEN_PX * ssaa as f32,
+                0.0,
+                0.0,
+            ],
             // `resolution.z` carries the dual-peel discard bias, paired
             // with the depth format the device supports (1e-5 for 32-bit
             // depth, 1e-3 for the half-float fallback). The opaque /
@@ -373,10 +387,6 @@ impl WgpuCustomRender for WgpuSceneRenderer {
             });
             pass.set_viewport(0.0, 0.0, fb_w as f32, fb_h as f32, 0.0, 1.0);
             pass.set_scissor_rect(0, 0, fb_w, fb_h);
-            if self.draw_grid {
-                let bed_z = self.bed_render_z();
-                s.bed.draw_bed(ctx.queue, &mut pass, mvp, bed_z);
-            }
             {
                 // ONLY opaque bodies render here — fully shaded, colour +
                 // depth, depth-tested like any normal solid mesh. This
@@ -405,6 +415,26 @@ impl WgpuCustomRender for WgpuSceneRenderer {
                         body_index as u32,
                     );
                 }
+            }
+
+            // The bed goes LAST in this pass, after the opaque bodies —
+            // it is a transparent surface, exactly like MatterCAD's
+            // `RenderTransparentAlphaBlend` bed command. Drawing it
+            // here means:
+            //
+            //   * it depth-tests (`Less`) against the opaque geometry,
+            //     so anything solid standing on the bed hides it
+            //     rather than being crossed by grid lines;
+            //   * it never depth-writes, so it can't occlude the
+            //     passes that follow;
+            //   * it stays out of the R32Float opaque-depth reference,
+            //     so the dual-peel chain doesn't clip translucent
+            //     layers against a translucent floor;
+            //   * a body *below* the bed blends through it, because
+            //     the bed's own fill alpha is what covers it.
+            if self.draw_grid {
+                let bed_z = self.bed_render_z();
+                s.bed.draw_bed(ctx.queue, &mut pass, mvp, bed_z);
             }
         }
 
@@ -551,14 +581,15 @@ impl WgpuCustomRender for WgpuSceneRenderer {
 
         // ── Pass 3: box-downsample the SSAA scene onto the 2-D target ─────
         //
-        // `scene_fb` is `SSAA_SCALE ×` the on-screen rect in HDR
-        // (SAMPLE_FORMAT). `blit_downsample_3x_to` runs the 9-tap 3×3
-        // box filter so all 9 supersampled texels under each output
-        // pixel contribute equally, and writes to the surface-format
-        // 2-D target (the hardware encodes linear→sRGB on store). One
-        // pass, fully anti-aliased.
+        // `scene_fb` is `ssaa ×` the on-screen rect in HDR
+        // (SAMPLE_FORMAT). `blit_downsample_to` picks the kernel that
+        // matches this frame's factor — the 9-tap 3×3 box at 3×, a
+        // single bilinear tap (which IS the exact 2×2 box) at 2×, and a
+        // plain copy at 1× — then writes to the surface-format 2-D
+        // target (the hardware encodes linear→sRGB on store). One pass,
+        // correctly filtered at every factor.
         let t_blit = web_time::Instant::now();
-        scene_fb.blit_downsample_3x_to(
+        scene_fb.blit_downsample_to(
             ctx.device,
             ctx.encoder,
             ctx.target_view,
@@ -566,6 +597,7 @@ impl WgpuCustomRender for WgpuSceneRenderer {
             ctx.screen_rect,
             ctx.parent_clip,
             ctx.pipelines,
+            ssaa,
         );
         let blit_ms = elapsed_ms(t_blit);
 

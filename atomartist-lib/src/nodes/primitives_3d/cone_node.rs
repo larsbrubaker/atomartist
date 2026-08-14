@@ -17,7 +17,7 @@ pub struct ConeNode;
 /// [`ParamSet::geometry`]) lead; the scalar dimensions follow on
 /// capitalized sockets, matching the "socket-or-property" shape.
 fn params() -> ParamSet {
-    ParamSet::geometry()
+    ParamSet::primitive("Cone", 10.0)
         .number("radius", "Radius", 10.0, 0.001..=10_000.0)
         .socket_named("Radius")
         .number("height", "Height", 20.0, 0.001..=10_000.0)

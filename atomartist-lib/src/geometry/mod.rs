@@ -3,13 +3,16 @@
 //! - `mesh3d` — `MeshGL` constructors, normals, merge, transform
 //! - `primitives` — generate_box / cylinder / sphere
 //! - `path2d` — `CrossSection` re-export plus winding helpers
+//! - `primitive_colors` — MatterCAD's per-primitive default colours
 
 pub mod geometry3d;
 pub mod mesh3d;
 pub mod path2d;
+pub mod primitive_colors;
 pub mod primitives;
 
 pub use geometry3d::{is_inherit_color, Body, Geometry3d, DEFAULT_GEOMETRY_COLOR, INHERIT_COLOR};
+pub use primitive_colors::primitive_color;
 pub use mesh3d::{
     apply_transform, bounds, compute_flat_normals, get_normal, get_pos, make_mesh, merge_meshes,
     num_tris, num_verts, NUM_PROP, STRIDE,

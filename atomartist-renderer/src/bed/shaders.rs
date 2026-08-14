@@ -144,10 +144,14 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
     // Light mode (invert=0) → black shadows; dark mode (invert=1) → white.
     let shadow_color = mix(vec3<f32>(0.0), vec3<f32>(1.0), invert);
 
-    // Standard "grid over shadow" compositing in premultiplied space.
+    // "Grid over shadow" source-over in PREMULTIPLIED space. The grid
+    // texture is already premultiplied (see
+    // `bed::texture::premultiplied_bytes`), so the source term is
+    // `grid.rgb`, NOT `grid.rgb * grid.a` — multiplying again darkened
+    // and washed out every translucent grid line and the bed fill.
     var result_color: vec3<f32> = shadow_color * shadow_amount;
     var result_alpha: f32 = shadow_amount;
-    result_color = grid.rgb * grid.a + result_color * (1.0 - grid.a);
+    result_color = grid.rgb + result_color * (1.0 - grid.a);
     result_alpha = grid.a + result_alpha * (1.0 - grid.a);
     return vec4<f32>(result_color, result_alpha);
 }
@@ -191,11 +195,12 @@ fn vs(@location(0) pos: vec2<f32>, @location(1) uv: vec2<f32>) -> VOut {
     return o;
 }
 
-// The bed pipeline draws into the scene renderer's opaque pass,
-// which carries a second R32Float attachment used by the dual-peel
-// chain (see `opaque_shaders` for the rationale). We mirror
-// `in.clip.z` into `@location(1)` so the bed plane participates in
-// the peel-reference depth like the mesh does.
+// The pass the bed draws into carries a second R32Float attachment
+// (the dual-peel chain's opaque-depth reference — see
+// `opaque_shaders`). The bed is transparent and deliberately stays
+// OUT of that reference, so the slot is written with a dummy value
+// and masked off in the pipeline's `write_mask`. The declaration is
+// still required because the pass binds two colour attachments.
 struct FsOut {
     @location(0) color: vec4<f32>,
     @location(1) depth_color: vec4<f32>,
@@ -203,23 +208,15 @@ struct FsOut {
 
 @fragment
 fn fs(in: VOut) -> FsOut {
-    let c = textureSample(bed_tex, bed_smp, in.uv);
-    // Bed-texture sample is premultiplied. Discard fully-transparent
-    // texels so the bed never overwrites the depth buffer where it has
-    // no visible content (matches NodeDesigner's alphaTest = 0.01).
-    //
-    // Keeping the threshold at 0.01 preserves the soft contact-shadow
-    // halo (shadow contribution maxes around 0.35 — well above this
-    // bar). Pixel alignment for the grid lines themselves is handled
-    // at bake time by `bed::texture::paint_grid_rgba`, which snaps
-    // each line to integer texel coordinates so no partial-coverage
-    // edge band leaks into the depth buffer.
-    if (c.a < 0.01) {
-        discard;
-    }
+    // Premultiplied sample, blended straight through with
+    // premultiplied-alpha blending. There is no alpha test: MatterCAD's
+    // bed is a translucent surface whose alpha varies across the
+    // texture (fill between lines, opaque on lines, shadow on top), and
+    // discarding low-alpha texels would carve the soft edges of the
+    // contact shadow out of the bed.
     var out: FsOut;
-    out.color = c;
-    out.depth_color = vec4<f32>(in.clip.z, 0.0, 0.0, 1.0);
+    out.color = textureSample(bed_tex, bed_smp, in.uv);
+    out.depth_color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
     return out;
 }
 "#;

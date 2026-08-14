@@ -17,7 +17,7 @@ pub struct SphereNode;
 /// [`ParamSet::geometry`]) lead; the radius + U/V segment counts follow on
 /// capitalized sockets, matching the "socket-or-property" shape.
 fn params() -> ParamSet {
-    ParamSet::geometry()
+    ParamSet::primitive("Sphere", 10.0)
         .number("radius", "Radius", 10.0, 0.001..=10_000.0)
         .socket_named("Radius")
         .number("segments_u", "Segments U", 32.0, 3.0..=256.0)
