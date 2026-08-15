@@ -97,6 +97,118 @@ fn selecting_unconnected_geometry_node_does_not_pin_viewport_display() {
     );
 }
 
+/// Three nodes — a `Rectangle` (a) wired into an `Inflate` (b) by a
+/// single noodle, plus a standalone `Extrude` (c). That mix is enough to
+/// prove a batch delete restores both the nodes *and* their incident
+/// edges, without needing a fully chained graph.
+fn three_node_fixture() -> (AppState, Vec<atomartist_lib::graph::node::NodeId>) {
+    let state = fixture();
+    let ids = {
+        let mut g = state.graph.lock().unwrap();
+        let a = g.add_new_node("Rectangle", [0.0, 0.0], &state.registry).unwrap();
+        let b = g.add_new_node("Inflate", [200.0, 0.0], &state.registry).unwrap();
+        let c = g.add_new_node("Extrude", [400.0, 0.0], &state.registry).unwrap();
+        let from_uid = g.get(a).unwrap().output_by_name("out").unwrap().uid;
+        let to_uid = g.get(b).unwrap().input_by_name("input").unwrap().uid;
+        let _ = g.connect(Noodle::new(a, from_uid, b, to_uid), &state.registry);
+        vec![a, b, c]
+    };
+    (state, ids)
+}
+
+#[test]
+fn multi_node_remove_is_a_single_undo_step() {
+    // agg-gui's `NodeEditor::delete_selection` hands the whole selection
+    // to `remove_nodes` in one call; AtomArtist must record that as one
+    // batch so a 3-node delete needs exactly one Ctrl+Z (NodeDesigner
+    // parity: "Delete 3 Nodes").
+    let (state, ids) = three_node_fixture();
+    let ne_ids: Vec<ne::NodeId> = ids.iter().map(|id| ne::NodeId(id.0)).collect();
+    let mut model = AppStateModel::new(state);
+
+    ne::NodeGraphModel::remove_nodes(&mut model, &ne_ids);
+    {
+        let g = model.state.graph.lock().unwrap();
+        assert_eq!(g.nodes().count(), 0, "all three nodes must be gone");
+        assert_eq!(g.noodles().len(), 0, "incident noodles go with them");
+    }
+
+    let undo = model.state.active_undo();
+    assert_eq!(
+        undo.lock().unwrap().undo_name(),
+        Some("Delete 3 Nodes"),
+        "the group delete must land as one named batch",
+    );
+
+    undo.lock().unwrap().undo();
+    {
+        let g = model.state.graph.lock().unwrap();
+        assert_eq!(g.nodes().count(), 3, "one undo must restore every node");
+        for id in &ids {
+            assert!(g.get(*id).is_some(), "node {id:?} must be restored");
+        }
+        assert_eq!(g.noodles().len(), 1, "the noodle must come back too");
+    }
+    assert!(
+        !undo.lock().unwrap().can_undo(),
+        "the batch must be the only entry the delete pushed",
+    );
+
+    // Redo must re-run the whole batch, not just its first child: the
+    // children re-snapshot themselves on each `do`, so a second undo has
+    // to restore the same three nodes and their noodle again.
+    assert!(undo.lock().unwrap().can_redo(), "the batch must be redoable");
+    undo.lock().unwrap().redo();
+    {
+        let g = model.state.graph.lock().unwrap();
+        assert_eq!(g.nodes().count(), 0, "one redo must delete every node again");
+        assert_eq!(g.noodles().len(), 0, "the noodle goes with them again");
+    }
+
+    undo.lock().unwrap().undo();
+    {
+        let g = model.state.graph.lock().unwrap();
+        assert_eq!(
+            g.nodes().count(),
+            3,
+            "undo after redo must restore every node once more",
+        );
+        for id in &ids {
+            assert!(g.get(*id).is_some(), "node {id:?} must be restored after redo+undo");
+        }
+        assert_eq!(g.noodles().len(), 1, "the noodle must come back after redo+undo");
+    }
+}
+
+#[test]
+fn single_node_remove_nodes_stays_a_bare_remove_node() {
+    // A one-node delete keeps today's label / shape — no batch wrapper.
+    let (state, ids) = three_node_fixture();
+    let mut model = AppStateModel::new(state);
+
+    ne::NodeGraphModel::remove_nodes(&mut model, &[ne::NodeId(ids[2].0)]);
+    let undo = model.state.active_undo();
+    assert_eq!(undo.lock().unwrap().undo_name(), Some("Remove Node"));
+
+    undo.lock().unwrap().undo();
+    {
+        let g = model.state.graph.lock().unwrap();
+        assert_eq!(g.nodes().count(), 3);
+    }
+    assert!(!undo.lock().unwrap().can_undo());
+}
+
+#[test]
+fn empty_remove_nodes_pushes_nothing() {
+    let (state, _ids) = three_node_fixture();
+    let mut model = AppStateModel::new(state);
+    ne::NodeGraphModel::remove_nodes(&mut model, &[]);
+    assert!(
+        !model.state.active_undo().lock().unwrap().can_undo(),
+        "an empty delete must not create an undo entry",
+    );
+}
+
 #[test]
 fn extrude_view_pairs_inputs_with_bound_properties() {
     let state = fixture();
