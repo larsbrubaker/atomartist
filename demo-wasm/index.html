@@ -75,7 +75,10 @@ async function main() {
   }
   canvas.addEventListener('mousemove', e => {
     const [x, y] = evtCoords(e);
-    on_mouse_move(x, y);
+    // `e.buttons` is the authoritative held-button bitmask; Rust uses it
+    // to re-sync its own press counter, which would otherwise stay stuck
+    // after a drag released outside the canvas.
+    on_mouse_move(x, y, e.buttons);
   });
   // Modifier flags ride along with every button/wheel event. They come
   // from the event itself (not tracked key state) so they stay correct

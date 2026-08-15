@@ -459,8 +459,11 @@ closed: a wasm write is **not atomic** (no rename primitive to build the
 unobservable** — `spawn_local` hands the future no `JobCompleter`, so a
 cancelled write settles the job as `Cancelled` while the OPFS operation runs
 on to completion, exactly as a cancelled `spawn_blocking` write does
-natively. Still open: web settings persistence, so `last_project_path`
-survives a reload the way it does on native.
+natively. Web settings persistence followed: the wasm shell stores
+`UiSettings` (same text blob as the native settings file) in
+`localStorage` and auto-reopens the last project through the pump, with
+a `visibilitychange`/`pagehide` flush standing in for native's
+close-time write.
 
 **Ordering note:** phases 1–6 deliver real user value with *no* account and
 *no* network — web file support alone justifies them. Cloud is strictly

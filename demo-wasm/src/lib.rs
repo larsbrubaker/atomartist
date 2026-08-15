@@ -8,8 +8,12 @@
 //! `keydown` / `keyup` / clipboard plumbing to agg-gui's `web_adapter`,
 //! which feeds `App::on_key_down` / `on_key_up` directly.
 //!
+//! UI settings survive page reloads via [`web_settings`] (localStorage),
+//! which also drives the startup auto-reopen of the last project — the
+//! web mirror of `demo-native`'s `shell_settings` + `AutoSave` pair.
+//!
 //! Modeled (compactly) on `agg-gui/demo-wasm/src/lib.rs` with the
-//! inspector / multi-touch / persistence pieces stripped.
+//! inspector / multi-touch pieces stripped.
 
 #![cfg(target_arch = "wasm32")]
 
@@ -28,6 +32,8 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
 mod dialogs;
+pub mod web_lifecycle;
+pub mod web_settings;
 use dialogs::WebDialogs;
 
 thread_local! {
@@ -281,10 +287,17 @@ async fn init_wgpu() -> Result<(), String> {
         initial_size.1 as f32,
     );
 
-    // Build the AtomArtist UI tree. The WASM shell has no persistence
-    // path yet, so we always start with the documented defaults — the
-    // View → Debug windows are toggled off and laid out in their
-    // first-launch positions.
+    // Load persisted UI settings before anything reads them. Missing,
+    // unparseable, or unreachable storage silently falls back to the
+    // documented defaults — never blocks startup (see `web_settings`).
+    // The raw blob is kept to seed AutoSave so the first painted frame
+    // doesn't rewrite an identical value.
+    let stored_blob = web_settings::read_settings_blob();
+    let loaded_settings = web_settings::settings_from_stored(stored_blob.as_deref());
+    if let Some(blob) = stored_blob {
+        web_lifecycle::seed_auto_save(blob);
+    }
+
     // Storage backends this shell offers, the web mirror of
     // `demo-native`'s registry: the browser gets the origin's private
     // file system under the `browser:` scheme. `atomartist-ui` itself
@@ -297,12 +310,28 @@ async fn init_wgpu() -> Result<(), String> {
         Arc::new(registry)
     };
     let state = fresh_state_with_starter_graph_and_storage(storage);
+    // Apply the restored HUD state (perspective / turntable / bed /
+    // render style / snap / theme / accent / recents) *before* mounting
+    // the widget tree, so the first paint reflects what the user left
+    // things at — same ordering as `demo-native::main`.
+    state.apply_ui_settings(&loaded_settings);
+    // Auto-reopen the last project. Ordering matters: the `browser:`
+    // provider is registered above, so the URI resolves. Unlike native,
+    // this open is genuinely asynchronous — OPFS settles on the browser
+    // event loop — so it lands a few frames in via `render`'s
+    // `pump_storage`, and the starter graph is what's on screen until
+    // then. Failure is non-fatal and reported at Info level by
+    // `reopen_last_project` (a project cleared out of OPFS since the
+    // last visit is news, not a fault).
+    if let Some(last) = loaded_settings.last_project_path.as_ref() {
+        state.reopen_last_project(last);
+    }
     // Placeholder pickers (see `dialogs.rs`): save goes to a fixed
     // `browser:///projects/…` location so Ctrl+S persists, and open /
     // import still do nothing until the in-app file browser lands in
     // Phase 6.
     let dialogs: Arc<dyn FileDialogProvider> = Arc::new(WebDialogs);
-    let (root, debug) = build_app(state.clone(), dialogs, None);
+    let (root, debug) = build_app(state.clone(), dialogs, Some(loaded_settings));
     STATE.with(|c| *c.borrow_mut() = Some(state));
     let app = App::new(root);
 
@@ -319,6 +348,14 @@ async fn init_wgpu() -> Result<(), String> {
     DEBUG.with(|c| *c.borrow_mut() = Some(debug));
 
     install_keyboard();
+
+    // Lifecycle listeners, both registered from Rust so `index.html`
+    // stays a canvas-events-only shim: a window-level mouse-release
+    // watcher that keeps the persistence idle guard from wedging when a
+    // drag ends outside the canvas, and the hidden/pagehide flush that
+    // gives the web shell native's write-on-close behaviour.
+    web_lifecycle::install_window_mouse_release_listener();
+    web_lifecycle::install_page_hide_flush(|| persist_settings_if_changed(true));
 
     // The web equivalent of winit's initial `RedrawRequested`. The app
     // defaults to Reactive mode, whose paint gate (`should_paint`) only
@@ -475,6 +512,37 @@ pub fn render(width: u32, height: u32, frame_ms: f64) {
     // presented — every early `return` above leaves the gate open so
     // the next tick tries again.
     FIRST_PAINT.with(|g| g.mark_painted());
+    persist_settings_if_changed(false);
+}
+
+/// Persist the settings blob to `localStorage` when it differs from what
+/// is already stored.
+///
+/// Called once per *painted* frame with `force = false`, the web
+/// equivalent of the native shell's post-paint `AutoSave` tick: every
+/// settings change originates in an interaction that invalidates the
+/// widget tree, so a painted frame always follows. Idle frames skip the
+/// compose entirely, and the diff inside `AutoSave` means a steady state
+/// writes nothing. In that mode the write also waits for no mouse button
+/// to be held, so a blob is never captured halfway through a drag.
+///
+/// `force = true` is the page-hide path (see
+/// [`web_lifecycle::install_page_hide_flush`]), the web counterpart of
+/// native's write-on-close: `visibilitychange` → hidden and `pagehide`
+/// are the documented teardown hooks, and both must write even mid-drag
+/// because there may be no further frame.
+fn persist_settings_if_changed(force: bool) {
+    let Some(state) = STATE.with(|c| c.borrow().clone()) else {
+        return;
+    };
+    let Some(debug) = DEBUG.with(|c| c.borrow().clone()) else {
+        return;
+    };
+    web_lifecycle::tick_auto_save(
+        force,
+        || web_settings::compose_settings_blob(&state, &debug),
+        web_settings::write_settings_blob,
+    );
 }
 
 /// Whether this requestAnimationFrame tick should actually paint.
@@ -589,9 +657,18 @@ fn install_keyboard() {
     });
 }
 
+/// Forward a canvas `mousemove`.
+///
+/// `buttons` is the DOM event's `MouseEvent.buttons` bitmask, forwarded
+/// so the shell can re-derive how many buttons are actually held rather
+/// than trusting its own down/up counting — see
+/// [`web_lifecycle::sync_mouse_buttons`]. A caller that has no bitmask
+/// to offer can pass `0`; that reads as "nothing held", which only ever
+/// lets settings persist a little eagerly.
 #[wasm_bindgen]
-pub fn on_mouse_move(x: f64, y: f64) {
+pub fn on_mouse_move(x: f64, y: f64, buttons: u32) {
     CURSOR.with(|c| *c.borrow_mut() = (x, y));
+    web_lifecycle::sync_mouse_buttons(buttons);
     APP.with(|c| {
         if let Some(app) = c.borrow_mut().as_mut() {
             app.on_mouse_move(x, y);
@@ -604,6 +681,11 @@ pub fn on_mouse_down(x: f64, y: f64, button: u8, ctrl: bool, shift: bool, alt: b
     CURSOR.with(|c| *c.borrow_mut() = (x, y));
     let b = mouse_button_from_js(button);
     let mods = modifiers_from_js(ctrl, shift, alt, meta);
+    // Opens the settings idle guard. It is *not* this counter that keeps
+    // the guard honest — a release delivered outside the canvas never
+    // reaches `on_mouse_up` — the `buttons` resync on the next
+    // `mousemove` and the window-level release listener are.
+    web_lifecycle::note_mouse_down();
     APP.with(|c| {
         if let Some(app) = c.borrow_mut().as_mut() {
             app.on_mouse_down(x, y, b, mods);
@@ -616,6 +698,7 @@ pub fn on_mouse_up(x: f64, y: f64, button: u8, ctrl: bool, shift: bool, alt: boo
     CURSOR.with(|c| *c.borrow_mut() = (x, y));
     let b = mouse_button_from_js(button);
     let mods = modifiers_from_js(ctrl, shift, alt, meta);
+    web_lifecycle::note_mouse_up();
     APP.with(|c| {
         if let Some(app) = c.borrow_mut().as_mut() {
             app.on_mouse_up(x, y, b, mods);

@@ -37,4 +37,22 @@ features = ["wgsl", "webgpu"]
 
 [dependencies.web-sys]
 version  = "0.3"
-features = ["Window", "Document", "Element", "Node", "HtmlCanvasElement", "console", "Location"]
+# `Storage` powers `web_settings`: UI settings live in localStorage, the
+# browser counterpart to demo-native's settings.txt. `EventTarget` /
+# `Event` / `MouseEvent` power `web_lifecycle`'s window-level listeners
+# (mouse-release resync, visibilitychange/pagehide flush) — the pure-Rust
+# alternative to adding more glue to index.html.
+features = [
+    "Window", "Document", "Element", "Node", "HtmlCanvasElement",
+    "console", "Location", "Storage",
+    "EventTarget", "Event", "MouseEvent",
+    # `MouseEventInit` is only needed by `tests/web_lifecycle.rs`, which
+    # dispatches a synthetic `pointerup` at the window listener; web-sys
+    # features are crate-wide, so it can't be scoped to dev-dependencies.
+    "MouseEventInit",
+]
+
+# `tests/web_settings.rs` needs a real browser (localStorage is a browser
+# API), so it is a wasm-only target — see the file header for how to run it.
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
