@@ -190,8 +190,12 @@ impl TestHarness {
     /// provider with its own simulated latency must be pumped alongside.
     pub fn pump_until_idle(&self, max_frames: usize) {
         // An already-idle queue is idle regardless of the budget, so
-        // `pump_until_idle(0)` on a quiet state must not panic.
-        if self.state.pending_op_count() == 0 {
+        // `pump_until_idle(0)` on a quiet state must not panic. The gate
+        // and the diagnostic below both count *every* operation, quiet
+        // background work included: `pump` drains the whole queue, so
+        // asking the loud-only question here would return unpumped from a
+        // state that still has thumbnail reads to settle.
+        if self.state.pending_op_count_all() == 0 {
             return;
         }
         for _ in 0..max_frames {
@@ -201,7 +205,7 @@ impl TestHarness {
         }
         let outstanding: Vec<String> = self
             .state
-            .pending_op_status()
+            .pending_op_status_all()
             .into_iter()
             .map(|(label, _progress)| label)
             .collect();

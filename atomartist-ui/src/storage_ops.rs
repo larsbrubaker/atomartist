@@ -15,6 +15,29 @@
 //!   (`demo-native`'s event loop, `demo-wasm`'s `render`, and
 //!   `TestHarness::pump`) and applies everything that has settled.
 //!
+//! # Loud and quiet operations
+//!
+//! Everything the user asked for by name — open, save, export — is *loud*:
+//! it appears in the status bar's activity readout, it makes
+//! [`AppState::pending_op_count`] non-zero (which is what
+//! [`crate::menu_actions`] refuses a second File action on), and the
+//! shutdown drain waits for it.
+//!
+//! Background work the user never asked for is *quiet*
+//! ([`JobOp::new_quiet`]). The file browser's thumbnail reads
+//! ([`crate::file_browser::thumbs`]) are the first of these: a directory of
+//! previews would otherwise chatter `Preview a.atmr… (+11 more)` across the
+//! status bar, make every File menu action report "storage is busy", and
+//! hold the window open at exit for images nobody will see. A quiet
+//! operation is therefore excluded from [`AppState::pending_op_status`]
+//! (and so from [`AppState::storage_activity_text`]) and from
+//! [`AppState::pending_op_count`], and [`AppState::drain_pending_ops`]
+//! cancels rather than waits for it. It is otherwise an ordinary
+//! operation: pumped on the same queue, applied by the same code, and
+//! cancelled by [`AppState::cancel_pending_ops`] along with everything
+//! else — a user who cancels "all storage activity" is not surprised to
+//! find previews cancelled too.
+//!
 //! A continuation runs outside the widget tree, so it has no dialog
 //! provider to talk to. Instead it leaves a [`Notice`] on the state
 //! ([`AppState::notify`]); [`AppState::pump_notices`] — called from
@@ -135,6 +158,13 @@ pub trait PendingOp: Send {
 
     /// Called once, after the job settles, to apply the result.
     fn apply(self: Box<Self>, state: &AppState);
+
+    /// Background work the user did not ask for by name — see the module
+    /// docs. Loud by default: an operation has to opt *out* of being
+    /// visible, so a new call site cannot hide a save by forgetting a flag.
+    fn is_quiet(&self) -> bool {
+        false
+    }
 }
 
 /// The general-purpose [`PendingOp`]: one [`Job`] and a closure to run when
@@ -149,6 +179,7 @@ pub struct JobOp<T> {
     label: String,
     job: Job<T>,
     finish: Box<dyn FnOnce(&AppState, Result<T, StorageError>) + Send>,
+    quiet: bool,
 }
 
 impl<T> JobOp<T> {
@@ -161,6 +192,21 @@ impl<T> JobOp<T> {
             label: label.into(),
             job,
             finish: Box::new(finish),
+            quiet: false,
+        }
+    }
+
+    /// A [`JobOp`] the user never asked for: kept out of the status bar and
+    /// out of the shutdown wait (module docs, "Loud and quiet
+    /// operations"). The label is still carried, for diagnostics.
+    pub fn new_quiet(
+        label: impl Into<String>,
+        job: Job<T>,
+        finish: impl FnOnce(&AppState, Result<T, StorageError>) + Send + 'static,
+    ) -> Self {
+        JobOp {
+            quiet: true,
+            ..JobOp::new(label, job, finish)
         }
     }
 }
@@ -176,6 +222,10 @@ impl<T: Send> PendingOp for JobOp<T> {
 
     fn cancel(&self) {
         self.job.cancel();
+    }
+
+    fn is_quiet(&self) -> bool {
+        self.quiet
     }
 
     fn apply(self: Box<Self>, state: &AppState) {
@@ -448,16 +498,45 @@ impl AppState {
         pending
     }
 
-    /// How many operations are waiting on their job right now.
+    /// How many *loud* operations are waiting on their job right now — the
+    /// "is storage busy?" question the status bar and the File menu ask.
+    ///
+    /// Quiet background work (thumbnail reads) is deliberately not counted:
+    /// a directory of previews loading must not make File → Open report
+    /// that storage is busy. [`Self::pending_op_count_all`] is the total.
     pub fn pending_op_count(&self) -> usize {
+        lock(&self.pending_ops)
+            .iter()
+            .filter(|op| !op.is_quiet())
+            .count()
+    }
+
+    /// Every operation on the queue, quiet ones included — the shutdown
+    /// path's and a diagnostic's view of the truth.
+    pub fn pending_op_count_all(&self) -> usize {
         lock(&self.pending_ops).len()
     }
 
-    /// Label + optional progress (`0.0..=1.0`) of each in-flight
+    /// Label + optional progress (`0.0..=1.0`) of each in-flight *loud*
     /// operation, for the status bar's activity readout.
     pub fn pending_op_status(&self) -> Vec<(String, Option<f32>)> {
+        self.op_status(false)
+    }
+
+    /// The same readout over *every* queued operation, quiet ones
+    /// included. Not for the status bar — this is what a diagnostic wants
+    /// when it has to name what is still outstanding (the test harness's
+    /// "still pending after N frames" panic), where an empty list because
+    /// the only stragglers were background reads is exactly the wrong
+    /// answer.
+    pub fn pending_op_status_all(&self) -> Vec<(String, Option<f32>)> {
+        self.op_status(true)
+    }
+
+    fn op_status(&self, include_quiet: bool) -> Vec<(String, Option<f32>)> {
         lock(&self.pending_ops)
             .iter()
+            .filter(|op| include_quiet || !op.is_quiet())
             .map(|op| {
                 let progress = match op.poll() {
                     JobState::Pending { progress } => progress,
@@ -497,6 +576,11 @@ impl AppState {
     /// outcome — reports the abandoned labels on stderr, and returns
     /// `false`.
     ///
+    /// **Quiet operations are not waited for.** Once only background work
+    /// is left (thumbnail reads), the drain cancels it and returns `true`:
+    /// nothing is lost by abandoning an image the window is about to stop
+    /// showing, and a slow provider must not hold the close open for one.
+    ///
     /// That cancel-and-pump repeats up to [`FINAL_PUMP_ROUNDS`] times,
     /// because a continuation is allowed to chain a follow-up operation
     /// ("save, then verify"): a single final pump would leave the
@@ -512,6 +596,36 @@ impl AppState {
         let deadline = std::time::Instant::now() + timeout;
         loop {
             if !self.pump_storage() {
+                return true;
+            }
+            if self.pending_op_count() == 0 {
+                // Only quiet work left. Cancel it so its continuations see
+                // an outcome, pump those through, and go — the same
+                // bounded rounds the timeout path uses, because a quiet
+                // continuation may chain as freely as any other.
+                for _ in 0..FINAL_PUMP_ROUNDS {
+                    self.cancel_pending_ops();
+                    if !self.pump_storage() {
+                        break;
+                    }
+                }
+                // A provider that ignores cancel leaves them behind. The
+                // close still succeeds — nothing the user asked for is at
+                // stake — but the shutdown path reports everything it
+                // walks away from, quiet work included.
+                let left_over: Vec<String> = self
+                    .pending_op_status_all()
+                    .into_iter()
+                    .map(|(label, _progress)| label)
+                    .collect();
+                if !left_over.is_empty() {
+                    eprintln!(
+                        "storage: {} background operation(s) dropped at exit after \
+                         {FINAL_PUMP_ROUNDS} cancel rounds: {}",
+                        left_over.len(),
+                        left_over.join(", ")
+                    );
+                }
                 return true;
             }
             if std::time::Instant::now() >= deadline {
@@ -560,3 +674,8 @@ impl AppState {
 #[cfg(test)]
 #[path = "storage_ops_tests.rs"]
 mod storage_ops_tests;
+
+// The quiet-operation tests live in their own file for the same reason.
+#[cfg(test)]
+#[path = "storage_ops_quiet_tests.rs"]
+mod storage_ops_quiet_tests;

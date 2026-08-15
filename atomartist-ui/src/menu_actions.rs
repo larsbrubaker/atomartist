@@ -148,11 +148,17 @@ fn open_project_reporting(
 ///
 /// Double-clicking File → Open (or New / Save) while a slow provider
 /// still has the previous chain in flight used to re-prompt and
-/// double-submit. Refusing outright while *anything* is in flight is
-/// blunt — a background export blocks a Save — but it is honest, and it
-/// cannot produce the two-saves-racing outcome that per-chain flags would
-/// still have to be careful about. Returns `true` when the action should
-/// be dropped.
+/// double-submit. Refusing outright while any *user-initiated* operation
+/// is in flight is blunt — a background export blocks a Save — but it is
+/// honest, and it cannot produce the two-saves-racing outcome that
+/// per-chain flags would still have to be careful about.
+///
+/// Quiet background work is deliberately not counted (see
+/// [`crate::storage_ops`], "Loud and quiet operations"): the file
+/// browser's thumbnail reads are in flight for as long as a directory is
+/// on screen, and letting those refuse File → Open would make the menu
+/// unusable exactly where it is most needed. Returns `true` when the
+/// action should be dropped.
 fn storage_busy(state: &AppState) -> bool {
     if state.pending_op_count() == 0 {
         return false;

@@ -12,7 +12,7 @@ use atomartist_storage::{
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-fn state() -> AppState {
+pub(super) fn state() -> AppState {
     AppState::new(
         atomartist_lib::Graph::new(),
         atomartist_lib::registry::NodeRegistry::new(),
@@ -21,7 +21,7 @@ fn state() -> AppState {
 
 /// A memory provider wrapped in `latency` pump-ticks of simulated
 /// delay, plus the URI of its root.
-fn flaky(config: FlakyConfig) -> (Arc<FlakyProvider>, StorageUri) {
+pub(super) fn flaky(config: FlakyConfig) -> (Arc<FlakyProvider>, StorageUri) {
     let inner = MemoryProvider::new("mem", "Memory");
     let root = inner.root();
     (Arc::new(FlakyProvider::new(Arc::new(inner), config)), root)
