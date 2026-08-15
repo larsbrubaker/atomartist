@@ -301,7 +301,11 @@ fn main() {
     // needs it as an `Arc`: a failed save-on-close raises its modal from
     // the write's continuation, which outlives this event.
     let dialogs_for_close = dialogs.clone();
-    let (root, debug) = build_app(state, dialogs, loaded_settings);
+    // Handle to the in-app Open/Save picker. Built here (not inside the
+    // tree) because step 6c-2's dialog provider will hold a clone; today
+    // nothing opens it yet.
+    let browser_modal = atomartist_ui::file_browser::FileBrowserModalHandle::new();
+    let (root, debug) = build_app(state, dialogs, loaded_settings, browser_modal);
     let mut app = App::new(root);
     // Clone for the persistence + paint loops — every field is an
     // Rc internally so this is cheap.

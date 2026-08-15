@@ -16,6 +16,7 @@ use agg_gui_node_editor::NodeEditor;
 use crate::app_state_model::shared_model_for;
 use crate::breadcrumb_bar::BreadcrumbBar;
 use crate::debug_windows::{build_debug_windows, DebugWindowHandles};
+use crate::file_browser::{FileBrowserModalHandle, FileBrowserModalHost};
 use crate::floating_overlay::{FloatingOverlayHandle, FloatingOverlayHost};
 use crate::settings::UiSettings;
 use crate::status_bar::StatusBar;
@@ -35,6 +36,12 @@ use crate::viewport_overlay::build_viewport_overlay;
 /// `saved_ui` seeds the debug-window visibility and bounds; pass
 /// `None` to use first-launch defaults.
 ///
+/// `browser_modal` is the shell's handle to the in-app Open/Save picker
+/// (`file_browser::modal`). It is constructed *before* the tree — like
+/// `dialogs` — because the code that opens the picker (step 6c-2's
+/// `FileDialogProvider`) lives outside the widget tree and cannot fish a
+/// handle back out of it.
+///
 /// Returns the root widget and a [`DebugWindowHandles`] the platform
 /// shell uses to (a) push per-frame samples into the performance
 /// history, (b) drain inspector edits + refresh the inspector node
@@ -43,6 +50,7 @@ pub fn build_app(
     state: AppState,
     dialogs: Arc<dyn FileDialogProvider>,
     saved_ui: Option<UiSettings>,
+    browser_modal: FileBrowserModalHandle,
 ) -> (Box<dyn Widget>, DebugWindowHandles) {
     // Window / node snap-layout default — ON for AtomArtist so the
     // PowerPoint-style alignment + spacing guides engage as soon as
@@ -179,21 +187,33 @@ pub fn build_app(
     );
 
     // Stack: column behind, debug windows in front, floating-overlay
-    // host on top. Stack hit-tests last-child first, so:
+    // host above them, Open/Save modal host last of all. Stack
+    // hit-tests last-child first, so:
     //   1. the floating color picker (if open) gets input first,
     //   2. then the debug windows,
     //   3. then the main column.
     // The host's `hit_test` returns false when no dialog is active,
     // so events pass through cleanly to the rest of the UI most of
     // the time.
+    //
+    // The file-browser modal is added *after* the floating-overlay host
+    // even though it never competes on hit-testing (it always answers
+    // `hit_test` false and is reached through agg-gui's
+    // `active_modal_path` instead): being last means it paints on top of
+    // everything, which is what a scrim has to do.
     let mut stack = Stack::new()
         .with_h_anchor(HAnchor::STRETCH)
         .with_v_anchor(VAnchor::STRETCH)
         .add(column);
-    for w in build_debug_windows(font, &debug) {
+    for w in build_debug_windows(font.clone(), &debug) {
         stack = stack.add(w);
     }
     stack = stack.add(Box::new(FloatingOverlayHost::new(overlay_handle)));
+    stack = stack.add(Box::new(FileBrowserModalHost::new(
+        state,
+        font,
+        browser_modal,
+    )));
     (Box::new(stack), debug)
 }
 

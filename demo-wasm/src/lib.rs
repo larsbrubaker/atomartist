@@ -331,7 +331,15 @@ async fn init_wgpu() -> Result<(), String> {
     // import still do nothing until the in-app file browser lands in
     // Phase 6.
     let dialogs: Arc<dyn FileDialogProvider> = Arc::new(WebDialogs);
-    let (root, debug) = build_app(state.clone(), dialogs, Some(loaded_settings));
+    // Handle to the in-app Open/Save picker — step 6c-2 hands it to the
+    // dialog provider that replaces `WebDialogs`.
+    let browser_modal = atomartist_ui::file_browser::FileBrowserModalHandle::new();
+    let (root, debug) = build_app(
+        state.clone(),
+        dialogs,
+        Some(loaded_settings),
+        browser_modal,
+    );
     STATE.with(|c| *c.borrow_mut() = Some(state));
     let app = App::new(root);
 

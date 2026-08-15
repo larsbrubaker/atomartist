@@ -25,14 +25,26 @@
 //!   layout. Geometry and painting live beside it in `widget_geom` /
 //!   `widget_paint` so no file approaches the 800-line cap.
 //!
-//! The modal host (step 6c) and the favorites bar (6d) embed the widget.
+//! - [`modal`] — [`FileBrowserModalHost`] plus its
+//!   [`FileBrowserModalHandle`]: the Open/Save dialog (step 6c-1). The
+//!   host lives at the top of the app's root `Stack` and is empty until
+//!   someone calls [`FileBrowserModalHandle::open`], which hands back the
+//!   [`atomartist_storage::Job`] the pick settles into. `modal_panel`
+//!   holds the chrome (title, OK / Cancel) so neither file grows past the
+//!   line cap.
+//!
+//! The favorites bar (6d) embeds the widget the same way.
 
+pub mod modal;
+pub mod modal_panel;
 pub mod model;
 pub mod thumbs;
 pub mod widget;
 pub mod widget_geom;
 mod widget_paint;
 
+pub use modal::{resolve_pick, FileBrowserModalHandle, FileBrowserModalHost, PANEL_SIZE};
+pub use modal_panel::{FileBrowserModal, ModalLayout};
 pub use model::{BrowserModel, Crumb, Listing, ProviderRoot};
 pub use thumbs::{
     can_have_thumbnail, ThumbKey, ThumbState, ThumbnailCache, ThumbnailImage, CACHE_VERSION,

@@ -24,6 +24,7 @@ use agg_gui::widget::{
 };
 use agg_gui::{App, Key, Modifiers, MouseButton, Size, Widget};
 use atomartist_storage::{MemoryProvider, StorageRegistry};
+use atomartist_ui::file_browser::FileBrowserModalHandle;
 use atomartist_ui::{
     build_app, fresh_state_with_builtins_and_storage, fresh_state_with_starter_graph_and_storage,
     AppState, DebugWindowHandles,
@@ -74,6 +75,10 @@ pub struct TestHarness {
     /// and to drain the same inspector edit queue the production
     /// shell drains each paint.
     debug: DebugWindowHandles,
+    /// Handle to the in-app Open/Save picker the tree hosts. Tests open
+    /// the dialog through this, exactly as step 6c-2's dialog provider
+    /// will.
+    browser_modal: FileBrowserModalHandle,
     cursor: (f64, f64),
     modifiers: Modifiers,
     size: (f64, f64),
@@ -131,14 +136,16 @@ impl TestHarness {
         // Harness always starts with the documented default debug
         // window layout — tests that care about persistence build
         // their own UiSettings and pass it directly to build_app.
+        let browser_modal = FileBrowserModalHandle::new();
         let (root, debug): (Box<dyn Widget>, DebugWindowHandles) =
-            build_app(state.clone(), dialogs, None);
+            build_app(state.clone(), dialogs, None, browser_modal.clone());
         let mut app = App::new(root);
         app.layout(Size::new(DEFAULT_WIDTH, DEFAULT_HEIGHT));
         Self {
             state,
             app,
             debug,
+            browser_modal,
             cursor: (0.0, 0.0),
             modifiers: Modifiers::default(),
             size: (DEFAULT_WIDTH, DEFAULT_HEIGHT),
@@ -229,6 +236,52 @@ impl TestHarness {
     /// synthetic samples into the shared frame history.
     pub fn debug(&self) -> &DebugWindowHandles {
         &self.debug
+    }
+
+    /// Handle to the tree's Open/Save picker — `open(mode, name)` puts
+    /// the dialog up and returns the job its outcome settles into.
+    pub fn browser_modal(&self) -> &FileBrowserModalHandle {
+        &self.browser_modal
+    }
+
+    /// The harness viewport size, `(width, height)` in screen pixels.
+    pub fn size(&self) -> (f64, f64) {
+        self.size
+    }
+
+    /// Re-run `App::layout` without an event — a frame boundary, which is
+    /// when per-frame widget work (claiming a queued dialog, the
+    /// thumbnail visibility round) happens.
+    pub fn frame(&mut self) -> &mut Self {
+        self.app.layout(Size::new(self.size.0, self.size.1));
+        self
+    }
+
+    /// Convert a Y-up point in *root* (screen-absolute) coordinates to the
+    /// Y-down screen coordinates the event helpers take.
+    pub fn to_screen(&self, p: agg_gui::Point) -> (f64, f64) {
+        (p.x, self.size.1 - p.y)
+    }
+
+    /// Click a point given in root-local Y-up coordinates.
+    pub fn click_local(&mut self, p: agg_gui::Point, button: MouseButton) -> &mut Self {
+        let (x, y) = self.to_screen(p);
+        self.click(x, y, button)
+    }
+
+    /// Two clicks at the same point, far inside agg-gui's 400 ms
+    /// multi-click window.
+    pub fn double_click_local(&mut self, p: agg_gui::Point, button: MouseButton) -> &mut Self {
+        self.click_local(p, button);
+        self.click_local(p, button)
+    }
+
+    /// Type a string one `Key::Char` at a time into whatever has focus.
+    pub fn type_text(&mut self, text: &str) -> &mut Self {
+        for ch in text.chars() {
+            self.key_down(Key::Char(ch));
+        }
+        self
     }
 
     // ── Reflection-based widget lookup ────────────────────────────────

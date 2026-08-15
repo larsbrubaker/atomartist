@@ -233,6 +233,17 @@ impl FileBrowser {
         *self.name_cell.borrow_mut() = name.into();
     }
 
+    /// The cell backing the name field, shared with its `TextField`.
+    ///
+    /// A host whose OK button must read the typed name from a `'static`
+    /// callback (the modal) cannot borrow the widget from inside that
+    /// callback — the widget is a child of the very panel the button lives
+    /// in. Handing out the cell is the same channel `TextField` itself
+    /// binds to, so both sides always see one string.
+    pub fn name_cell(&self) -> Rc<RefCell<String>> {
+        Rc::clone(&self.name_cell)
+    }
+
     /// The search text, which lives on the model (it is the filter).
     pub fn search_text(&self) -> String {
         self.model.search()
