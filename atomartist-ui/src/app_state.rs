@@ -186,6 +186,15 @@ pub struct AppState {
     /// snap-closed collapse so re-opening restores the user's size —
     /// the parts-bar behaviour the design's §2 pins down.
     pub favorites_bar_width: Arc<Mutex<f32>>,
+    /// Command channel to the node-canvas widget (`NodeEditor`).
+    ///
+    /// The canvas owns the *full* multi-selection; this state mirrors
+    /// only the primary one (`selection`). Menu items that act on the
+    /// whole selection — Edit → Delete Selected / Select All — run in a
+    /// callback with no access to the widget tree, so they queue a
+    /// [`NodeEditorCommand`](agg_gui_node_editor::NodeEditorCommand)
+    /// here and the editor drains it at the start of its next layout.
+    pub node_editor: agg_gui_node_editor::NodeEditorHandle,
     /// Scheme -> storage-provider lookup used by every project IO
     /// operation (`app_state_files`). The shell decides what is in it:
     /// `demo-native` registers `LocalFsProvider`, the test harness a
@@ -285,6 +294,7 @@ impl AppState {
             favorites: Arc::new(Mutex::new(favorites)),
             favorites_bar_expanded: Arc::new(Mutex::new(false)),
             favorites_bar_width: Arc::new(Mutex::new(crate::favorites_bar::DEFAULT_EXPANDED_W)),
+            node_editor: agg_gui_node_editor::NodeEditorHandle::new(),
             storage,
             pending_ops: Arc::new(Mutex::new(Vec::new())),
             notices: Arc::new(Mutex::new(Vec::new())),
@@ -679,6 +689,9 @@ impl Clone for AppState {
             favorites: self.favorites.clone(),
             favorites_bar_expanded: self.favorites_bar_expanded.clone(),
             favorites_bar_width: self.favorites_bar_width.clone(),
+            // Shared, not copied: the clone a menu callback holds must
+            // reach the same canvas widget the tree's clone installed.
+            node_editor: self.node_editor.clone(),
             storage: self.storage.clone(),
             // Shared, not copied: a clone handed to a widget must see the
             // same in-flight operations the shell's pump drains.

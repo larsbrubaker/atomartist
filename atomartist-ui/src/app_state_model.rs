@@ -24,7 +24,7 @@ use std::sync::Arc;
 use agg_gui::Color;
 use agg_gui_node_editor as ne;
 
-use atomartist_lib::graph::graph::{Noodle, GraphError};
+use atomartist_lib::graph::graph::Noodle;
 use atomartist_lib::graph::node::{NodeId as DomainNodeId, PortValue};
 use atomartist_lib::graph::socket::SocketUid;
 use atomartist_lib::graph::undo_commands::{
@@ -373,6 +373,39 @@ impl ne::NodeGraphModel for AppStateModel {
         let cmd = RemoveNodeCmd::new(self.state.active_graph(), domain_id);
         self.state.active_undo().lock().unwrap().add_and_do(Box::new(cmd));
         self.state.schedule_evaluate_after_edit();
+    }
+
+    /// Remove a whole selection as **one** undo step.
+    ///
+    /// agg-gui's `NodeEditor::delete_selection` — the single funnel for
+    /// the Delete/Backspace key, the right-click menu's "Delete", and
+    /// the Edit-menu `DeleteSelection` command — hands the entire
+    /// selection here in one call. Grouping the per-node
+    /// [`RemoveNodeCmd`]s into a [`BatchCmd`] is what makes a 5-node
+    /// delete take one Ctrl+Z instead of five.
+    ///
+    /// NodeDesigner parity: a multi-delete is a batch named
+    /// "Delete N Nodes"; a single-node delete stays a bare "Remove Node"
+    /// so the undo menu keeps reading naturally.
+    fn remove_nodes(&mut self, ids: &[ne::NodeId]) {
+        match ids {
+            [] => {}
+            [only] => self.remove_node(*only),
+            many => {
+                let children: Vec<Box<dyn agg_gui::undo::UndoRedoCommand>> = many
+                    .iter()
+                    .map(|id| {
+                        Box::new(RemoveNodeCmd::new(
+                            self.state.active_graph(),
+                            Self::from_ne(*id),
+                        )) as Box<dyn agg_gui::undo::UndoRedoCommand>
+                    })
+                    .collect();
+                let batch = BatchCmd::new(format!("Delete {} Nodes", many.len()), children);
+                self.state.active_undo().lock().unwrap().add_and_do(Box::new(batch));
+                self.state.schedule_evaluate_after_edit();
+            }
+        }
     }
 
     fn try_add_noodle(

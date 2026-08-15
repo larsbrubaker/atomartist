@@ -495,3 +495,32 @@ fn menu_add_wraps_row_keeping_x_bounded_without_overlap() {
         }
     }
 }
+
+/// Widget-free half of the Edit-menu fix: the two selection-scoped
+/// actions must reach the canvas as queued commands. The end-to-end
+/// effect (nodes actually removed / selected) is covered by
+/// `atomartist-ui-test/tests/edit_menu_actions.rs`, which has a live
+/// widget tree to drain the queue.
+#[test]
+fn selection_edit_actions_queue_editor_commands() {
+    use agg_gui_node_editor::NodeEditorCommand;
+
+    let state = fresh_state_with_starter_graph();
+    let dialogs: std::sync::Arc<dyn crate::top_menu_bar::FileDialogProvider> =
+        std::sync::Arc::new(NoFileDialogs);
+    let debug = debug_handles();
+
+    assert!(!state.node_editor.is_pending(), "queue starts empty");
+
+    handle_action(&state, &dialogs, &debug, "edit.select_all");
+    handle_action(&state, &dialogs, &debug, "edit.delete");
+
+    assert_eq!(
+        state.node_editor.take(),
+        vec![
+            NodeEditorCommand::SelectAll,
+            NodeEditorCommand::DeleteSelection,
+        ],
+        "both actions queue, in the order they were invoked"
+    );
+}
