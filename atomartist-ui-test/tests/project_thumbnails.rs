@@ -133,11 +133,16 @@ fn opening_a_project_with_a_preview_still_loads_the_graph() {
 
     h.state().open_project(&uri);
     h.pump_until_idle(4);
-    assert_eq!(h.state().graph.lock().unwrap().nodes().count(), nodes_before);
+    assert_eq!(
+        h.state().graph.lock().unwrap().nodes().count(),
+        nodes_before
+    );
 }
 
 /// Regression: the preview must frame the *3-D viewport*, not the node
-/// canvas below it.
+/// canvas below it — nor the favorites bar beside it (step 6f-1 docked
+/// the bar on the viewport's own pane, so the crop's left edge is now a
+/// real thing that can regress).
 ///
 /// `Widget::bounds()` is parent-local — `Viewport3dWidget::layout` even
 /// resets its own origin to (0, 0) — so deriving the crop from
@@ -179,6 +184,15 @@ fn thumbnail_crop_frames_the_viewport_not_the_node_canvas() {
         .expect("viewport is on screen, so the capture path yields a crop");
     let region = atomartist_ui::thumbnail_source_region(crop);
 
+    // The favorites bar shares the viewport's pane, on its left. Columns
+    // are the same in both spaces (only rows flip), so its right edge is
+    // the leftmost column the preview may sample.
+    let bar = screen_rect("FavoritesBar");
+    assert!(
+        bar.x + bar.width <= viewport.x + 0.5,
+        "the bar docks left of the viewport: {bar:?} vs {viewport:?}"
+    );
+
     for (label, r) in [("crop", crop), ("source region", region)] {
         let (top, bottom) = (r.y as f64, (r.y + r.h) as f64);
         assert!(
@@ -190,6 +204,20 @@ fn thumbnail_crop_frames_the_viewport_not_the_node_canvas() {
             bottom <= canvas_top || top >= canvas_bottom,
             "{label} {r:?} must not overlap the node canvas's rows \
              {canvas_top}..{canvas_bottom}"
+        );
+        let (left, right) = (r.x as f64, (r.x + r.w) as f64);
+        assert!(
+            left >= bar.x + bar.width - 1.0,
+            "{label} {r:?} must start right of the favorites bar \
+             (ends at x={})",
+            bar.x + bar.width
+        );
+        assert!(
+            left >= viewport.x - 1.0 && right <= viewport.x + viewport.width + 1.0,
+            "{label} {r:?} must lie inside the viewport's columns \
+             {}..{}",
+            viewport.x,
+            viewport.x + viewport.width
         );
     }
 }

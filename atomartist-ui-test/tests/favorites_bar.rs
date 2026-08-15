@@ -1,14 +1,23 @@
 //! The left favorites bar, driven through the real widget tree
-//! (`docs/file-browser-design.md` §1.2, §2, §6 — step 6d-2).
+//! (`docs/file-browser-design.md` §1.2, §2, §6, §5b — steps 6d-2, 6f-1).
 //!
 //! Ancestor: NodeDesigner's `static/js/node-editor/ui/parts-bar.js`, whose
 //! handle semantics (3 px toggle-vs-resize threshold, pull-open, snap-closed
-//! below 120 px keeping the stored width) these tests pin down on our side.
-//! There is no NodeDesigner test file to port — the ancestor had none — so
-//! the assertions come from the behaviour the design records.
+//! below 120 px keeping the stored width) and constants (panel default 380,
+//! min 240, max 70 % of the pane, persistent 72 px strip) these tests pin
+//! down on our side. There is no NodeDesigner test file to port — the
+//! ancestor had none — so the assertions come from the behaviour the design
+//! records.
 //!
 //! Everything here goes through `TestHarness`, i.e. the production
-//! `build_app` tree: the bar is a real child of the node-canvas row.
+//! `build_app` tree: since 6f-1 the bar is a real child of the *3-D
+//! viewport* row.
+//!
+//! This file owns the **handle** (toggle / resize / snap-closed), the
+//! **panel** (embedded browser, opening projects), pinning and
+//! persistence. The persistent icon strip — its contents, its docking,
+//! its scrolling — lives in `tests/favorites_strip.rs`, which is where
+//! the two files were split to stay under the 800-line cap.
 //!
 //! Coordinates: `find_widget_screen_rect` reports screen-absolute **Y-up**
 //! rectangles; `click_local` / `to_screen` flip them into the Y-down space
@@ -26,9 +35,9 @@ use atomartist_storage::{
 use atomartist_ui::favorites_bar::{
     BAR_ID, DEFAULT_EXPANDED_W, EMBEDDED_BROWSER_ID, MAX_WIDTH_FRACTION, MIN_EXPANDED_W,
 };
-use atomartist_ui::favorites_bar_geom::{self as bar_geom, HANDLE_W, RAIL_W};
+use atomartist_ui::favorites_bar_geom::{self as bar_geom, COLLAPSED_W, HANDLE_W};
 use atomartist_ui::file_browser::widget_geom::{self as geom, BrowserLayout};
-use atomartist_ui::file_browser::{BrowserMode, FavoriteKind, Favorites, SEED_NODE_TYPES};
+use atomartist_ui::file_browser::{BrowserMode, FavoriteKind, Favorites};
 use atomartist_ui::top_menu_bar::{FileDialogProvider, UnsavedChoice};
 use atomartist_ui::{fresh_state_with_starter_graph_and_storage, AppState, UiSettings};
 use atomartist_ui_test::TestHarness;
@@ -115,23 +124,26 @@ fn bar_width(h: &TestHarness) -> f64 {
     prop(h, BAR_ID, "width").parse().expect("width is a number")
 }
 
+/// Width of the *browser panel* — what the handle resizes and what the
+/// settings persist since 6f-1 (the strip is a constant beside it).
+fn panel_width(h: &TestHarness) -> f64 {
+    prop(h, BAR_ID, "panel_width")
+        .parse()
+        .expect("panel_width is a number")
+}
+
 fn expanded(h: &TestHarness) -> bool {
     prop(h, BAR_ID, "expanded") == "true"
+}
+
+fn scroll_offset(h: &TestHarness) -> f64 {
+    prop(h, BAR_ID, "scroll").parse().unwrap()
 }
 
 /// Absolute centre of the handle strip on the bar's right edge.
 fn handle_center(h: &TestHarness) -> Point {
     let bar = rect_of(h, BAR_ID);
     Point::new(bar.x + bar.width - HANDLE_W * 0.5, bar.y + bar.height * 0.5)
-}
-
-/// Absolute rectangle of favourite row `index` in the bar.
-fn row_rect(h: &TestHarness, index: usize) -> Rect {
-    let bar = rect_of(h, BAR_ID);
-    let count: usize = prop(h, BAR_ID, "favorites").parse().unwrap();
-    let layout = bar_geom::compute(Size::new(bar.width, bar.height), expanded(h), count, false);
-    let local = layout.rows[index];
-    Rect::new(bar.x + local.x, bar.y + local.y, local.width, local.height)
 }
 
 /// Drag the handle by `dx` logical pixels (positive = right = wider).
@@ -197,46 +209,6 @@ fn harness_with(dialogs: Arc<ScriptedDialogs>, storage: Arc<StorageRegistry>) ->
     TestHarness::with_dialogs(state, dialogs as Arc<dyn FileDialogProvider>)
 }
 
-// ── Rail ────────────────────────────────────────────────────────────────
-
-/// The deliverable of 6d-2's first half: the bar is in the production
-/// tree, collapsed, showing the seeded primitive palette.
-#[test]
-fn rail_renders_the_seeded_favorites() {
-    let h = TestHarness::with_starter_graph();
-    assert!(h.find_by_id(BAR_ID).is_some(), "the bar is in build_app");
-    assert_eq!(expanded(&h), false, "a fresh install starts collapsed");
-    assert_eq!(
-        prop(&h, BAR_ID, "favorites"),
-        SEED_NODE_TYPES.len().to_string(),
-        "the rail shows the seeded primitive palette"
-    );
-    assert_eq!(prop(&h, BAR_ID, "dead"), "0", "seeded types all resolve");
-    assert_eq!(bar_width(&h), RAIL_W);
-    assert!(
-        h.find_by_id(EMBEDDED_BROWSER_ID).is_none(),
-        "the panel's browser is mounted lazily, on the first expand"
-    );
-}
-
-/// The rail must not eat the node canvas: the canvas simply starts to the
-/// right of it, and the 3-D viewport is untouched.
-#[test]
-fn the_bar_docks_left_of_the_node_canvas() {
-    let h = TestHarness::with_starter_graph();
-    let bar = rect_of(&h, BAR_ID);
-    let canvas = rect_of(&h, "node-canvas");
-    let viewport = rect_of(&h, "viewport-3d");
-    assert!(
-        bar.x + bar.width <= canvas.x + 0.5,
-        "bar {bar:?} must sit left of canvas {canvas:?}"
-    );
-    assert!(
-        viewport.width > canvas.width,
-        "the bar comes out of the canvas row, not the viewport"
-    );
-}
-
 // ── Handle: toggle and resize ───────────────────────────────────────────
 
 /// A press released in place toggles — the ancestor's first handle rule.
@@ -245,17 +217,18 @@ fn clicking_the_handle_toggles_the_panel() {
     let mut h = TestHarness::with_starter_graph();
     let handle = handle_center(&h);
     h.click_local(handle, MouseButton::Left);
-    assert!(expanded(&h), "a click on the handle opens the bar");
+    assert!(expanded(&h), "a click on the handle opens the panel");
     assert_eq!(
-        bar_width(&h),
+        panel_width(&h),
         DEFAULT_EXPANDED_W as f64,
-        "and opens it at the stored width"
+        "and opens it at the stored (ND default 380) width"
     );
+    assert_eq!(bar_width(&h), COLLAPSED_W + DEFAULT_EXPANDED_W as f64);
 
     let handle = handle_center(&h);
     h.click_local(handle, MouseButton::Left);
     assert!(!expanded(&h), "a second click closes it");
-    assert_eq!(bar_width(&h), RAIL_W);
+    assert_eq!(bar_width(&h), COLLAPSED_W, "the strip is still there");
 }
 
 /// Past the 3 px threshold the same gesture is a resize, and — because the
@@ -265,11 +238,15 @@ fn clicking_the_handle_toggles_the_panel() {
 fn dragging_the_handle_right_pulls_the_bar_open_and_sizes_it() {
     let mut h = TestHarness::with_starter_graph();
     drag_handle(&mut h, 260.0);
-    assert!(expanded(&h), "a rightward pull opens the bar");
-    let width = bar_width(&h);
+    assert!(expanded(&h), "a rightward pull opens the panel");
+    let width = panel_width(&h);
     assert!(
-        (width - (RAIL_W + 260.0)).abs() < 1.0,
-        "the bar follows the pointer, got {width}"
+        (width - 260.0).abs() < 1.0,
+        "the panel follows the pointer, got {width}"
+    );
+    assert!(
+        (bar_width(&h) - (COLLAPSED_W + 260.0)).abs() < 1.0,
+        "and the strip and handle ride along"
     );
     assert_eq!(
         prop(&h, BAR_ID, "dragging"),
@@ -284,13 +261,17 @@ fn dragging_the_handle_right_pulls_the_bar_open_and_sizes_it() {
 fn a_narrow_release_snaps_closed_and_keeps_the_stored_width() {
     let mut h = TestHarness::with_starter_graph();
     drag_handle(&mut h, 300.0);
-    let opened = bar_width(&h);
+    let opened = panel_width(&h);
     assert!(opened > MIN_EXPANDED_W as f64);
 
-    // Now drag back past the snap threshold in one motion.
+    // Now drag back past the snap threshold (ND: 120 px) in one motion.
     drag_handle(&mut h, -(opened - 40.0));
-    assert!(!expanded(&h), "released below the minimum, the bar closes");
-    assert_eq!(bar_width(&h), RAIL_W, "and shows the rail again");
+    assert!(!expanded(&h), "released below 120 px, the panel closes");
+    assert_eq!(
+        bar_width(&h),
+        COLLAPSED_W,
+        "and the strip alone is on screen again"
+    );
     let stored: f64 = prop(&h, BAR_ID, "stored_width").parse().unwrap();
     assert!(
         (stored - opened).abs() < 1.0,
@@ -301,7 +282,7 @@ fn a_narrow_release_snaps_closed_and_keeps_the_stored_width() {
     let handle = handle_center(&h);
     h.click_local(handle, MouseButton::Left);
     assert!(expanded(&h));
-    assert!((bar_width(&h) - opened).abs() < 1.0);
+    assert!((panel_width(&h) - opened).abs() < 1.0);
 }
 
 /// The same rule under a **real** pointer stream, which is the only way to
@@ -313,11 +294,14 @@ fn a_narrow_release_snaps_closed_and_keeps_the_stored_width() {
 fn closing_through_intermediate_widths_keeps_the_sized_width() {
     let mut h = TestHarness::with_starter_graph();
     drag_handle(&mut h, 300.0);
-    let sized = bar_width(&h);
-    assert!(sized > 300.0, "the bar is wide before the close-drag");
+    let sized = panel_width(&h);
+    assert!(
+        (sized - 300.0).abs() < 1.0,
+        "the panel is wide before the close-drag, got {sized}"
+    );
 
     // Down on the handle, sweep left through 200 → 150 → 130 (all still
-    // legal widths), release at 40 (below the snap threshold).
+    // above the 120 px snap threshold), release at 40 (below it).
     drag_handle_via(
         &mut h,
         &[200.0 - sized, 150.0 - sized, 130.0 - sized, 40.0 - sized],
@@ -334,7 +318,7 @@ fn closing_through_intermediate_widths_keeps_the_sized_width() {
     // And the re-open honours it.
     let handle = handle_center(&h);
     h.click_local(handle, MouseButton::Left);
-    assert!((bar_width(&h) - sized).abs() < 1.0);
+    assert!((panel_width(&h) - sized).abs() < 1.0);
 }
 
 /// The bar may never take more than [`MAX_WIDTH_FRACTION`] of the pane it
@@ -348,22 +332,23 @@ fn the_width_cap_reapplies_when_the_pane_matches_the_bar() {
     *h.state().favorites_bar_width.lock().unwrap() = 400.0;
     let handle = handle_center(&h);
     h.click_local(handle, MouseButton::Left);
-    assert_eq!(bar_width(&h), 400.0, "wide open in a 1280 px window");
+    assert_eq!(panel_width(&h), 400.0, "wide open in a 1280 px window");
 
-    // Shrink the window until the canvas pane is exactly the bar's width.
+    // Shrink the window until the viewport pane is about the bar's width.
     let mut h = h.with_size(400, 720);
     h.frame();
 
+    // ND's cap, raised to 70 % of the pane in 6f-1.
     let cap = 400.0 * MAX_WIDTH_FRACTION;
-    let width = bar_width(&h);
+    let width = panel_width(&h);
     assert!(
         width <= cap + 1.0,
-        "the bar must re-clamp to {cap} of the new pane, got {width}"
+        "the panel must re-clamp to {cap} of the new pane, got {width}"
     );
-    let canvas = rect_of(&h, "node-canvas");
+    let viewport = rect_of(&h, "viewport-3d");
     assert!(
-        canvas.width > 0.0,
-        "and must not squeeze the node canvas out of existence"
+        viewport.width > 0.0,
+        "and must not squeeze the 3-D viewport out of existence"
     );
 }
 
@@ -543,46 +528,14 @@ fn activating_a_project_with_unsaved_changes_respects_the_gate() {
     assert_eq!(h.state().current_file.lock().unwrap().clone(), None);
 }
 
-// ── Unpin + persistence ─────────────────────────────────────────────────
+// ── Pin + persistence ───────────────────────────────────────────────────
 
-/// The per-row × unpins, and the change is visible to the shells' settings
-/// snapshot on the very next frame.
+/// The strip's bottom "pin current project" item pins the open project —
+/// the one way a `Project` favourite gets created. (The strip's own
+/// contents, scrolling, and the deliberate absence of an unpin gesture
+/// live in `tests/favorites_strip.rs`.)
 #[test]
-fn unpinning_a_row_removes_it_and_persists() {
-    let mut h = TestHarness::with_starter_graph();
-    let handle = handle_center(&h);
-    h.click_local(handle, MouseButton::Left);
-    h.pump_until_idle(8);
-    h.frame();
-
-    let before: usize = prop(&h, BAR_ID, "favorites").parse().unwrap();
-    let first_key = h.state().favorites.lock().unwrap().list()[0]
-        .stable_key
-        .clone();
-    let unpin = bar_geom::unpin_rect(row_rect(&h, 0)).center();
-    h.click_local(unpin, MouseButton::Left);
-
-    assert_eq!(
-        prop(&h, BAR_ID, "favorites"),
-        (before - 1).to_string(),
-        "the row is gone from the bar"
-    );
-    assert!(
-        !h.state()
-            .favorites
-            .lock()
-            .unwrap()
-            .contains(FavoriteKind::NodeType, &first_key),
-        "and gone from the state the shells persist"
-    );
-    let reloaded = UiSettings::from_text(&h.state().ui_settings().to_text());
-    assert_eq!(reloaded.favorites.len(), before - 1);
-}
-
-/// The panel's "pin current project" row pins the open project — the one
-/// way a `Project` favourite gets created in 6d-2 (drag-to-pin is 6e).
-#[test]
-fn the_pin_row_pins_the_open_project() {
+fn the_pin_item_pins_the_open_project() {
     let storage = memory_registry();
     let saved = uri("/bracket.atmr");
     seed_project(&storage, &saved);
@@ -591,20 +544,22 @@ fn the_pin_row_pins_the_open_project() {
         storage,
     );
     *h.state().current_file.lock().unwrap() = Some(saved.clone());
-
-    let handle = handle_center(&h);
-    h.click_local(handle, MouseButton::Left);
-    h.pump_until_idle(8);
     h.frame();
 
-    // The pin row sits directly under the last favourite; ask the same
+    // The pin item is anchored to the strip's bottom; ask the same
     // geometry the widget laid out with.
     let bar = rect_of(&h, BAR_ID);
     let count: usize = prop(&h, BAR_ID, "favorites").parse().unwrap();
-    let layout = bar_geom::compute(Size::new(bar.width, bar.height), true, count, true);
+    let layout = bar_geom::compute(
+        Size::new(bar.width, bar.height),
+        expanded(&h),
+        count,
+        true,
+        scroll_offset(&h),
+    );
     let local = layout
         .pin
-        .expect("an open project offers a pin row")
+        .expect("an open project offers a pin item")
         .center();
     h.click_local(
         Point::new(bar.x + local.x, bar.y + local.y),
@@ -622,7 +577,7 @@ fn the_pin_row_pins_the_open_project() {
     assert_eq!(
         prop(&h, BAR_ID, "favorites"),
         (count + 1).to_string(),
-        "and shows up as a row"
+        "and shows up as a strip item"
     );
 }
 

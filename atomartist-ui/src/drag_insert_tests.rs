@@ -8,9 +8,13 @@
 //! it (real events through the real widget tree) is covered by
 //! `atomartist-ui-test/tests/drag_insert.rs`.
 //!
-//! Geometry used throughout: a 44 px rail inside a 800 × 300 pane, so
-//! bar-local x ≤ 44 is "over the bar" and anything beyond is canvas.
-//! Y-up, as everywhere else.
+//! Geometry used throughout: a 44 px bar with the canvas rectangle
+//! published immediately to its right inside a 800 × 300 pane, so
+//! bar-local x < 44 is "over the bar" and anything beyond is canvas.
+//! Y-up, as everywhere else. The controller only ever sees a rectangle,
+//! so this fixture and production's (canvas *below* the bar, since step
+//! 6f-1 moved it to the 3-D pane) exercise the same code — the
+//! below-the-bar shape gets its own test at the end.
 
 use super::*;
 
@@ -19,6 +23,12 @@ use crate::top_level::fresh_state_with_builtins;
 const BAR_W: f64 = 44.0;
 const PANE_W: f64 = 800.0;
 const PANE_H: f64 = 300.0;
+
+/// The canvas as this fixture publishes it: the rest of the pane to the
+/// bar's right.
+fn canvas_rect() -> Rect {
+    Rect::new(BAR_W, 0.0, PANE_W - BAR_W, PANE_H)
+}
 
 fn controller() -> (AppState, DragInsertHandle) {
     let (state, handle, _overlay) = controller_with_overlay();
@@ -31,7 +41,7 @@ fn controller_with_overlay() -> (AppState, DragInsertHandle, FloatingOverlayHand
     let state = fresh_state_with_builtins();
     let overlay = FloatingOverlayHandle::new();
     let handle = DragInsertHandle::new(state.clone(), overlay.clone());
-    handle.set_geometry(BAR_W, PANE_W, PANE_H);
+    handle.set_canvas_rect(canvas_rect());
     (state, handle, overlay)
 }
 
@@ -342,6 +352,40 @@ fn an_unimportable_file_payload_is_reported_not_swallowed() {
         notices.iter().any(|n| n.text.contains("readme.txt")),
         "the refusal must reach the user: {notices:?}"
     );
+}
+
+/// The 6f-1 shape: the bar is docked in the 3-D viewport pane and the
+/// canvas sits in the pane *below* it, i.e. at negative bar-local `y`.
+/// The controller must treat that rectangle exactly like any other —
+/// dropping there inserts at the cursor, and a point between the two
+/// panes (the splitter's divider) is not the canvas.
+#[test]
+fn a_canvas_below_the_bar_is_still_the_drop_target() {
+    let (state, handle) = controller();
+    // Viewport pane 0..300 (bar-local y), 6 px divider, canvas pane
+    // spanning y ∈ [-206, -6].
+    let canvas = Rect::new(0.0, -206.0, PANE_W, 200.0);
+    handle.set_canvas_rect(canvas);
+
+    handle.press(box_payload(), Point::new(20.0, 200.0));
+    handle.pointer_move(Point::new(20.0, 180.0));
+    assert!(handle.ghost_active(), "still over the viewport pane");
+    // Over the divider between the panes: not a drop target.
+    handle.pointer_move(Point::new(300.0, -3.0));
+    assert!(handle.carried_node().is_none());
+
+    handle.pointer_move(Point::new(300.0, -100.0));
+    let id = handle.carried_node().expect("the canvas below accepts it");
+    {
+        let g = state.graph.lock().unwrap();
+        // Canvas-local = bar-local minus the canvas origin (pan 0, zoom 1).
+        assert_eq!(g.get(id).unwrap().position, [300.0, -100.0 + 206.0]);
+    }
+    assert_eq!(
+        handle.pointer_up(Point::new(300.0, -100.0)),
+        GestureEnd::Dropped
+    );
+    assert_eq!(node_count(&state), 1);
 }
 
 /// `.mcx` is importable, so it is draggable — the two lists are one.

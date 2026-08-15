@@ -42,17 +42,22 @@
 //! # Coordinates
 //!
 //! Every position handed to this controller is **favorites-bar-local**
-//! and Y-up. The bar and the canvas are siblings in one `FlexRow` that
-//! fills the canvas pane, so the canvas occupies bar-local
-//! `x ∈ (bar_width, pane_width]`, `y ∈ [0, height]` — which is all the
-//! geometry [`DragInsert::in_canvas`] needs. Canvas-space then follows
-//! from the editor's live pan / zoom, mirrored onto
-//! [`AppState::canvas_pan`] / [`AppState::canvas_zoom`].
+//! and Y-up. Since step 6f-1 the bar is docked in the *3-D viewport*
+//! pane while the drop target is the node canvas in the other pane of
+//! the splitter, so the canvas is no longer a sibling whose left edge
+//! can be inferred from the bar's width — it sits *below* the bar, at
+//! negative bar-local `y`. The bar therefore publishes the canvas's
+//! rectangle in its own coordinate space through
+//! [`DragInsertHandle::set_canvas_rect`] (derived from the two
+//! [`PaneRect`](crate::favorites_bar_host::PaneRect) probes), and that
+//! rectangle is all the geometry [`DragInsert::in_canvas`] needs.
+//! Canvas-space then follows from the editor's live pan / zoom, mirrored
+//! onto [`AppState::canvas_pan`] / [`AppState::canvas_zoom`].
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use agg_gui::Point;
+use agg_gui::{Point, Rect};
 use atomartist_lib::graph::node::NodeId;
 use atomartist_lib::graph::undo_commands::AddNodeCmd;
 use atomartist_storage::StorageUri;
@@ -134,11 +139,11 @@ struct Gesture {
 struct DragInsert {
     state: AppState,
     overlay: FloatingOverlayHandle,
-    /// Published every layout by the bar: its own width, the pane width,
-    /// and the shared height. See the module docs on coordinates.
-    bar_w: f64,
-    pane_w: f64,
-    height: f64,
+    /// The node canvas's rectangle in **bar-local** coordinates,
+    /// published every layout by the bar. See the module docs on
+    /// coordinates. Zero-sized until the first layout, which reads as
+    /// "no canvas yet" — the drop target is not guessed.
+    canvas: Rect,
     gesture: Option<Gesture>,
 }
 
@@ -155,21 +160,17 @@ impl DragInsertHandle {
             inner: Rc::new(RefCell::new(DragInsert {
                 state,
                 overlay,
-                bar_w: 0.0,
-                pane_w: 0.0,
-                height: 0.0,
+                canvas: Rect::default(),
                 gesture: None,
             })),
         }
     }
 
-    /// Publish the bar geometry the canvas-boundary test needs. Called
-    /// from the bar's `layout`.
-    pub fn set_geometry(&self, bar_w: f64, pane_w: f64, height: f64) {
-        let mut inner = self.inner.borrow_mut();
-        inner.bar_w = bar_w;
-        inner.pane_w = pane_w;
-        inner.height = height;
+    /// Publish the node canvas's rectangle in bar-local coordinates —
+    /// the drop target the boundary test and the canvas-space mapping
+    /// both work from. Called from the bar's `layout`.
+    pub fn set_canvas_rect(&self, canvas: Rect) {
+        self.inner.borrow_mut().canvas = canvas;
     }
 
     /// A press landed on a draggable item at bar-local `pos`. Does
@@ -234,17 +235,11 @@ impl DragInsertHandle {
 impl DragInsert {
     // ── Geometry ────────────────────────────────────────────────────
 
-    /// Is this bar-local point over the node canvas (the bar's sibling
-    /// in the canvas pane)? Y-up: `y` runs 0 (pane bottom) → `height`.
+    /// Is this bar-local point over the node canvas? The canvas lives in
+    /// the splitter's other pane, so its rectangle is published rather
+    /// than inferred (see the module docs).
     fn in_canvas(&self, pos: Point) -> bool {
-        // Before the first layout the pane width is unknown; "unknown"
-        // must not read as "no canvas", so the right edge is open.
-        let right = if self.pane_w > self.bar_w {
-            self.pane_w
-        } else {
-            f64::INFINITY
-        };
-        pos.x > self.bar_w && pos.x <= right && pos.y >= 0.0 && pos.y <= self.height
+        self.canvas.width > 0.0 && self.canvas.height > 0.0 && self.canvas.contains(pos)
     }
 
     /// Bar-local → canvas-space, at the editor's live pan / zoom.
@@ -256,10 +251,10 @@ impl DragInsert {
             1.0
         };
         let pan = *self.state.canvas_pan.lock().unwrap();
-        // The canvas widget starts where the bar ends; both share the
-        // pane's Y origin.
-        let local_x = pos.x - self.bar_w;
-        let local_y = pos.y;
+        // Bar-local → canvas-widget-local: subtract the canvas's own
+        // origin, which is below the bar since 6f-1 (negative `y`).
+        let local_x = pos.x - self.canvas.x;
+        let local_y = pos.y - self.canvas.y;
         [(local_x - pan[0]) / zoom, (local_y - pan[1]) / zoom]
     }
 

@@ -12,7 +12,6 @@ use agg_gui::{
 };
 
 use crate::app_state::AppState;
-use agg_gui_node_editor::NodeEditor;
 use crate::app_state_model::shared_model_for;
 use crate::breadcrumb_bar::BreadcrumbBar;
 use crate::debug_windows::{build_debug_windows, DebugWindowHandles};
@@ -20,10 +19,11 @@ use crate::file_browser::{FileBrowserModalHandle, FileBrowserModalHost};
 use crate::floating_overlay::{FloatingOverlayHandle, FloatingOverlayHost};
 use crate::settings::UiSettings;
 use crate::status_bar::StatusBar;
-use crate::top_menu_bar::{build_menu_bar_sized, FileDialogProvider};
 #[cfg(test)]
 use crate::top_menu_bar::NoFileDialogs;
+use crate::top_menu_bar::{build_menu_bar_sized, FileDialogProvider};
 use crate::viewport_overlay::build_viewport_overlay;
+use agg_gui_node_editor::NodeEditor;
 
 /// Build the application root widget tree.
 ///
@@ -115,38 +115,25 @@ pub fn build_app(
                 }
             }),
     );
-    // The favorites bar is docked on the *canvas's* left edge, not the
-    // window's: the 3-D viewport keeps the full width, and the bar reads
-    // as chrome belonging to the node graph (its favourites add nodes to
-    // it). So the canvas pane of the splitter is a row — bar first (=
-    // leftmost), canvas taking whatever is left. Zero gap so the bar's
-    // handle sits flush against the canvas it resizes into.
+    // Step 6f-1: the favorites bar is docked on the *3-D viewport's* left
+    // edge. Its favourites are parts — they belong to the model, not to
+    // the graph — and the node canvas keeps its full width. The viewport
+    // pane of the splitter is therefore a row: bar first (= leftmost),
+    // viewport taking whatever is left, zero gap so the bar's handle sits
+    // flush against the viewport it resizes into. The bar is built below,
+    // once both pane probes exist.
     //
-    // The row is wrapped in a `PaneWidthProbe` so the bar can cap itself
-    // at a fraction of the *pane* — a widget cannot ask its parent how
-    // big it is, and inferring it from the flex row's two layout passes
-    // is the bug that module documents.
-    let pane_width = crate::favorites_bar_host::PaneWidth::new();
-    // Drag-insert (step 6e): the bar and its embedded browser share one
-    // gesture controller, and the ghost it floats goes into the same
-    // top-of-`Stack` overlay slot the colour picker uses.
-    let drag_insert =
-        crate::drag_insert::DragInsertHandle::new(state.clone(), overlay_handle.clone());
-    let favorites_bar: Box<dyn Widget> = Box::new(
-        crate::favorites_bar::FavoritesBar::new(state.clone(), dialogs.clone(), pane_width.clone())
-            .with_drag_insert(drag_insert),
-    );
-    let canvas_row: Box<dyn Widget> = Box::new(
-        FlexRow::new()
-            .with_gap(0.0)
-            .with_h_anchor(HAnchor::STRETCH)
-            .with_v_anchor(VAnchor::STRETCH)
-            .add(favorites_bar)
-            .add_flex(canvas, 1.0),
-    );
-    let canvas: Box<dyn Widget> = Box::new(crate::favorites_bar_host::PaneWidthProbe::new(
-        pane_width,
-        canvas_row,
+    // Each pane is wrapped in a `PaneRectProbe` so the bar can (a) cap
+    // its panel at a fraction of its *own* pane — a widget cannot ask
+    // its parent how big it is, and inferring it from the flex row's two
+    // layout passes is the bug that module documents — and (b) hand the
+    // drag controller the node canvas's rectangle, which now lives in
+    // the splitter's other pane.
+    let viewport_pane_rect = crate::favorites_bar_host::PaneRect::new();
+    let canvas_pane_rect = crate::favorites_bar_host::PaneRect::new();
+    let canvas: Box<dyn Widget> = Box::new(crate::favorites_bar_host::PaneRectProbe::new(
+        canvas_pane_rect.clone(),
+        canvas,
     ));
 
     // Menu bar needs a font; the demo shells install one into
@@ -155,6 +142,33 @@ pub fn build_app(
         current_system_font().expect("system font must be installed before build_app");
 
     let viewport: Box<dyn Widget> = build_viewport_overlay(state.clone(), font.clone());
+
+    // Drag-insert (step 6e): the bar and its embedded browser share one
+    // gesture controller, and the ghost it floats goes into the same
+    // top-of-`Stack` overlay slot the colour picker uses.
+    let drag_insert =
+        crate::drag_insert::DragInsertHandle::new(state.clone(), overlay_handle.clone());
+    let favorites_bar: Box<dyn Widget> = Box::new(
+        crate::favorites_bar::FavoritesBar::new(
+            state.clone(),
+            dialogs.clone(),
+            viewport_pane_rect.clone(),
+            canvas_pane_rect,
+        )
+        .with_drag_insert(drag_insert),
+    );
+    let viewport_row: Box<dyn Widget> = Box::new(
+        FlexRow::new()
+            .with_gap(0.0)
+            .with_h_anchor(HAnchor::STRETCH)
+            .with_v_anchor(VAnchor::STRETCH)
+            .add(favorites_bar)
+            .add_flex(viewport, 1.0),
+    );
+    let viewport: Box<dyn Widget> = Box::new(crate::favorites_bar_host::PaneRectProbe::new(
+        viewport_pane_rect,
+        viewport_row,
+    ));
 
     let menu_bar: Box<dyn Widget> =
         build_menu_bar_sized(state.clone(), font.clone(), dialogs.clone(), debug.clone());
@@ -272,9 +286,7 @@ pub fn fresh_state_with_builtins_and_storage(
 /// NodeDesigner reference scene) and runs the first evaluation so the
 /// 3D viewport shows a rounded extruded plate on app start.
 pub fn fresh_state_with_starter_graph() -> AppState {
-    fresh_state_with_starter_graph_and_storage(Arc::new(
-        atomartist_storage::StorageRegistry::new(),
-    ))
+    fresh_state_with_starter_graph_and_storage(Arc::new(atomartist_storage::StorageRegistry::new()))
 }
 
 /// Starter graph over a caller-supplied storage registry — the shape
@@ -288,22 +300,29 @@ pub fn fresh_state_with_starter_graph_and_storage(
         let mut g = state.graph.lock().unwrap();
 
         // Y is up in canvas-space and node.position is the node's top-left.
-        let rect = g.add_new_node("Rectangle", [40.0, 240.0], &state.registry).unwrap();
-        let inflate = g.add_new_node("Inflate", [260.0, 240.0], &state.registry).unwrap();
-        let extrude = g.add_new_node("Extrude", [480.0, 240.0], &state.registry).unwrap();
-        let output = g.add_new_node("Output", [700.0, 240.0], &state.registry).unwrap();
+        let rect = g
+            .add_new_node("Rectangle", [40.0, 240.0], &state.registry)
+            .unwrap();
+        let inflate = g
+            .add_new_node("Inflate", [260.0, 240.0], &state.registry)
+            .unwrap();
+        let extrude = g
+            .add_new_node("Extrude", [480.0, 240.0], &state.registry)
+            .unwrap();
+        let output = g
+            .add_new_node("Output", [700.0, 240.0], &state.registry)
+            .unwrap();
 
         // Resolve socket uids on the fresh instances, then connect.
-        let connect_by_name =
-            |g: &mut atomartist_lib::Graph,
-             from: atomartist_lib::graph::node::NodeId,
-             from_name: &str,
-             to: atomartist_lib::graph::node::NodeId,
-             to_name: &str| {
-                let from_uid = g.get(from).unwrap().output_by_name(from_name).unwrap().uid;
-                let to_uid = g.get(to).unwrap().input_by_name(to_name).unwrap().uid;
-                let _ = g.connect(Noodle::new(from, from_uid, to, to_uid), &state.registry);
-            };
+        let connect_by_name = |g: &mut atomartist_lib::Graph,
+                               from: atomartist_lib::graph::node::NodeId,
+                               from_name: &str,
+                               to: atomartist_lib::graph::node::NodeId,
+                               to_name: &str| {
+            let from_uid = g.get(from).unwrap().output_by_name(from_name).unwrap().uid;
+            let to_uid = g.get(to).unwrap().input_by_name(to_name).unwrap().uid;
+            let _ = g.connect(Noodle::new(from, from_uid, to, to_uid), &state.registry);
+        };
         connect_by_name(&mut g, rect, "out", inflate, "input");
         connect_by_name(&mut g, inflate, "out", extrude, "Paths");
         // The Output node uses the dynamic multi-input model: its first
@@ -311,7 +330,12 @@ pub fn fresh_state_with_starter_graph_and_storage(
         // the source on connect. Resolve its uid directly rather than
         // looking up the legacy "in" name.
         {
-            let extrude_uid = g.get(extrude).unwrap().output_by_name("Geometry").unwrap().uid;
+            let extrude_uid = g
+                .get(extrude)
+                .unwrap()
+                .output_by_name("Geometry")
+                .unwrap()
+                .uid;
             let output_in_uid = g.get(output).unwrap().inputs[0].uid;
             let _ = g.connect(
                 Noodle::new(extrude, extrude_uid, output, output_in_uid),

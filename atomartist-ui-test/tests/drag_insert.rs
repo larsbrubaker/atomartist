@@ -15,6 +15,11 @@
 //!
 //! Coordinates: `find_widget_screen_rect` reports screen-absolute **Y-up**
 //! rects; `to_screen` flips them for the event helpers.
+//!
+//! Since step 6f-1 the bar is docked in the *3-D viewport* pane, so every
+//! drag here crosses the splitter on its way to the node canvas — the
+//! controller works from the canvas rectangle the bar publishes, not from
+//! its own width.
 
 use std::sync::Arc;
 
@@ -67,16 +72,40 @@ fn dragging(h: &TestHarness) -> bool {
     prop(h, BAR_ID, "dragging") == "true"
 }
 
-fn row_rect(h: &TestHarness, index: usize) -> Rect {
+fn item_rect(h: &TestHarness, index: usize) -> Rect {
     let bar = rect_of(h, BAR_ID);
     let count: usize = prop(h, BAR_ID, "favorites").parse().unwrap();
-    let layout = bar_geom::compute(Size::new(bar.width, bar.height), expanded(h), count, false);
-    let local = layout.rows[index];
+    let scroll: f64 = prop(h, BAR_ID, "scroll").parse().unwrap();
+    let layout = bar_geom::compute(
+        Size::new(bar.width, bar.height),
+        expanded(h),
+        count,
+        h.state().current_file.lock().unwrap().is_some(),
+        scroll,
+    );
+    let local = *layout
+        .items
+        .get(index)
+        .unwrap_or_else(|| panic!("the strip has no item {index} in {bar:?}"));
+    assert!(
+        bar_geom::item_visible(local, layout.items_viewport),
+        "item {index} is scrolled out of view; scroll it in before dragging it"
+    );
     Rect::new(bar.x + local.x, bar.y + local.y, local.width, local.height)
 }
 
-fn row_center(h: &TestHarness, index: usize) -> Point {
-    let r = row_rect(h, index);
+/// Wheel `notches` over the strip (negative = reveal favourites further
+/// down the palette).
+fn wheel_over_strip(h: &mut TestHarness, notches: f64) {
+    let bar = rect_of(h, BAR_ID);
+    let over = Point::new(bar.x + 20.0, bar.y + bar.height * 0.5);
+    let (x, y) = h.to_screen(over);
+    h.mouse_move(x, y);
+    h.scroll(notches);
+}
+
+fn item_center(h: &TestHarness, index: usize) -> Point {
+    let r = item_rect(h, index);
     Point::new(r.x + r.width * 0.5, r.y + r.height * 0.5)
 }
 
@@ -127,7 +156,7 @@ fn release_at(h: &mut TestHarness, at: Point) {
 }
 
 /// A point just above the press, still over the bar: enough travel to
-/// pass the 4 px threshold without leaving the rail.
+/// pass the 4 px threshold without leaving the bar.
 fn nudged(p: Point) -> Point {
     Point::new(p.x, p.y - 12.0)
 }
@@ -154,14 +183,14 @@ fn seed_project(storage: &Arc<StorageRegistry>, at: &StorageUri) -> usize {
 
 // ── Click behaviour must not regress ────────────────────────────────────
 
-/// A press released in place on a rail glyph is still a click: it inserts
+/// A press released in place on a strip item is still a click: it inserts
 /// nothing and never reports a drag. (The seeded favourites are node
 /// types, whose click is deliberately inert — see `favorites_bar`.)
 #[test]
-fn sub_threshold_click_on_a_rail_glyph_inserts_nothing() {
+fn sub_threshold_click_on_a_strip_item_inserts_nothing() {
     let mut h = TestHarness::with_starter_graph();
     let before = node_count(&h);
-    let row = row_center(&h, 0);
+    let row = item_center(&h, 0);
 
     // Move by less than the 4 px threshold before releasing.
     press_and_move(&mut h, row, &[Point::new(row.x + 2.0, row.y + 1.0)]);
@@ -223,7 +252,7 @@ fn sub_threshold_click_in_the_browser_still_selects() {
 fn dragging_a_favorite_past_the_threshold_raises_the_ghost() {
     let mut h = TestHarness::with_starter_graph();
     let before = node_count(&h);
-    let row = row_center(&h, 0);
+    let row = item_center(&h, 0);
     press_and_move(&mut h, row, &[nudged(row)]);
 
     assert!(dragging(&h), "the bar reflects the drag for the inspector");
@@ -241,7 +270,7 @@ fn dragging_a_favorite_past_the_threshold_raises_the_ghost() {
 fn dropping_a_node_type_favorite_adds_one_node_and_one_undo_step() {
     let mut h = TestHarness::with_starter_graph();
     let before = node_count(&h);
-    let row = row_center(&h, 0);
+    let row = item_center(&h, 0);
     let drop = canvas_point(&h);
 
     press_and_move(&mut h, row, &[nudged(row), drop]);
@@ -286,7 +315,7 @@ fn dropping_a_node_type_favorite_adds_one_node_and_one_undo_step() {
 fn dragging_in_and_back_out_leaves_nothing_behind() {
     let mut h = TestHarness::with_starter_graph();
     let before = node_count(&h);
-    let row = row_center(&h, 0);
+    let row = item_center(&h, 0);
     let drop = canvas_point(&h);
 
     press_and_move(&mut h, row, &[nudged(row), drop, nudged(row)]);
@@ -312,7 +341,7 @@ fn dragging_in_and_back_out_leaves_nothing_behind() {
 fn escape_cancels_a_drag_in_flight() {
     let mut h = TestHarness::with_starter_graph();
     let before = node_count(&h);
-    let row = row_center(&h, 0);
+    let row = item_center(&h, 0);
     let drop = canvas_point(&h);
 
     press_and_move(&mut h, row, &[nudged(row), drop]);
@@ -334,7 +363,7 @@ fn escape_cancels_a_drag_in_flight() {
 #[test]
 fn wiggling_over_the_canvas_never_drifts() {
     let mut h = TestHarness::with_starter_graph();
-    let row = row_center(&h, 0);
+    let row = item_center(&h, 0);
     let start = canvas_point(&h);
 
     press_and_move(&mut h, row, &[nudged(row), start]);
@@ -370,7 +399,7 @@ fn wiggling_over_the_canvas_never_drifts() {
 
 // ── File payloads: same import path as an OS file drop ──────────────────
 
-/// A pinned project dragged out of the rail imports into the current
+/// A pinned project dragged out of the strip imports into the current
 /// scene — the same `import_dropped_file` call the OS file-drop handler
 /// makes.
 #[test]
@@ -389,8 +418,13 @@ fn dragging_a_project_favorite_imports_it() {
 
     let before = node_count(&h);
     let count: usize = prop(&h, BAR_ID, "favorites").parse().unwrap();
-    // `add` appends, so the pinned project is the last row.
-    let row = row_center(&h, count - 1);
+    // `add` appends, so the pinned project is the last item — and at
+    // 1280×720 the eight favourites (seeded palette + this project) do
+    // not all fit, so scroll it into view first. That the drag then
+    // works is the point: hit-testing and drag sources honour the
+    // scroll offset.
+    wheel_over_strip(&mut h, -8.0);
+    let row = item_center(&h, count - 1);
     let drop = canvas_point(&h);
 
     press_and_move(&mut h, row, &[nudged(row), drop]);
@@ -451,7 +485,7 @@ fn dragging_a_browser_entry_imports_it() {
 fn starting_a_handle_drag_mid_gesture_gives_the_carried_node_back() {
     let mut h = TestHarness::with_starter_graph();
     let before = node_count(&h);
-    let row = row_center(&h, 0);
+    let row = item_center(&h, 0);
     let drop = canvas_point(&h);
 
     press_and_move(&mut h, row, &[nudged(row), drop]);
@@ -501,7 +535,7 @@ fn drop_position_follows_the_canvas_pan_and_zoom() {
     assert_ne!(zoom, 1.0, "the wheel zoomed the canvas");
 
     let before = node_count(&h);
-    let row = row_center(&h, 0);
+    let row = item_center(&h, 0);
     let drop = canvas_point(&h);
     press_and_move(&mut h, row, &[nudged(row), drop]);
     release_at(&mut h, drop);
