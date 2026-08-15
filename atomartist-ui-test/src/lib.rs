@@ -28,7 +28,15 @@
 //! h.click(640.0, 360.0, MouseButton::Left);
 //! assert!(h.state().selection.lock().unwrap().is_some());
 //! ```
+//!
+//! A second, smaller driver — [`WidgetHarness`] — mounts a *single*
+//! widget as its own root for components that are not wired into
+//! `build_app` yet (the file browser, which its modal and bar hosts mount
+//! in later steps). Same real-event, real-layout discipline; just a
+//! narrower tree.
 
 pub mod harness;
+pub mod widget_harness;
 
 pub use harness::{memory_uri, test_storage_registry, TestHarness, MEMORY_SCHEME};
+pub use widget_harness::WidgetHarness;

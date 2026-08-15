@@ -18,13 +18,24 @@
 //!   same Phase 4 pump. Also widget-free: it reports a [`ThumbState`] and
 //!   leaves the glyph fallback to the widget.
 //!
-//! The shared widget and the modal host join them in the following steps.
+//! - [`widget`] — [`FileBrowser`]: the shared widget both faces embed. It
+//!   paints a [`BrowserModel`] (sidebar, breadcrumbs, grid, search, and —
+//!   in [`BrowserMode::Save`] — a name field), turns clicks into model
+//!   calls, and runs the [`ThumbnailCache`]'s visibility round once per
+//!   layout. Geometry and painting live beside it in `widget_geom` /
+//!   `widget_paint` so no file approaches the 800-line cap.
+//!
+//! The modal host (step 6c) and the favorites bar (6d) embed the widget.
 
 pub mod model;
 pub mod thumbs;
+pub mod widget;
+pub mod widget_geom;
+mod widget_paint;
 
 pub use model::{BrowserModel, Crumb, Listing, ProviderRoot};
 pub use thumbs::{
     can_have_thumbnail, ThumbKey, ThumbState, ThumbnailCache, ThumbnailImage, CACHE_VERSION,
     DEFAULT_BYTE_BUDGET, DEFAULT_MAX_ENTRIES, DEFAULT_MAX_IN_FLIGHT, DEFAULT_THUMB_SIZE,
 };
+pub use widget::{BrowserMode, FileBrowser};

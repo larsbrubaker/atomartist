@@ -56,6 +56,14 @@ pub const CHEVRON_RIGHT: char = '\u{f054}'; // fa-chevron-right
 // Status-bar chrome — the cancel affordance on an in-flight storage op.
 pub const TIMES: char = '\u{f00d}'; // fa-times
 
+// File-browser chrome — provider rows and the grid's fallback glyphs, used
+// whenever an entry has no embedded preview (design §3: never a broken
+// image).
+pub const FOLDER: char = '\u{f07b}'; // fa-folder (a directory entry)
+pub const HDD: char = '\u{f0a0}'; // fa-hdd-o (a provider row)
+pub const EXCLAMATION_TRIANGLE: char = '\u{f071}'; // fa-exclamation-triangle
+pub const CIRCLE_O_NOTCH: char = '\u{f1ce}'; // fa-circle-o-notch (loading)
+
 /// Every icon constant paired with its name. The coverage test iterates this,
 /// so adding a new icon above without listing it here (or with a code point
 /// absent from the font) fails loudly.
@@ -85,6 +93,10 @@ pub(crate) const ALL_ICONS: &[(&str, char)] = &[
     ("CHEVRON_LEFT", CHEVRON_LEFT),
     ("CHEVRON_RIGHT", CHEVRON_RIGHT),
     ("TIMES", TIMES),
+    ("FOLDER", FOLDER),
+    ("HDD", HDD),
+    ("EXCLAMATION_TRIANGLE", EXCLAMATION_TRIANGLE),
+    ("CIRCLE_O_NOTCH", CIRCLE_O_NOTCH),
 ];
 
 #[cfg(test)]
