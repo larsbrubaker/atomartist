@@ -15,10 +15,14 @@
 //!
 //! # Icons
 //!
-//! Step 6f-1 paints a Font Awesome glyph placeholder in the 44 × 44 slot.
-//! Step 6f-2 replaces it with an offscreen render of the primitive's own
-//! generator, which is why the slot is already carved as a square the
-//! glyph is merely centred in.
+//! A `NodeType` favourite's 44 × 44 slot carries a render of the
+//! primitive's *own* generator, evaluated with the node type's defaults
+//! ([`crate::node_icons`], step 6f-2). Those renders are deferred:
+//! [`pump_icons`] resolves at most one per frame, so the strip appears
+//! with labels and Font Awesome glyphs and the pictures fill in over the
+//! next few frames. The glyph is never a placeholder to be *waited* for
+//! — it is the permanent fallback for anything that does not render
+//! (project favourites, dead entries, non-geometry types).
 //!
 //! Coordinates are widget-local and **Y-up**; items were stacked downward
 //! from the strip's top by `favorites_bar_geom::compute`.
@@ -33,10 +37,48 @@ use crate::app_state::AppState;
 use crate::drag_insert::DragPayload;
 use crate::favorites_bar_geom::{self as geom, LABEL_SIZE};
 use crate::file_browser::favorites::{FavoriteKind, FavoriteResolution};
+use crate::mesh_raster::IconImage;
 
-/// Glyph size inside the 44 × 44 slot — the placeholder standing in for
-/// 6f-2's rendered primitive icons.
+/// Glyph size inside the 44 × 44 slot — the fallback for a favourite
+/// with no rendered icon.
 const SLOT_GLYPH_SIZE: f64 = 22.0;
+
+/// Inset of the rendered icon inside the 44 × 44 slot, in logical
+/// pixels, so the render never touches the slot's edge (the ancestor's
+/// `padding: 2px` on its icon `<img>`).
+const SLOT_ICON_INSET: f64 = 2.0;
+
+/// Side of the rendered icon in logical pixels.
+const SLOT_ICON_SIDE: f64 = geom::ICON_SLOT - SLOT_ICON_INSET * 2.0;
+
+/// Ceiling on the rasterized icon, in device pixels — a sanity bound on
+/// a nonsense scale factor, matching
+/// [`crate::mesh_raster::MAX_ICON_SIZE`].
+const MAX_ICON_PX: u32 = 512;
+
+/// Edge length, in **device** pixels, to rasterize an icon at.
+///
+/// Deviation from the ancestor, and the reason this is not simply ND's
+/// 96 px: NodeDesigner hands its 96 px PNG to the browser, which scales
+/// it down to the slot with a linear filter. Both of our backends blit
+/// with *nearest* sampling, so a 96 → 40 px downscale would point-sample
+/// away exactly the supersampled edges the rasterizer just paid for.
+/// Rendering at the slot's own device-pixel size keeps the 2×
+/// supersample meaningful and makes the blit 1:1.
+///
+/// The scale is agg-gui's `device_scale · ux_scale`, the same factor
+/// `App::layout` divides the viewport by. A changed scale simply asks
+/// for a different size, which is a different cache key — no
+/// invalidation needed.
+pub(crate) fn icon_pixel_size() -> u32 {
+    let scale = agg_gui::ux_scale::effective_scale();
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    ((SLOT_ICON_SIDE * scale).round() as i64).clamp(1, MAX_ICON_PX as i64) as u32
+}
 
 /// One favourite as the strip needs it for a frame: resolved label,
 /// glyph, and whether it is still live.
@@ -48,6 +90,10 @@ pub(crate) struct StripItem {
     /// A favourite whose node type / URI no longer resolves. Kept and
     /// greyed rather than pruned (design §2: the provider may come back).
     pub(crate) alive: bool,
+    /// The rendered primitive, once [`pump_icons`] has produced one.
+    /// `None` means "paint the glyph" — either not rendered *yet*, or
+    /// not renderable at all.
+    pub(crate) icon: Option<IconImage>,
 }
 
 impl StripItem {
@@ -76,6 +122,7 @@ impl StripItem {
 /// The favourites, resolved against the live registry for this frame.
 pub(crate) fn collect_items(state: &AppState) -> Vec<StripItem> {
     let favorites = state.favorites.lock().unwrap().clone();
+    let size = icon_pixel_size();
     favorites
         .list()
         .iter()
@@ -96,15 +143,45 @@ pub(crate) fn collect_items(state: &AppState) -> Vec<StripItem> {
                     false,
                 ),
             };
+            // Only node types have a generator to render; a project
+            // favourite's preview is its thumbnail, which is the
+            // browser's business (design §5b: "project favorites keep
+            // their thumbnail/glyph behaviour").
+            let icon = (alive && fav.kind == FavoriteKind::NodeType)
+                .then(|| crate::node_icons::icon(&fav.stable_key, size))
+                .flatten();
             StripItem {
                 kind: fav.kind,
                 stable_key: fav.stable_key.clone(),
                 label,
                 glyph,
                 alive,
+                icon,
             }
         })
         .collect()
+}
+
+/// Render one still-missing icon, if any, and ask for the redraw that
+/// puts it on screen.
+///
+/// Called at the *end* of the bar's paint, so the first render happens
+/// after the strip has already been drawn with its glyphs, and exactly
+/// once per frame (paint, unlike layout, is not run twice by a measuring
+/// parent). One icon costs well under a millisecond — the seven seeded
+/// primitives measure ≈5 ms in total at 96 px — so the palette fills in
+/// over a handful of frames without ever showing up in one (design §5b).
+/// Once every favourite is resolved this asks for no further redraws, so
+/// a reactive host goes idle again.
+pub(crate) fn pump_icons(state: &AppState, items: &[StripItem]) {
+    let wanted: Vec<&str> = items
+        .iter()
+        .filter(|item| item.alive && item.kind == FavoriteKind::NodeType && item.icon.is_none())
+        .map(|item| item.stable_key.as_str())
+        .collect();
+    if crate::node_icons::render_next(&state.registry, &wanted, icon_pixel_size()) {
+        agg_gui::animation::request_draw();
+    }
 }
 
 /// Palette glyph for a node type — the same category icon the Add Node
@@ -173,16 +250,50 @@ fn paint_item(ctx: &mut dyn DrawCtx, item: Rect, info: &StripItem) {
     ctx.rect(slot.x, slot.y, slot.width, slot.height);
     ctx.fill();
 
-    ctx.set_fill_color(color);
-    ctx.set_font_size(SLOT_GLYPH_SIZE);
-    // `slot` is already clamped to the item by `icon_slot`, so both axes
-    // centre on its own size.
-    ctx.fill_text(
-        &info.glyph.to_string(),
-        slot.x + (slot.width - SLOT_GLYPH_SIZE) * 0.5,
-        slot.y + (slot.height - SLOT_GLYPH_SIZE) * 0.5,
-    );
+    let blitted = info
+        .icon
+        .as_ref()
+        .is_some_and(|icon| paint_icon(ctx, slot, icon));
+    if !blitted {
+        ctx.set_fill_color(color);
+        ctx.set_font_size(SLOT_GLYPH_SIZE);
+        // `slot` is already clamped to the item by `icon_slot`, so
+        // both axes centre on its own size.
+        ctx.fill_text(
+            &info.glyph.to_string(),
+            slot.x + (slot.width - SLOT_GLYPH_SIZE) * 0.5,
+            slot.y + (slot.height - SLOT_GLYPH_SIZE) * 0.5,
+        );
+    }
     paint_label(ctx, item, &info.label, color);
+}
+
+/// Blit a rendered icon, square and centred, into the slot. Returns
+/// `false` when nothing was drawn, which is the caller's cue to paint
+/// the glyph instead.
+///
+/// The buffer is straight RGBA8 in top-down row order, which is what
+/// `draw_image_rgba_arc` takes; the `Arc` is passed through so the wgpu
+/// backend can key its texture cache on the allocation and re-use the
+/// upload across frames. Backends without a real blit (agg-gui's
+/// `gl_renderer` implements neither image entry point — the default is a
+/// no-op) answer `has_image_blit()` with `false` and get the glyph
+/// rather than an empty slot; `Label` gates its own cache the same way.
+fn paint_icon(ctx: &mut dyn DrawCtx, slot: Rect, icon: &IconImage) -> bool {
+    let side = (slot.width.min(slot.height) - SLOT_ICON_INSET * 2.0).max(0.0);
+    if side <= 0.0 || icon.width == 0 || icon.height == 0 || !ctx.has_image_blit() {
+        return false;
+    }
+    ctx.draw_image_rgba_arc(
+        &icon.rgba,
+        icon.width,
+        icon.height,
+        slot.x + (slot.width - side) * 0.5,
+        slot.y + (slot.height - side) * 0.5,
+        side,
+        side,
+    );
+    true
 }
 
 fn paint_label(ctx: &mut dyn DrawCtx, item: Rect, label: &str, color: agg_gui::Color) {

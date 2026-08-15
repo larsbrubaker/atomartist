@@ -21,9 +21,10 @@
 //! persisted width is the **panel's** width, not the bar's.
 //!
 //! * **Collapsed** — strip + handle. Each strip item is a 44 × 44 icon
-//!   slot with a 9 px label under it. NodeType favourites get their
-//!   palette category's glyph (6f-2 replaces these with renders of the
-//!   real primitive), Project favourites a file glyph, and anything that
+//!   slot with a 9 px label under it. NodeType favourites get a render
+//!   of the real primitive once [`crate::node_icons`] has produced one
+//!   (6f-2) and their palette category's glyph until then, Project
+//!   favourites a file glyph, and anything that
 //!   no longer [`resolve`](crate::file_browser::Favorite::resolve)s is
 //!   greyed rather than pruned (design §2: the provider may come back).
 //! * **Expanded** — strip + the shared [`FileBrowser`] in its *embedded*
@@ -77,8 +78,6 @@
 //!   width is covered. That belongs with 6f-3's context-menu work, on
 //!   the floating-overlay host the drag ghost already uses.
 //!   [`Favorites::remove`] stays the model-level operation.
-//! * **Rendered primitive icons** (step 6f-2) — the 44 × 44 slot carries
-//!   a Font Awesome placeholder until then.
 //! * **Drag-to-reorder** the strip. [`Favorites::move_favorite`] is
 //!   already there for it; the gesture belongs with the drag controller,
 //!   which owns the threshold / ghost machinery this would duplicate.
@@ -719,6 +718,16 @@ impl Widget for FavoritesBar {
                 "dead",
                 self.items.iter().filter(|i| !i.alive).count().to_string(),
             ),
+            // How many favourites are showing a *rendered* primitive
+            // rather than the glyph fallback — the 6f-2 fill-in probe.
+            (
+                "icons",
+                self.items
+                    .iter()
+                    .filter(|i| i.icon.is_some())
+                    .count()
+                    .to_string(),
+            ),
             // `dragging` covers both gestures the bar can be running: a
             // handle resize and a drag-insert past its threshold
             // (design §6 — the harness's drag-in-flight probe).
@@ -754,5 +763,11 @@ impl FavoritesBar {
     }
     pub(crate) fn strip_item(&self, index: usize) -> Option<&StripItem> {
         self.items.get(index)
+    }
+    pub(crate) fn strip_items(&self) -> &[StripItem] {
+        &self.items
+    }
+    pub(crate) fn app_state(&self) -> &AppState {
+        &self.state
     }
 }

@@ -99,4 +99,12 @@ pub(crate) fn paint_bar(bar: &mut FavoritesBar, ctx: &mut dyn DrawCtx) {
     );
 
     ctx.restore();
+
+    // Last thing in the frame: render *one* still-missing primitive
+    // icon (step 6f-2). Doing it here rather than in `layout` is what
+    // makes the fill-in "deferred past first paint" — the strip has
+    // already been drawn with its glyphs by the time the first render
+    // runs, and paint happens exactly once per frame, so the palette
+    // fills in at a steady one icon per frame.
+    crate::favorites_strip::pump_icons(bar.app_state(), bar.strip_items());
 }

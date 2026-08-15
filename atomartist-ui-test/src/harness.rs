@@ -315,6 +315,21 @@ impl TestHarness {
         self
     }
 
+    /// Paint the whole tree once into a throwaway software framebuffer.
+    ///
+    /// Mirrors [`crate::widget_harness::WidgetHarness::paint_once`]: the
+    /// other helpers never paint, which leaves `paint` — text metrics,
+    /// image blits, clip arithmetic — unexercised. Running agg-gui's
+    /// software rasteriser over it turns a panic or an out-of-range blit
+    /// into a test failure instead of a user's frame. Pixels are
+    /// discarded; assertions belong on state.
+    pub fn paint_once(&mut self) -> &mut Self {
+        let mut fb = agg_gui::Framebuffer::new(self.size.0 as u32, self.size.1 as u32);
+        let mut ctx = agg_gui::GfxCtx::new(&mut fb);
+        self.app.paint(&mut ctx);
+        self
+    }
+
     /// Convert a Y-up point in *root* (screen-absolute) coordinates to the
     /// Y-down screen coordinates the event helpers take.
     pub fn to_screen(&self, p: agg_gui::Point) -> (f64, f64) {
