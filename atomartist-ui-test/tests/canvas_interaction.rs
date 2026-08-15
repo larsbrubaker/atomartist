@@ -12,7 +12,7 @@
 //! The TS originals run under a heavily mocked DOM; we test the same
 //! intent against the real `NodeCanvas` widget via `TestHarness`.
 
-use agg_gui::{Modifiers, MouseButton};
+use agg_gui::{Modifiers, MouseButton, Point};
 use atomartist_lib::graph::node::NodeId;
 use atomartist_ui_test::TestHarness;
 
@@ -77,6 +77,76 @@ fn keyboard_event_with_no_focus_does_not_panic() {
     h.key_down(agg_gui::Key::Backspace);
     let after = h.state().graph.lock().unwrap().nodes().count();
     assert_eq!(before, after, "stray keys must not delete graph nodes");
+}
+
+#[test]
+fn deleting_the_selected_node_clears_app_state_selection() {
+    // Deleting the primary-selected node must not leave `AppState`
+    // pointing at a node that no longer exists: the editor fires
+    // `on_primary_selection_changed(None)`, which `AppStateModel`
+    // mirrors into `AppState::selection`.
+    let mut h = TestHarness::with_starter_graph();
+
+    let victim = {
+        let graph = h.state().graph.lock().unwrap();
+        let id = graph.nodes().next().expect("starter graph has nodes").id;
+        id
+    };
+    let before = h.state().graph.lock().unwrap().nodes().count();
+
+    // Clicking the node both selects it and focuses the canvas, so its
+    // key handler is live.
+    let target = node_center(&h, victim);
+    h.click(target.0, target.1, MouseButton::Left);
+    assert_eq!(
+        *h.state().selection.lock().unwrap(),
+        Some(victim),
+        "clicking a node must mirror it into AppState::selection"
+    );
+
+    h.key_down(agg_gui::Key::Delete);
+
+    assert_eq!(
+        h.state().graph.lock().unwrap().nodes().count(),
+        before - 1,
+        "Delete must remove the selected node"
+    );
+    assert!(
+        !h.state()
+            .graph
+            .lock()
+            .unwrap()
+            .nodes()
+            .any(|n| n.id == victim),
+        "and it must be the node we selected"
+    );
+    assert_eq!(
+        *h.state().selection.lock().unwrap(),
+        None,
+        "the mirrored selection must not survive the node it points at"
+    );
+}
+
+/// Screen (Y-down) centre of the canvas widget drawn for `node_id`.
+///
+/// The node-editor bakes each node's pan/zoom-transformed bounds into a
+/// child `NodeWidget`, which `snapshot()` surfaces with absolute Y-up
+/// `screen_bounds`.
+fn node_center(h: &TestHarness, node_id: NodeId) -> (f64, f64) {
+    let want = node_id.0.to_string();
+    let bounds = h
+        .snapshot()
+        .into_iter()
+        .find_map(|n| {
+            let is_node = n.type_name == "NodeWidget"
+                && n.properties
+                    .iter()
+                    .any(|(key, value)| *key == "node_id" && *value == want);
+            is_node.then_some(n.screen_bounds)
+        })
+        .expect("the node has a widget on the canvas");
+    let center = Point::new(bounds.x + bounds.width * 0.5, bounds.y + bounds.height * 0.5);
+    h.to_screen(center)
 }
 
 #[test]
