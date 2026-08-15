@@ -8,6 +8,11 @@
 //!
 //! Everything here goes through the provider — no `std::fs` — which doubles
 //! as proof that the trait is sufficient for real work.
+//!
+//! Native only: `LocalFsProvider` and the blocking `await_job` are both
+//! compiled out on wasm.
+
+#![cfg(not(target_arch = "wasm32"))]
 
 use std::sync::Arc;
 

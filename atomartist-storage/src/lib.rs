@@ -19,6 +19,10 @@
 //!   the in-process reference backend and its fault-injecting wrapper.
 //! - `LocalFsProvider` (`local_fs.rs`, native only) — the `file:` scheme, and
 //!   the one place in the app allowed to touch `std::fs` for storage.
+//! - `BrowserProvider` (`browser/`, wasm only) — the `browser:` scheme,
+//!   persisting to the Origin Private File System. Its pure path / error
+//!   logic (`browser/paths.rs`) compiles everywhere and is unit-tested
+//!   natively; only the OPFS plumbing needs a browser.
 //! - [`conformance`] — the suite every provider (including third-party ones)
 //!   must pass.
 //!
@@ -28,6 +32,7 @@
 //!
 //! See `docs/storage-architecture-plan.md` for the full design.
 
+mod browser;
 pub mod conformance;
 mod error;
 mod flaky;
@@ -39,6 +44,7 @@ mod provider;
 mod registry;
 mod uri;
 
+pub use browser::BROWSER_SCHEME;
 pub use error::{StorageError, StorageResult};
 pub use flaky::{FlakyConfig, FlakyProvider};
 pub use job::{Job, JobCompleter, JobState};
@@ -52,6 +58,8 @@ pub use uri::{StorageUri, UriParseError, FILE_SCHEME};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use job::spawn_blocking;
+#[cfg(target_arch = "wasm32")]
+pub use browser::BrowserProvider;
 #[cfg(target_arch = "wasm32")]
 pub use job::spawn_local;
 #[cfg(not(target_arch = "wasm32"))]

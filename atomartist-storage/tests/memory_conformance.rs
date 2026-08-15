@@ -4,6 +4,11 @@
 //! every future provider (local filesystem, browser, HTTP) gets the same
 //! treatment, and a third-party crate calls `run_conformance` exactly the way
 //! this file does.
+//!
+//! Native only: `run_conformance` / `await_job` block, which a browser's
+//! single thread cannot do. The wasm-side suite lives in `browser_opfs.rs`.
+
+#![cfg(not(target_arch = "wasm32"))]
 
 use std::sync::Arc;
 

@@ -6,6 +6,11 @@
 //! shapes for paths that no local file can back. Only checks that need the
 //! module's internals (the write-failure branches) live inside
 //! `src/local_fs.rs`.
+//!
+//! Native only: `LocalFsProvider` and the blocking `await_job` are both
+//! compiled out on wasm.
+
+#![cfg(not(target_arch = "wasm32"))]
 
 use std::fs;
 

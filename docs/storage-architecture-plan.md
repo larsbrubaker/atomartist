@@ -355,6 +355,15 @@ account UI is shown, no network code is reachable.
    browser supports the File System Access API, with download/upload
    fallback elsewhere.
 
+   **Interim state after Phase 5b.** Saving works on the web *before* this
+   UI exists: `demo-wasm`'s `WebDialogs` is an explicitly temporary stand-in
+   that sends every save to `browser:///projects/<name>` and returns `None`
+   for open / import / export (picking an existing location needs the
+   listing pane). It answers the unsaved-changes prompt with `Cancel`, not
+   `Discard` — with no modal to ask through, making File → New look inert is
+   recoverable and discarding real work is not. The whole file disappears
+   when the browser widget lands.
+
 ---
 
 ## 8. Offline, caching, and autosave
@@ -433,6 +442,25 @@ it will ever be right now. Phase 3 was the plan's high-risk item only
 because of compatibility; with nothing to preserve, its tests are free to
 change alongside it and "did behaviour drift?" stops being a question we
 have to answer.
+
+**Phase 5 outcome (5b, browser storage).** `BrowserProvider` ships
+OPFS-backed and **unversioned**: OPFS exposes only `File.lastModified` +
+`size`, which is change *detection*, not a compare-and-swap handle, so
+`Capabilities::versioned` is `false` and any `Precondition` other than
+`None` is refused with `Unsupported` rather than checked with a race in it.
+Real preconditions arrive with the HTTP provider (phase 8), which has ETags.
+IndexedDB was not needed — OPFS alone covers project files. To test it at
+all, the conformance suite became `async`: one set of checks, driven by a
+blocking poll loop natively and awaited on the browser event loop under
+`wasm-bindgen-test` (see `atomartist-storage/README.md` for the command).
+Two windows are accepted and documented in the module header rather than
+closed: a wasm write is **not atomic** (no rename primitive to build the
+`local_fs` write-then-rename dance from), and **cancellation is
+unobservable** — `spawn_local` hands the future no `JobCompleter`, so a
+cancelled write settles the job as `Cancelled` while the OPFS operation runs
+on to completion, exactly as a cancelled `spawn_blocking` write does
+natively. Still open: web settings persistence, so `last_project_path`
+survives a reload the way it does on native.
 
 **Ordering note:** phases 1–6 deliver real user value with *no* account and
 *no* network — web file support alone justifies them. Cloud is strictly

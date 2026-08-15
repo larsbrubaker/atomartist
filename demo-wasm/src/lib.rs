@@ -17,14 +17,18 @@ use std::cell::RefCell;
 use std::sync::Arc;
 
 use agg_gui::{App, MouseButton, Modifiers, Size};
+use atomartist_storage::{BrowserProvider, StorageRegistry};
 use atomartist_ui::{
-    build_app, fresh_state_with_starter_graph, install_theme_and_fonts,
-    top_menu_bar::{FileDialogProvider, NoFileDialogs},
-    DebugWindowHandles, FirstPaintGate,
+    build_app, fresh_state_with_starter_graph_and_storage, install_theme_and_fonts,
+    top_menu_bar::FileDialogProvider, DebugWindowHandles, FirstPaintGate,
 };
+
 use demo_wgpu::{begin_frame, WgpuGfxCtx};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+
+mod dialogs;
+use dialogs::WebDialogs;
 
 thread_local! {
     static APP:      RefCell<Option<App>>           = RefCell::new(None);
@@ -281,12 +285,23 @@ async fn init_wgpu() -> Result<(), String> {
     // path yet, so we always start with the documented defaults — the
     // View → Debug windows are toggled off and laid out in their
     // first-launch positions.
-    // No storage provider is registered on the web yet: the default
-    // registry is empty, so project open / save report "no storage
-    // provider for scheme …" until `BrowserProvider` (OPFS +
-    // IndexedDB) lands in Phase 5 of the storage plan.
-    let state = fresh_state_with_starter_graph();
-    let dialogs: Arc<dyn FileDialogProvider> = Arc::new(NoFileDialogs);
+    // Storage backends this shell offers, the web mirror of
+    // `demo-native`'s registry: the browser gets the origin's private
+    // file system under the `browser:` scheme. `atomartist-ui` itself
+    // registers nothing, so the choice lives here in the shell.
+    let storage = {
+        let mut registry = StorageRegistry::new();
+        registry
+            .register(Arc::new(BrowserProvider::new()))
+            .expect("fresh registry accepts the browser storage provider");
+        Arc::new(registry)
+    };
+    let state = fresh_state_with_starter_graph_and_storage(storage);
+    // Placeholder pickers (see `dialogs.rs`): save goes to a fixed
+    // `browser:///projects/…` location so Ctrl+S persists, and open /
+    // import still do nothing until the in-app file browser lands in
+    // Phase 6.
+    let dialogs: Arc<dyn FileDialogProvider> = Arc::new(WebDialogs);
     let (root, debug) = build_app(state.clone(), dialogs, None);
     STATE.with(|c| *c.borrow_mut() = Some(state));
     let app = App::new(root);
