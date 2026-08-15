@@ -113,6 +113,13 @@ fn cell(h: &TestHarness, mode: BrowserMode, index: usize) -> Point {
     Point::new(browser.x + local.x, browser.y + local.y)
 }
 
+/// Absolute centre of the search box (its text-field part).
+fn search_box(h: &TestHarness, mode: BrowserMode) -> Point {
+    let (browser, layout) = browser_layout(h, mode);
+    let local = layout.search_field.center();
+    Point::new(browser.x + local.x, browser.y + local.y)
+}
+
 /// Absolute centre of the save-mode name field.
 fn name_field(h: &TestHarness) -> Point {
     let (browser, layout) = browser_layout(h, BrowserMode::Save);
@@ -261,6 +268,51 @@ fn escape_settles_none() {
 
     assert_eq!(job.take(), Some(Ok(None)));
     assert!(h.find_by_id("file-browser").is_none());
+}
+
+/// Escape with a search in the box clears the *search* and leaves the
+/// dialog up; only the next Escape cancels (step 6f-3).
+///
+/// This is the one place the two Escape handlers meet: the browser
+/// consumes it while there is a filter to drop, and ignores it otherwise
+/// so `ModalSheet` still closes. Asserting the job is *unsettled* in
+/// between is what makes the first half meaningful — a dialog that
+/// closed would also have "cleared" the search.
+#[test]
+fn escape_clears_the_search_before_it_cancels_the_dialog() {
+    let mut h = harness();
+    let job = h.browser_modal().open(BrowserMode::Open, "");
+    h.frame();
+
+    h.click_local(search_box(&h, BrowserMode::Open), MouseButton::Left);
+    h.type_text("alp");
+    assert_eq!(prop(&h, "file-browser", "search"), "alp");
+    assert_eq!(prop(&h, "file-browser", "entries"), "1", "the filter bites");
+
+    h.key_down(Key::Escape);
+    h.frame();
+    assert_eq!(
+        prop(&h, "file-browser", "search"),
+        "",
+        "the first Escape clears the search"
+    );
+    assert_eq!(prop(&h, "file-browser", "entries"), "3", "and unfilters");
+    assert!(
+        h.find_by_id("file-browser").is_some(),
+        "…and the dialog stays up"
+    );
+    assert!(
+        job.poll().is_pending(),
+        "…with its job still unsettled — the browser consumed the key"
+    );
+    assert!(h.browser_modal().is_open());
+
+    // Nothing left to clear: the second Escape belongs to the sheet.
+    h.key_down(Key::Escape);
+    h.frame();
+    assert_eq!(job.take(), Some(Ok(None)));
+    assert!(h.find_by_id("file-browser").is_none());
+    assert!(!h.browser_modal().is_open());
 }
 
 /// The job settles exactly once, whatever the user does afterwards: a

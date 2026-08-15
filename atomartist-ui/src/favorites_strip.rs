@@ -300,35 +300,14 @@ fn paint_label(ctx: &mut dyn DrawCtx, item: Rect, label: &str, color: agg_gui::C
     let box_ = geom::label_box(item);
     ctx.set_fill_color(color);
     ctx.set_font_size(LABEL_SIZE);
-    let text = elide(label, (box_.width - 4.0).max(0.0), LABEL_SIZE);
+    // Shared with the browser's chrome and cards — same measuring, one
+    // copy (`widget_geom::elide`, beside the `measure` it is built on).
+    let text =
+        crate::file_browser::widget_geom::elide(label, (box_.width - 4.0).max(0.0), LABEL_SIZE);
     let w = crate::file_browser::widget_geom::measure(&text, LABEL_SIZE);
     ctx.fill_text(
         &text,
         box_.x + (box_.width - w) * 0.5,
         box_.y + (box_.height - LABEL_SIZE) * 0.5,
     );
-}
-
-/// Truncate `text` with an ellipsis so it fits `max_w`. Same shape as the
-/// browser's — duplicated rather than shared because the two measure with
-/// different chrome constants and the helper is four lines of policy.
-fn elide(text: &str, max_w: f64, size: f64) -> String {
-    if max_w <= 0.0 {
-        return String::new();
-    }
-    if crate::file_browser::widget_geom::measure(text, size) <= max_w {
-        return text.to_string();
-    }
-    let mut out = String::new();
-    for ch in text.chars() {
-        let mut candidate = out.clone();
-        candidate.push(ch);
-        candidate.push('…');
-        if crate::file_browser::widget_geom::measure(&candidate, size) > max_w {
-            out.push('…');
-            return out;
-        }
-        out.push(ch);
-    }
-    out
 }

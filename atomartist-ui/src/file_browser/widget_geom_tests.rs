@@ -63,36 +63,108 @@ fn crumb_rects_advance_left_to_right() {
     assert!(rects[0].x >= area.x);
 }
 
-/// The grid tiles into whole columns and only scrolls when the content
-/// overflows.
-#[test]
-fn grid_geometry_tiles_and_bounds_the_scroll() {
-    let grid = Rect::new(0.0, 0.0, CELL_W * 3.5, CELL_H * 2.0);
-    let geo = grid_geometry(grid, 7);
-    assert_eq!(geo.cols, 3, "a partial fourth column is not usable");
-    assert_eq!(geo.rows, 3);
-    assert_eq!(geo.content_height, CELL_H * 3.0);
-    assert!((geo.max_scroll - CELL_H).abs() < 1e-9);
-
-    // Everything fits: nothing to scroll.
-    let geo = grid_geometry(grid, 3);
-    assert_eq!(geo.max_scroll, 0.0);
+/// Width of a grid holding exactly `cols` minimum-width columns and
+/// their gaps — the auto-fill boundary, to the pixel.
+fn grid_for(cols: usize, rows: f64) -> Rect {
+    let w = cols as f64 * CARD_MIN_W + (cols - 1) as f64 * GRID_GAP;
+    Rect::new(0.0, 0.0, w, rows * (CARD_H + GRID_GAP))
 }
 
-/// Cell 0 sits against the grid's top-left; scrolling moves cells up.
+/// `auto-fill minmax(120px, 1fr)`: as many whole 120 px columns as fit
+/// once the 12 px gaps are counted, then each is stretched to share the
+/// remainder.
 #[test]
-fn cells_start_at_the_top_left_and_scroll_upward() {
-    let grid = Rect::new(10.0, 20.0, CELL_W * 2.0, CELL_H * 2.0);
+fn grid_columns_auto_fill_and_stretch_to_the_width() {
+    // Exactly three minimum columns: no stretch, no fourth.
+    let grid = grid_for(3, 2.0);
+    let geo = grid_geometry(grid, 7);
+    assert_eq!(geo.cols, 3);
+    assert!((geo.card_w - CARD_MIN_W).abs() < 1e-9);
+
+    // One pixel short of a fourth column's *minimum* — still three, but
+    // now wider than the minimum.
+    let grid = Rect::new(0.0, 0.0, grid_for(4, 1.0).width - 1.0, 400.0);
+    let geo = grid_geometry(grid, 7);
+    assert_eq!(geo.cols, 3, "a partial fourth column is not usable");
+    assert!(geo.card_w > CARD_MIN_W, "1fr shares out the leftover");
+    // The cards plus their gaps fill the grid exactly.
+    let used = geo.cols as f64 * geo.card_w + (geo.cols - 1) as f64 * GRID_GAP;
+    assert!((used - grid.width).abs() < 1e-9);
+
+    // One more pixel and the fourth column appears at its minimum.
+    let grid = grid_for(4, 1.0);
+    assert_eq!(grid_geometry(grid, 7).cols, 4);
+
+    // Degenerate widths still name one column rather than zero.
+    assert_eq!(grid_geometry(Rect::new(0.0, 0.0, 10.0, 10.0), 3).cols, 1);
+}
+
+/// Rows are `CARD_H` tall with a gap between them — and no gap after the
+/// last one, so a grid that exactly fits does not scroll.
+#[test]
+fn grid_rows_are_gapped_and_bound_the_scroll() {
+    let grid = grid_for(3, 2.0);
+    let geo = grid_geometry(grid, 7);
+    assert_eq!(geo.rows, 3);
+    assert_eq!(geo.card_h, CARD_H);
+    assert!((geo.content_height - (3.0 * (CARD_H + GRID_GAP) - GRID_GAP)).abs() < 1e-9);
+    assert!(geo.max_scroll > 0.0);
+
+    // Two whole rows in a viewport exactly two rows tall: nothing to
+    // scroll (the trailing gap is not content).
+    let exact = Rect::new(0.0, 0.0, grid.width, 2.0 * CARD_H + GRID_GAP);
+    assert_eq!(grid_geometry(exact, 6).max_scroll, 0.0);
+    assert_eq!(grid_geometry(exact, 0).content_height, 0.0);
+}
+
+/// Card 0 sits against the grid's top-left; scrolling moves cards up.
+#[test]
+fn cards_start_at_the_top_left_and_scroll_upward() {
+    let grid = grid_for(2, 2.0);
     let geo = grid_geometry(grid, 6);
     let first = cell_rect(grid, &geo, 0, 0.0);
     assert_eq!(first.x, grid.x);
+    assert_eq!(first.width, geo.card_w);
+    assert_eq!(first.height, CARD_H);
     assert!((first.y + first.height - (grid.y + grid.height)).abs() < 1e-9);
+
+    // The next column starts one card plus one gap to the right.
+    let second_col = cell_rect(grid, &geo, 1, 0.0);
+    assert!((second_col.x - (first.x + geo.card_w + GRID_GAP)).abs() < 1e-9);
 
     let second_row = cell_rect(grid, &geo, 2, 0.0);
     assert!(second_row.y < first.y, "row 1 is below row 0 (Y-up)");
+    assert!((first.y - (second_row.y + CARD_H + GRID_GAP)).abs() < 1e-9);
 
-    let scrolled = cell_rect(grid, &geo, 0, CELL_H);
-    assert!((scrolled.y - (first.y + CELL_H)).abs() < 1e-9);
+    let scrolled = cell_rect(grid, &geo, 0, CARD_H);
+    assert!((scrolled.y - (first.y + CARD_H)).abs() < 1e-9);
+}
+
+/// The nav row carries a Back button left of the crumbs, and the search
+/// box is right-aligned in its own row above.
+#[test]
+fn nav_row_reserves_back_and_the_search_box_sits_top_right() {
+    let layout = BrowserLayout::compute(Size::new(800.0, 600.0), BrowserMode::Open);
+
+    assert_eq!(layout.back.width, BACK_W);
+    assert_eq!(layout.back.y, layout.crumbs.y);
+    assert!(
+        layout.crumbs.x >= layout.back.x + layout.back.width,
+        "the crumbs start right of the Back button"
+    );
+    assert!(layout.back.x >= layout.sidebar.width);
+
+    // Search: right-aligned, at least ND's 200 px, with the field inset
+    // from both the leading glyph and the trailing clear button.
+    assert!(layout.search.width >= 200.0);
+    let content_right = layout.crumbs.x + layout.crumbs.width;
+    assert!((layout.search.x + layout.search.width - content_right).abs() < 1e-9);
+    assert!(layout.search_field.x > layout.search.x);
+    assert!(
+        layout.search_field.x + layout.search_field.width <= layout.search_clear.x,
+        "the field must not cover the clear button"
+    );
+    assert!(layout.search.contains(layout.search_clear.center()));
 }
 
 /// The hit-test arithmetic and the paint rectangles must name the same
@@ -100,9 +172,9 @@ fn cells_start_at_the_top_left_and_scroll_upward() {
 /// range gets wrong.
 #[test]
 fn cell_index_at_agrees_with_cell_rect() {
-    let grid = Rect::new(10.0, 20.0, CELL_W * 3.0, CELL_H * 2.0);
+    let grid = Rect::new(10.0, 20.0, grid_for(3, 1.0).width, CARD_H * 2.0);
     let geo = grid_geometry(grid, 100);
-    for scroll in [0.0, 37.0, CELL_H * 9.0] {
+    for scroll in [0.0, 37.0, CARD_H * 9.0] {
         for index in 0..60 {
             let rect = cell_rect(grid, &geo, index, scroll);
             let centre = rect.center();
@@ -116,19 +188,19 @@ fn cell_index_at_agrees_with_cell_rect() {
             );
         }
     }
-    // Outside the grid, and inside the unused strip right of the last
-    // whole column, name nothing.
+    // Outside the grid names nothing.
     assert_eq!(
         cell_index_at(grid, &geo, Point::new(grid.x - 1.0, grid.y + 1.0), 0.0),
         None
     );
-    let wide = Rect::new(0.0, 0.0, CELL_W * 2.5, CELL_H);
-    let geo = grid_geometry(wide, 10);
-    assert_eq!(
-        cell_index_at(wide, &geo, Point::new(CELL_W * 2.2, CELL_H * 0.5), 0.0),
-        None,
-        "the partial trailing column holds no cells"
-    );
+
+    // Neither does the gap between two cards — that is background, and
+    // clicking it clears the selection.
+    let first = cell_rect(grid, &geo, 0, 0.0);
+    let in_col_gap = Point::new(first.x + first.width + GRID_GAP * 0.5, first.center().y);
+    assert_eq!(cell_index_at(grid, &geo, in_col_gap, 0.0), None);
+    let in_row_gap = Point::new(first.center().x, first.y - GRID_GAP * 0.5);
+    assert_eq!(cell_index_at(grid, &geo, in_row_gap, 0.0), None);
 }
 
 /// The visible gate is what keeps the thumbnail cache honest: a viewport
@@ -136,21 +208,23 @@ fn cell_index_at_agrees_with_cell_rect() {
 /// full rows plus the partial one scrolled into view).
 #[test]
 fn visible_range_covers_only_the_rows_on_screen() {
-    let grid = Rect::new(0.0, 0.0, CELL_W * 4.0, CELL_H * 2.0);
+    let grid = grid_for(4, 2.0);
     let count = 400;
     let geo = grid_geometry(grid, count);
+    let pitch = geo.row_pitch();
+    assert_eq!(geo.cols, 4);
 
     let (start, end) = visible_range(&geo, grid, count, 0.0);
     assert_eq!(start, 0);
     assert_eq!(end, 8, "two rows of four");
 
     // Scrolled half a row: the partially visible third row counts.
-    let (start, end) = visible_range(&geo, grid, count, CELL_H * 0.5);
+    let (start, end) = visible_range(&geo, grid, count, pitch * 0.5);
     assert_eq!(start, 0);
     assert_eq!(end, 12);
 
     // Deep into a long listing, the window stays the same size.
-    let (start, end) = visible_range(&geo, grid, count, CELL_H * 20.0);
+    let (start, end) = visible_range(&geo, grid, count, pitch * 20.0);
     assert_eq!(start, 80);
     assert_eq!(end, 88);
 

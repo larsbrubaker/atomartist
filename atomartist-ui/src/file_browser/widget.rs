@@ -66,15 +66,15 @@ use std::rc::Rc;
 
 use agg_gui::widgets::multi_click::MultiClickTracker;
 use agg_gui::{
-    font_settings, DrawCtx, Event, EventResult, HAnchor, Insets, MouseButton, Point, Rect, Size,
-    TextField, VAnchor, Widget, WidgetBase,
+    font_settings, DrawCtx, Event, EventResult, HAnchor, Insets, Key, Modifiers, MouseButton,
+    Point, Rect, Size, TextField, VAnchor, Widget, WidgetBase,
 };
 use atomartist_storage::Entry;
 
 use super::model::{BrowserModel, Crumb, Listing, ProviderRoot};
 use super::thumbs::{ThumbState, ThumbnailCache, DEFAULT_THUMB_SIZE};
 use super::widget_geom::{
-    self as geom, BrowserLayout, GridGeometry, CELL_H, FONT_SIZE, NAME_H, SEARCH_H,
+    self as geom, BrowserLayout, GridGeometry, CARD_H, FONT_SIZE, NAME_H, SEARCH_H,
 };
 use crate::app_state::AppState;
 use crate::drag_insert::{DragInsertHandle, DragPayload, GestureEnd};
@@ -149,6 +149,8 @@ impl Frame {
             grid: GridGeometry {
                 cols: 1,
                 rows: 0,
+                card_w: 0.0,
+                card_h: CARD_H,
                 content_height: 0.0,
                 max_scroll: 0.0,
             },
@@ -175,6 +177,10 @@ pub struct FileBrowser {
     /// host can read the typed name and the widget can pre-fill it from a
     /// selection.
     name_cell: Rc<RefCell<String>>,
+    /// Live text of the *search* field, bound the same way. The clear
+    /// button and Escape write through this cell, which the field picks
+    /// up on its next layout.
+    search_cell: Rc<RefCell<String>>,
     on_activate: Option<Box<dyn FnMut(&Entry)>>,
     /// Pixels scrolled down from the top of the grid content.
     scroll: f64,
@@ -216,6 +222,7 @@ impl FileBrowser {
             cache,
             mode,
             name_cell: Rc::new(RefCell::new(String::new())),
+            search_cell: Rc::new(RefCell::new(String::new())),
             on_activate: None,
             scroll: 0.0,
             laid_out: false,
@@ -369,6 +376,7 @@ impl FileBrowser {
             .with_font_size(FONT_SIZE)
             .with_placeholder("Search")
             .with_max_size(Size::new(f64::INFINITY, SEARCH_H))
+            .with_text_cell(self.search_cell.clone())
             .on_change(move |text| model.set_search(text));
         self.children.push(Box::new(search));
         if self.mode.shows_name_field() {
@@ -443,7 +451,10 @@ impl FileBrowser {
     /// Place the search / name fields into the regions layout carved for
     /// them.
     fn layout_fields(&mut self) {
-        let search = self.frame.layout.search;
+        // The *field* rect, not the whole box: the leading search glyph
+        // and the trailing clear button are ours to hit-test, so the
+        // child must not cover them.
+        let search = self.frame.layout.search_field;
         let name = self.frame.layout.name;
         if let Some(field) = self.children.get_mut(0) {
             field.layout(Size::new(search.width, search.height));
@@ -489,67 +500,13 @@ impl FileBrowser {
             cb(entry);
         }
     }
-
-    fn on_mouse_down(&mut self, pos: Point) -> EventResult {
-        let clicks = self.clicks.register(pos);
-
-        if let Some(index) = self
-            .frame
-            .sidebar_rows
-            .iter()
-            .position(|row| row.contains(pos))
-        {
-            let root = self.frame.roots[index].root.clone();
-            self.model.navigate_to(&self.state, root);
-            self.scroll = 0.0;
-            return EventResult::Consumed;
-        }
-
-        if self.frame.layout.crumbs.contains(pos) {
-            if let Some(index) = self
-                .frame
-                .crumb_rects
-                .iter()
-                .position(|rect| rect.contains(pos))
-            {
-                let uri = self.frame.crumbs[index].uri.clone();
-                self.model.navigate_to(&self.state, uri);
-                self.scroll = 0.0;
-                return EventResult::Consumed;
-            }
-            return EventResult::Consumed;
-        }
-
-        if let Some(index) = self.entry_at(pos) {
-            let entry = self.frame.entries[index].clone();
-            self.select(&entry);
-            // Exactly two, not "two or more": the tracker counts
-            // 1, 2, 3, 1, … within its window, so `>= 2` would let a
-            // third rapid press activate a second time — a double-click
-            // into a folder plus one more tap would land two levels
-            // deep, and a file would be handed to the host twice.
-            if clicks == 2 {
-                self.activate(&entry);
-            }
-            // Selection stays on the press (both ancestors do that);
-            // the drag is only a *candidate* until the pointer passes
-            // the threshold, so a plain click is unaffected.
-            if let (Some(insert), Some(payload)) = (self.insert.clone(), self.drag_payload(&entry))
-            {
-                insert.press(payload, self.to_parent(pos));
-            }
-            return EventResult::Consumed;
-        }
-
-        // Empty space inside the grid clears the selection, the way both
-        // ancestors' file panes do.
-        if self.frame.layout.grid.contains(pos) {
-            self.model.select(None);
-            return EventResult::Consumed;
-        }
-        EventResult::Ignored
-    }
 }
+
+// Presses and keys live next door, in a child module so they still reach
+// this struct's private state. See its docs for the embedded face's
+// no-keyboard contract.
+#[path = "widget_input.rs"]
+mod input;
 
 impl Widget for FileBrowser {
     fn type_name(&self) -> &'static str {
@@ -638,12 +595,25 @@ impl Widget for FileBrowser {
             Event::MouseWheel { pos, delta_y, .. } if self.frame.layout.grid.contains(*pos) => {
                 // Y-up: a positive wheel delta scrolls the content up,
                 // i.e. *decreases* how far down we are.
-                let next = self.scroll - delta_y * CELL_H * 0.5;
+                let next = self.scroll - delta_y * self.frame.grid.card_h * 0.5;
                 self.scroll = next.clamp(0.0, self.frame.grid.max_scroll);
                 EventResult::Consumed
             }
+            // Bubbled out of the focused search field — the only way a
+            // key reaches this widget through `on_event`.
+            Event::KeyDown { key, modifiers } => self.handle_key(key, *modifiers, true),
             _ => EventResult::Ignored,
         }
+    }
+
+    /// Whole-tree fallback for a key nothing focused consumed. Only
+    /// Alt+Left is ours here, and only in the modal faces — see
+    /// `widget_input`'s docs for why the embedded face stays inert.
+    fn on_unconsumed_key(&mut self, key: &Key, modifiers: Modifiers) -> EventResult {
+        if matches!(key, Key::Escape) {
+            return EventResult::Ignored;
+        }
+        self.handle_key(key, modifiers, false)
     }
 
     /// Browser state for the inspector and the UI tests (design §6 — the
@@ -675,6 +645,8 @@ impl Widget for FileBrowser {
             ),
             ("search", self.model.search()),
             ("name", self.name_text()),
+            ("back_enabled", self.model.can_go_back().to_string()),
+            ("takes_keys", self.takes_keys().to_string()),
             (
                 "visible",
                 format!("{}..{}", self.frame.visible.start, self.frame.visible.end),

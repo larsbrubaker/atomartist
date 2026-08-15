@@ -22,8 +22,10 @@
 //!   paints a [`BrowserModel`] (sidebar, breadcrumbs, grid, search, and —
 //!   in [`BrowserMode::Save`] — a name field), turns clicks into model
 //!   calls, and runs the [`ThumbnailCache`]'s visibility round once per
-//!   layout. Geometry and painting live beside it in `widget_geom` /
-//!   `widget_paint` so no file approaches the 800-line cap.
+//!   layout. Its regions and tiling live in `widget_geom`, one card's
+//!   internals in [`widget_cards`], its presses and keys in
+//!   `widget_input`, and its drawing in `widget_paint`, so no file
+//!   approaches the 800-line cap.
 //!
 //! - [`modal`] — [`FileBrowserModalHost`] plus its
 //!   [`FileBrowserModalHandle`]: the Open/Save dialog (step 6c-1). The
@@ -53,6 +55,7 @@ pub mod modal_panel;
 pub mod model;
 pub mod thumbs;
 pub mod widget;
+pub mod widget_cards;
 pub mod widget_geom;
 mod widget_paint;
 

@@ -196,6 +196,14 @@ impl WidgetHarness {
         self.frame()
     }
 
+    /// A key with explicit modifiers — for shortcuts (Alt+Left) rather
+    /// than typing, which the harness's ambient modifier state does not
+    /// cover.
+    pub fn key_down_with(&mut self, key: Key, modifiers: Modifiers) -> &mut Self {
+        self.app.on_key_down(key, modifiers);
+        self.frame()
+    }
+
     /// Type a string one `Key::Char` at a time into whatever has focus.
     pub fn type_text(&mut self, text: &str) -> &mut Self {
         for ch in text.chars() {

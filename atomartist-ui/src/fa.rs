@@ -63,6 +63,10 @@ pub const FOLDER: char = '\u{f07b}'; // fa-folder (a directory entry)
 pub const HDD: char = '\u{f0a0}'; // fa-hdd-o (a provider row)
 pub const EXCLAMATION_TRIANGLE: char = '\u{f071}'; // fa-exclamation-triangle
 pub const CIRCLE_O_NOTCH: char = '\u{f1ce}'; // fa-circle-o-notch (loading)
+pub const ARROW_LEFT: char = '\u{f060}'; // fa-arrow-left (the browser's Back button)
+pub const SEARCH: char = '\u{f002}'; // fa-search (the search box's leading glyph)
+pub const TIMES_CIRCLE: char = '\u{f057}'; // fa-times-circle (round "clear the search")
+pub const HOURGLASS: char = '\u{f254}'; // fa-hourglass (a listing still in flight)
 
 /// Every icon constant paired with its name. The coverage test iterates this,
 /// so adding a new icon above without listing it here (or with a code point
@@ -97,6 +101,10 @@ pub(crate) const ALL_ICONS: &[(&str, char)] = &[
     ("HDD", HDD),
     ("EXCLAMATION_TRIANGLE", EXCLAMATION_TRIANGLE),
     ("CIRCLE_O_NOTCH", CIRCLE_O_NOTCH),
+    ("ARROW_LEFT", ARROW_LEFT),
+    ("SEARCH", SEARCH),
+    ("TIMES_CIRCLE", TIMES_CIRCLE),
+    ("HOURGLASS", HOURGLASS),
 ];
 
 #[cfg(test)]

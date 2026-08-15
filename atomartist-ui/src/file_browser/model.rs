@@ -23,6 +23,10 @@
 //!   guard: without it, a slow listing of the directory the user just left
 //!   overwrites the fast listing of the one they are looking at.
 //!
+//! **Navigation history** is a single back stack ([`BrowserModel::back`]),
+//! not a browser-style back/forward pair: NodeDesigner's nav bar has one
+//! button, so going back pops the step instead of moving a cursor.
+//!
 //! **Sort order** is directories first, then case-insensitive by name —
 //! the default both ancestors (NodeDesigner's file grid and MatterCAD's
 //! library view) use. Entries are sorted once, when a listing lands; the
@@ -100,6 +104,11 @@ pub struct Crumb {
 /// browser has nowhere to look, and saying so beats an empty sidebar.
 const NO_PROVIDERS: &str = "No storage providers are available in this build.";
 
+/// Upper bound on the back stack. A long browsing session would
+/// otherwise grow it without limit; 64 steps is far past anything a user
+/// retraces by hand, and the oldest entry is the one dropped.
+pub const MAX_HISTORY: usize = 64;
+
 struct Inner {
     roots: Vec<ProviderRoot>,
     /// `None` only when there are no providers.
@@ -108,6 +117,9 @@ struct Inner {
     generation: u64,
     search: String,
     selected: Option<StorageUri>,
+    /// Directories left behind, oldest first — the Back button's stack.
+    /// See [`BrowserModel::back`] for the semantics.
+    history: Vec<StorageUri>,
 }
 
 /// The browser's state. Clone to share it with a continuation or a widget;
@@ -150,6 +162,7 @@ impl BrowserModel {
                 generation: 0,
                 search: String::new(),
                 selected: None,
+                history: Vec::new(),
             })),
         }
     }
@@ -252,15 +265,69 @@ impl BrowserModel {
     }
 
     /// Browse `uri`, discarding the search filter and selection that
-    /// belonged to the directory being left.
+    /// belonged to the directory being left, and remembering that
+    /// directory so [`back`](Self::back) can return to it.
+    ///
+    /// Navigating to the directory already on screen is a *re-list* — the
+    /// crumb for the current directory is clickable in both ancestors and
+    /// refreshing is what it is for — but it is not a **history** step:
+    /// recording it would let a repeated click fill the stack with copies
+    /// of one URI.
     pub fn navigate_to(&self, state: &AppState, uri: StorageUri) {
+        self.go(state, uri, true);
+    }
+
+    /// One navigation. `record` is false only for [`back`](Self::back),
+    /// which consumes a history step rather than making one — that is
+    /// what keeps the stack from growing while the user retraces it.
+    fn go(&self, state: &AppState, uri: StorageUri, record: bool) {
         {
             let mut inner = self.lock();
+            // Only the *push* is deduped: everything below still runs for
+            // a same-target navigation, so it clears and re-lists.
+            if record && inner.cwd.as_ref() != Some(&uri) {
+                if let Some(previous) = inner.cwd.clone() {
+                    inner.history.push(previous);
+                    if inner.history.len() > MAX_HISTORY {
+                        inner.history.remove(0);
+                    }
+                }
+            }
             inner.cwd = Some(uri);
             inner.search.clear();
             inner.selected = None;
         }
         self.refresh(state);
+    }
+
+    /// Return to the directory the last navigation left.
+    ///
+    /// **A plain back stack, with no forward stack** — NodeDesigner's
+    /// `file-browser-navigation.js` has exactly one button, and so do we:
+    /// going back *pops* the step rather than moving a cursor along a
+    /// list, so the directory being left during a back is not itself
+    /// recorded and there is nothing to go forward to. Reports `false`
+    /// (and changes nothing) when the stack is empty.
+    pub fn back(&self, state: &AppState) -> bool {
+        let previous = self.lock().history.pop();
+        match previous {
+            Some(uri) => {
+                self.go(state, uri, false);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether [`back`](Self::back) would go anywhere — the Back
+    /// button's enabled state.
+    pub fn can_go_back(&self) -> bool {
+        !self.lock().history.is_empty()
+    }
+
+    /// How many steps the back stack holds. For tests and the inspector.
+    pub fn history_depth(&self) -> usize {
+        self.lock().history.len()
     }
 
     /// Browse into `entry`. A file entry is not a destination, so this

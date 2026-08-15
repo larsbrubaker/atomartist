@@ -360,6 +360,116 @@ fn typing_in_the_search_field_narrows_the_grid() {
     assert_eq!(entry_names(&model), vec!["alpha.atmr"]);
 }
 
+/// The clear button empties the filter — in *both* faces, because the
+/// embedded one has no keyboard to Escape with (step 6f-3).
+#[test]
+fn the_search_clear_button_empties_the_filter() {
+    for mode in [BrowserMode::Open, BrowserMode::Embedded] {
+        let (registry, _memory) = seeded_registry();
+        let (mut h, model, _cache, _state) = mount(registry, mode);
+        let regions = layout(mode);
+
+        h.click_local(regions.search.center(), MouseButton::Left);
+        h.type_text("alp");
+        assert_eq!(prop(&h, "entries"), "1", "{mode:?}");
+
+        h.click_local(regions.search_clear.center(), MouseButton::Left);
+        assert_eq!(prop(&h, "search"), "", "{mode:?}: the clear button clears");
+        assert_eq!(prop(&h, "entries"), "4", "{mode:?}");
+        assert_eq!(entry_names(&model).len(), 4);
+
+        // And the *field* is empty too, not just the model's filter, so
+        // typing again does not resume mid-word. (The press on the clear
+        // button takes focus off the field, so the test re-focuses it —
+        // the same thing a user does.)
+        h.click_local(regions.search.center(), MouseButton::Left);
+        h.type_text("b");
+        assert_eq!(prop(&h, "search"), "b", "{mode:?}");
+    }
+}
+
+/// Escape clears the search when the field has focus, and otherwise
+/// falls through — a modal must still be cancellable with it.
+#[test]
+fn escape_clears_the_search_only_while_it_holds_something() {
+    use agg_gui::Key;
+
+    let (registry, _memory) = seeded_registry();
+    let (mut h, _model, _cache, _state) = mount(registry, BrowserMode::Open);
+
+    h.click_local(layout(BrowserMode::Open).search.center(), MouseButton::Left);
+    h.type_text("alp");
+    h.key_down(Key::Escape);
+    assert_eq!(prop(&h, "search"), "");
+
+    // That an Escape with *nothing* to clear falls through to the host
+    // needs a host to fall through to, so it is asserted where one
+    // exists: `file_browser_modal.rs`'s
+    // `escape_clears_the_search_before_it_cancels_the_dialog`.
+}
+
+// ── Back button and history ───────────────────────────────────────────────
+
+/// The Back button walks the navigation history and reports itself
+/// disabled once the history is empty.
+#[test]
+fn the_back_button_retraces_navigation_and_disables_at_the_start() {
+    let (registry, _memory) = seeded_registry();
+    let (mut h, model, _cache, _state) = mount(registry, BrowserMode::Open);
+    let back = layout(BrowserMode::Open).back.center();
+    assert_eq!(prop(&h, "back_enabled"), "false", "nothing to go back to");
+
+    // A press on a disabled Back is inert — and must not fall through to
+    // the grid and clear a selection.
+    let beta = cell_center(&model, BrowserMode::Open, index_of(&model, "beta.atmr"));
+    h.click_local(beta, MouseButton::Left);
+    h.click_local(back, MouseButton::Left);
+    assert_eq!(prop(&h, "cwd"), "mem:///");
+    assert_eq!(prop(&h, "selected"), "beta.atmr");
+
+    let docs = cell_center(&model, BrowserMode::Open, index_of(&model, "docs"));
+    h.double_click_local(docs, MouseButton::Left);
+    assert_eq!(prop(&h, "cwd"), "mem:///docs");
+    assert_eq!(prop(&h, "back_enabled"), "true");
+
+    h.click_local(back, MouseButton::Left);
+    assert_eq!(prop(&h, "cwd"), "mem:///");
+    assert_eq!(prop(&h, "entries"), "4", "back re-lists the directory");
+    assert_eq!(prop(&h, "back_enabled"), "false", "back to the start");
+}
+
+/// Alt+Left is Back — in the modal faces only. The embedded face lives
+/// in the ordinary widget tree beside the node canvas and must never
+/// grab a key (NodeDesigner's `mountEmbedded()` contract).
+#[test]
+fn alt_left_goes_back_in_the_modal_face_and_is_inert_when_embedded() {
+    use agg_gui::{Key, Modifiers};
+
+    let alt = Modifiers {
+        alt: true,
+        ..Modifiers::default()
+    };
+
+    for (mode, expected) in [
+        (BrowserMode::Open, "mem:///"),
+        (BrowserMode::Embedded, "mem:///docs"),
+    ] {
+        let (registry, _memory) = seeded_registry();
+        let (mut h, model, _cache, _state) = mount(registry, mode);
+        assert_eq!(
+            prop(&h, "takes_keys"),
+            (mode != BrowserMode::Embedded).to_string()
+        );
+
+        let docs = cell_center(&model, mode, index_of(&model, "docs"));
+        h.double_click_local(docs, MouseButton::Left);
+        assert_eq!(prop(&h, "cwd"), "mem:///docs");
+
+        h.key_down_with(Key::ArrowLeft, alt);
+        assert_eq!(prop(&h, "cwd"), expected, "{mode:?}");
+    }
+}
+
 // ── Listing states ────────────────────────────────────────────────────────
 
 /// An empty directory says so; it never paints as a blank pane.
@@ -473,9 +583,12 @@ fn thumbnails_are_requested_only_for_the_rows_on_screen() {
 
     let grid = layout(BrowserMode::Open).grid;
     let window = {
-        let cols = ((grid.width / geom::CELL_W).floor() as usize).max(1);
-        let rows = (grid.height / geom::CELL_H).ceil() as usize + 1;
-        cols * rows
+        // The card grid is width-driven now (auto-fill `minmax(120, 1fr)`),
+        // so the column count comes off the geometry rather than a
+        // constant cell width.
+        let geo = geom::grid_geometry(grid, total);
+        let rows = (grid.height / geo.row_pitch()).ceil() as usize + 1;
+        geo.cols * rows
     };
     let after_first_frame = cache.entry_count();
     assert!(
@@ -592,6 +705,48 @@ fn a_scroll_set_before_the_first_layout_is_clamped_later_not_discarded() {
     );
     browser.set_scroll_offset(-10.0);
     assert_eq!(browser.scroll_offset(), 0.0, "never negative");
+}
+
+/// The card the user clicks is the card that was painted: the name box
+/// sits *below* the thumbnail (ND's column, step 6f-3), both are inside
+/// the card, and a click anywhere on either selects that entry.
+#[test]
+fn a_card_puts_its_name_below_the_thumbnail_and_is_selectable_throughout() {
+    use atomartist_ui::file_browser::widget_cards;
+
+    let (registry, _memory) = seeded_registry();
+    let (mut h, model, _cache, _state) = mount(registry, BrowserMode::Open);
+
+    let regions = layout(BrowserMode::Open);
+    let geo = geom::grid_geometry(regions.grid, model.visible_entries().len());
+    let index = index_of(&model, "beta.atmr");
+    let card = geom::cell_rect(regions.grid, &geo, index, 0.0);
+    let inner = widget_cards::card_layout(card);
+
+    // Y-up: "below" means a smaller y. Thumbnail on top, name under it,
+    // date under that, everything inside the card.
+    assert!(inner.name_lines[0].y + inner.name_lines[0].height <= inner.thumb.y);
+    assert!(inner.date.y + inner.date.height <= inner.name_lines[1].y);
+    assert!(inner.thumb.y + inner.thumb.height <= card.y + card.height);
+    assert!(inner.date.y >= card.y);
+    assert_eq!(inner.thumb.width, geom::THUMB_W);
+    assert_eq!(inner.thumb.height, geom::THUMB_H);
+
+    // Clicking the thumbnail and clicking the name both select the card,
+    // and the selection is reported through `properties()`.
+    h.click_local(inner.thumb.center(), MouseButton::Left);
+    assert_eq!(prop(&h, "selected"), "beta.atmr");
+    h.click_local(regions.grid.center(), MouseButton::Left);
+    h.click_local(inner.name_lines[0].center(), MouseButton::Left);
+    assert_eq!(prop(&h, "selected"), "beta.atmr");
+
+    // The gap between two cards is background: it clears the selection
+    // rather than selecting a neighbour.
+    let gap = Point::new(card.x + card.width + geom::GRID_GAP * 0.5, card.center().y);
+    if regions.grid.contains(gap) {
+        h.click_local(gap, MouseButton::Left);
+        assert_eq!(prop(&h, "selected"), "", "the inter-card gap is background");
+    }
 }
 
 /// Sanity: the mounted widget is findable by the id the design fixed for

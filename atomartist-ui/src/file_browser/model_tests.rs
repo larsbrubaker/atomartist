@@ -262,7 +262,10 @@ fn navigation_clears_the_search_and_the_selection() {
     let model = BrowserModel::opened_on(&state);
     model.set_search("gear");
     model.select(Some(uri("/gear.atmr")));
-    assert_eq!(model.selected_entry().map(|e| e.name), Some("gear.atmr".to_string()));
+    assert_eq!(
+        model.selected_entry().map(|e| e.name),
+        Some("gear.atmr".to_string())
+    );
 
     model.navigate_to(&state, uri("/projects"));
     assert_eq!(model.search(), "");
@@ -313,7 +316,11 @@ fn a_stale_listing_never_replaces_the_current_one() {
     frames(&state, &provider, 1);
     model.navigate_to(&state, uri("/quick"));
     assert!(model.generation() > stale_generation);
-    assert_eq!(state.pending_op_count_all(), 2, "both listings are in flight");
+    assert_eq!(
+        state.pending_op_count_all(),
+        2,
+        "both listings are in flight"
+    );
 
     // The `/slow` listing lands first, into a model that has moved on.
     frames(&state, &provider, 1);
@@ -444,13 +451,150 @@ fn selection_is_single_and_resolves_against_the_listing() {
     model.select(Some(uri("/a.atmr")));
     model.select(Some(uri("/b.atmr")));
     assert_eq!(model.selected(), Some(uri("/b.atmr")));
-    assert_eq!(model.selected_entry().map(|e| e.name), Some("b.atmr".to_string()));
+    assert_eq!(
+        model.selected_entry().map(|e| e.name),
+        Some("b.atmr".to_string())
+    );
 
     model.select(Some(uri("/vanished.atmr")));
     assert_eq!(model.selected_entry(), None);
 
     model.select(None);
     assert_eq!(model.selected(), None);
+}
+
+// ── Navigation history (step 6f-3) ───────────────────────────────────────
+
+/// Every navigation records the directory it left, and Back walks that
+/// stack down one step at a time — re-listing as it goes.
+#[test]
+fn back_pops_the_directory_each_navigation_recorded() {
+    let (state, provider) = sync_state();
+    put(provider.as_ref(), "/outer/inner/leaf.atmr");
+
+    let model = BrowserModel::opened_on(&state);
+    assert!(!model.can_go_back(), "nothing has been left yet");
+    assert_eq!(model.history_depth(), 0);
+
+    model.navigate_to(&state, uri("/outer"));
+    model.navigate_to(&state, uri("/outer/inner"));
+    assert_eq!(model.history_depth(), 2);
+    assert!(model.can_go_back());
+
+    assert!(model.back(&state));
+    assert_eq!(model.cwd(), Some(uri("/outer")));
+    assert_eq!(
+        names(&model),
+        vec!["inner"],
+        "back re-lists, it does not just move the cwd"
+    );
+    assert_eq!(model.history_depth(), 1);
+
+    assert!(model.back(&state));
+    assert_eq!(model.cwd(), Some(uri("/")));
+    assert_eq!(model.history_depth(), 0);
+    assert!(!model.can_go_back());
+}
+
+/// Back at the root of the history is a no-op that reports itself — the
+/// Back button is disabled in exactly this state.
+#[test]
+fn back_with_an_empty_history_changes_nothing() {
+    let (state, provider) = sync_state();
+    put(provider.as_ref(), "/a.atmr");
+
+    let model = BrowserModel::opened_on(&state);
+    let generation = model.generation();
+    assert!(!model.back(&state));
+    assert_eq!(model.cwd(), Some(uri("/")));
+    assert_eq!(
+        model.generation(),
+        generation,
+        "a refused back must not even re-list"
+    );
+}
+
+/// Going back consumes the step rather than recording one (there is no
+/// forward stack — see [`BrowserModel::back`]), and navigating *after* a
+/// back records the directory the back landed on.
+#[test]
+fn back_does_not_record_and_there_is_no_forward() {
+    let (state, provider) = sync_state();
+    put(provider.as_ref(), "/outer/inner/leaf.atmr");
+    put(provider.as_ref(), "/other/x.atmr");
+
+    let model = BrowserModel::opened_on(&state);
+    model.navigate_to(&state, uri("/outer"));
+    model.back(&state);
+    assert_eq!(model.cwd(), Some(uri("/")));
+    assert_eq!(
+        model.history_depth(),
+        0,
+        "the directory a back leaves is not itself a history step"
+    );
+
+    // The step forward is gone; a fresh navigation starts a new one.
+    model.navigate_to(&state, uri("/other"));
+    assert_eq!(model.history_depth(), 1);
+    model.back(&state);
+    assert_eq!(model.cwd(), Some(uri("/")));
+}
+
+/// Re-navigating to the directory already on screen is not a history
+/// step — clicking the last crumb twice must not need two Backs to undo
+/// — but it is still a *re-list*: the filter and the selection are
+/// cleared and the directory is read again, which is what makes the
+/// current crumb a refresh button.
+#[test]
+fn navigating_to_the_current_directory_records_nothing() {
+    let (state, provider) = sync_state();
+    put(provider.as_ref(), "/outer/inner.atmr");
+
+    let model = BrowserModel::opened_on(&state);
+    model.navigate_to(&state, uri("/outer"));
+    let generation = model.generation();
+    model.set_search("inn");
+    model.select(Some(uri("/outer/inner.atmr")));
+
+    model.navigate_to(&state, uri("/outer"));
+    model.navigate_to(&state, uri("/outer"));
+    assert_eq!(model.history_depth(), 1, "no history for a same-target hop");
+    assert_eq!(model.search(), "", "but it still clears the filter");
+    assert_eq!(model.selected(), None, "and the selection");
+    assert!(
+        model.generation() > generation,
+        "and it re-lists the directory"
+    );
+    assert_eq!(names(&model), vec!["inner.atmr"]);
+
+    model.back(&state);
+    assert_eq!(model.cwd(), Some(uri("/")));
+}
+
+/// `up` and `enter_dir` go through the same recorder, so the Back button
+/// retraces them too — and the stack is bounded.
+#[test]
+fn up_and_enter_are_recorded_and_the_stack_is_bounded() {
+    let (state, provider) = sync_state();
+    put(provider.as_ref(), "/outer/inner/leaf.atmr");
+
+    let model = BrowserModel::opened_on(&state);
+    let outer = model
+        .visible_entries()
+        .into_iter()
+        .find(|e| e.name == "outer")
+        .expect("the seeded directory is listed");
+    assert!(model.enter_dir(&state, &outer));
+    assert!(model.up(&state));
+    assert_eq!(model.history_depth(), 2, "both are navigations");
+    model.back(&state);
+    assert_eq!(model.cwd(), Some(uri("/outer")));
+
+    // The stack drops its oldest entry rather than growing forever.
+    for i in 0..(MAX_HISTORY + 10) {
+        model.navigate_to(&state, uri(&format!("/dir-{i}")));
+    }
+    assert_eq!(model.history_depth(), MAX_HISTORY);
 }
 
 /// Every clone is a view onto the same state — the widget's copy and the
