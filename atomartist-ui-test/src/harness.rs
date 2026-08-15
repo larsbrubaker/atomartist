@@ -170,6 +170,10 @@ impl TestHarness {
         // across multiple harness instances in one test process.
         let font = Arc::new(Font::from_bytes(FONT_BYTES.to_vec()).expect("bundled NotoSans"));
         agg_gui::font_settings::set_system_font(Some(font));
+        // Same storage completion hook both shells install, so a test
+        // exercising an off-thread settle sees production wiring rather
+        // than a harness that gets away with polling every frame.
+        atomartist_ui::install_storage_wakeups();
         // Harness always starts with the documented default debug
         // window layout — tests that care about persistence build
         // their own UiSettings and pass it directly to build_app.

@@ -10,7 +10,9 @@
 //!   replacing `PathBuf` everywhere outside a provider.
 //! - [`Job`] (`job.rs`) — a pollable slot holding work in flight, so no
 //!   async runtime is imposed and wasm (which cannot block) uses the same
-//!   call sites as native.
+//!   call sites as native. [`set_completion_hook`] (`completion_hook.rs`)
+//!   is how a job settling on a worker thread wakes a host that sleeps
+//!   between frames instead of polling.
 //! - [`StorageProvider`] (`provider.rs`) — the object-safe plug-in trait,
 //!   plus [`Capabilities`], [`Entry`], [`Precondition`], and [`Stamp`].
 //! - [`StorageRegistry`] (`registry.rs`) — scheme -> provider lookup, in the
@@ -33,6 +35,7 @@
 //! See `docs/storage-architecture-plan.md` for the full design.
 
 mod browser;
+mod completion_hook;
 pub mod conformance;
 mod error;
 mod flaky;
@@ -45,6 +48,7 @@ mod registry;
 mod uri;
 
 pub use browser::BROWSER_SCHEME;
+pub use completion_hook::{clear_completion_hook, set_completion_hook};
 pub use error::{StorageError, StorageResult};
 pub use flaky::{FlakyConfig, FlakyProvider};
 pub use job::{Job, JobCompleter, JobState};

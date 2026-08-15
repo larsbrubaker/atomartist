@@ -622,6 +622,10 @@ fn the_storage_activity_text_renders_progress_as_a_percentage() {
 /// a frame that only keeps the loop ticking must ask for a draw *without*
 /// advancing the invalidation epoch.
 ///
+/// The keep-alive only fires for an operation that is reporting progress
+/// (see [`crate::storage_wakeup`]), so the job here is held pending with a
+/// percentage on it rather than merely being slow.
+///
 /// `invalidation_epoch` merges a process-global counter that any other
 /// test thread may bump via `signal_async_state_change`, so a single
 /// observation could be perturbed by unrelated tests; the pass condition
@@ -630,10 +634,11 @@ fn the_storage_activity_text_renders_progress_as_a_percentage() {
 #[test]
 fn the_keep_alive_does_not_advance_the_invalidation_epoch() {
     let state = state();
-    let (provider, root) = flaky(FlakyConfig::default().with_latency(1000));
+    let (job, completer) = atomartist_storage::Job::<Vec<u8>>::pending();
+    completer.set_progress(Some(0.5));
     state.submit_op(Box::new(JobOp::new(
         "Opening a.bin",
-        provider.read(&root.join("a.bin")),
+        job,
         |_state, _result| {},
     )));
 
@@ -655,7 +660,7 @@ fn the_keep_alive_does_not_advance_the_invalidation_epoch() {
         saw_stable_epoch,
         "keep-alive frames must not bump the invalidation epoch"
     );
-    state.cancel_pending_ops();
+    drop(completer);
     state.pump_storage();
 }
 

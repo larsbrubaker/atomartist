@@ -38,6 +38,7 @@ pub mod settings;
 pub mod shell_init;
 pub mod status_bar;
 pub mod storage_ops;
+pub mod storage_wakeup;
 pub mod thumbnail;
 pub mod top_level;
 pub mod top_menu_bar;
@@ -62,7 +63,7 @@ pub use node_insertion::{
 pub use settings::{
     DebugWindowState, DebugWindowsState, MainWindowState, UiSettings, WindowPlacement,
 };
-pub use shell_init::install_theme_and_fonts;
+pub use shell_init::{clear_storage_wakeups, install_storage_wakeups, install_theme_and_fonts};
 pub use storage_ops::{JobOp, Notice, NoticeLevel, PendingOp};
 pub use thumbnail::{
     framebuffer_crop_from_widget_rect, thumbnail_png_from_exact_rgba, thumbnail_png_from_rgba,

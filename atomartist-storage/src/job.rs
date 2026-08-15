@@ -274,16 +274,30 @@ impl<T> JobCompleter<T> {
         }
         // Release the guard before `self` drops: the `Drop` impl re-locks.
         drop(slot);
+        // The result is parked, so a host woken by this will see it. Fired
+        // outside the slot lock — the hook is arbitrary host code.
+        crate::completion_hook::notify_completion();
     }
 }
 
 impl<T> Drop for JobCompleter<T> {
     fn drop(&mut self) {
         let mut slot = self.lock();
-        if matches!(slot.outcome, Outcome::Pending { .. }) {
+        let settled_here = if matches!(slot.outcome, Outcome::Pending { .. }) {
             slot.outcome = Outcome::Failed(StorageError::Io(
                 "storage worker dropped without producing a result".to_string(),
             ));
+            true
+        } else {
+            false
+        };
+        drop(slot);
+        // An abandoned worker settles the job just as surely as a finished
+        // one, and a host waiting on it needs telling. `settle` has
+        // already notified for the ordinary path, so only the abandonment
+        // notifies here.
+        if settled_here {
+            crate::completion_hook::notify_completion();
         }
     }
 }

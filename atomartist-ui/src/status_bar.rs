@@ -18,10 +18,12 @@
 //!   with the file-browser phase.
 //! - When neither applies the segment vanishes and reserves no space.
 //!
-//! [`Widget::needs_draw`] reports `true` while an operation is pending, so
-//! retained ancestors keep re-rastering this strip as progress advances.
-//! That is what lets the pump's keep-alive skip the invalidation-epoch
-//! bump (see the `storage_ops` module docs).
+//! [`Widget::needs_draw`] reports `true` while an operation is reporting
+//! *progress*, so retained ancestors keep re-rastering this strip as the
+//! percentage advances. That is what lets the pump's keep-alive skip the
+//! invalidation-epoch bump (see the `storage_ops` module docs). A pending
+//! operation with nothing to animate — the file picker, waiting on the
+//! user — is drawn once and then left alone (`storage_wakeup`).
 
 use agg_gui::{
     font_settings, text::measure_text_metrics, Color, DrawCtx, Event, EventResult, HAnchor,
@@ -143,12 +145,22 @@ impl Widget for StatusBar {
         Size::new(available.width, h)
     }
 
-    /// Keep the host drawing while a storage operation is in flight so the
-    /// progress readout advances. This is the visibility-gated channel
-    /// (see [`Widget::needs_draw`]), so it also marks retained ancestors
-    /// for re-raster without an invalidation-epoch bump.
+    /// Keep the host drawing while a storage operation is reporting
+    /// *progress*, so the percentage readout advances. This is the
+    /// visibility-gated channel (see [`Widget::needs_draw`]), so it also
+    /// marks retained ancestors for re-raster without an
+    /// invalidation-epoch bump.
+    ///
+    /// Deliberately not "while anything is pending": an operation with no
+    /// progress to report — the file-picker job, which stays pending for
+    /// as long as the user reads the dialog — paints the identical strip
+    /// every frame, and asking for those frames pinned the whole app at
+    /// full framerate (step 6g-1). Its label appears the frame it is
+    /// submitted and disappears the frame it settles, both of which
+    /// request a draw of their own. Same condition the pump's keep-alive
+    /// uses — see [`crate::storage_wakeup`].
     fn needs_draw(&self) -> bool {
-        self.state.pending_op_count() > 0
+        self.state.has_progress_reporting_op()
     }
 
     fn paint(&mut self, ctx: &mut dyn DrawCtx) {

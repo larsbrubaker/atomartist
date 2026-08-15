@@ -584,6 +584,15 @@ impl EvalTask {
             }
         }
         self.viewport_dirty.store(true, Ordering::Relaxed);
+        // Same class of problem the storage completion hook solves: on
+        // native this runs on a spawned thread, and a reactive host parked
+        // in `ControlFlow::Wait` never reads the dirty flag it just set.
+        // `signal_async_state_change` publishes a cross-thread bump *and*
+        // fires the shell's host waker, so the new mesh reaches the
+        // viewport without waiting for the user to jiggle the mouse.
+        // Any-thread safe by construction (an atomic plus the waker), and
+        // a no-op beyond the atomic when no waker is installed.
+        agg_gui::animation::signal_async_state_change();
     }
 
     /// Pick the geometry bundle to display in the viewport. Returns

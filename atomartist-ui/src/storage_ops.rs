@@ -93,15 +93,20 @@
 //! backbuffers cannot otherwise see, and it happens per *operation*, not
 //! per frame.
 //!
-//! [`atomartist_storage::JobCompleter`] completions deliberately push **no**
-//! wakeup of their own: a job only settles while an operation is queued
-//! here, and a queued operation keeps the pump's keep-alive requesting the
-//! next frame, so the completion is observed on that frame. The loop only
-//! sleeps once the queue is empty.
+//! What brings the loop back for a queued operation is
+//! [`crate::storage_wakeup`]'s business: a settling
+//! [`atomartist_storage::JobCompleter`] fires the storage completion hook
+//! (which every shell points at `signal_async_state_change`, and which the
+//! native shell chains into agg-gui's host waker), and the pump keeps a
+//! per-frame keep-alive only while a *progress-reporting* operation is on
+//! screen — progress being the one thing nobody signals. Through step 6f
+//! this branch asked for a frame every frame while anything at all was
+//! queued, which pinned the app at full framerate for as long as an idle
+//! file dialog was open.
 //!
 //! # Keep-alive cost (resolves 4a's deferred item 1)
 //!
-//! The per-frame keep-alive uses `request_draw_without_invalidation`,
+//! What is left of the keep-alive uses `request_draw_without_invalidation`,
 //! reserving `request_draw` for the frames that actually apply a
 //! continuation. Reasoning, from the agg-gui sources rather than a guess:
 //! nothing re-rasters off `invalidation_epoch` — retained backbuffers key
@@ -112,10 +117,12 @@
 //! debug-inspector snapshot cache, where every bump costs a full
 //! `collect_inspector_nodes()` walk. Bumping it once per frame for the
 //! whole duration of a download therefore buys nothing and costs that
-//! walk whenever the inspector is open. The status bar still animates
-//! because [`crate::status_bar::StatusBar`] reports `needs_draw()` while
-//! an operation is in flight — the trait's purpose-built channel for an
-//! ongoing draw need, which propagates into retained ancestors.
+//! walk whenever the inspector is open. The status bar re-rasters through
+//! [`crate::status_bar::StatusBar`]'s `needs_draw()` — the trait's
+//! purpose-built channel for an ongoing draw need, which propagates into
+//! retained ancestors — and it reports that need on exactly the same
+//! condition the keep-alive uses, so the two cannot disagree about whether
+//! the app is allowed to sleep.
 //!
 //! Relationship to [`crate::app_state_storage`]: that module hands out
 //! the provider [`Job`]s and stops there. Every call site in
@@ -539,9 +546,9 @@ impl AppState {
             // that is a content change, so invalidate properly.
             agg_gui::animation::request_draw();
         } else if pending {
-            // Pure keep-alive: nothing changed, we just need the loop to
-            // come back next frame. No epoch bump — see the module docs.
-            agg_gui::animation::request_draw_without_invalidation();
+            // Nothing changed. Whether that is worth a frame depends on
+            // what is queued — see [`crate::storage_wakeup`].
+            self.request_pending_wakeup();
         }
         pending
     }

@@ -32,6 +32,7 @@ mod frame;
 mod gpu;
 mod shell_settings;
 mod thumbnail_capture;
+mod wake;
 
 use close_gate::{deferred_close_decision, DeferredClose};
 use dialogs::NativeDialogs;
@@ -129,6 +130,17 @@ fn parse_args() -> CliArgs {
 fn main() {
     let cli = parse_args();
     let event_loop = EventLoop::new().expect("event loop");
+    // Let anything that finishes off the main thread wake this loop out
+    // of `ControlFlow::Wait`. Without it the storage pump would have to
+    // keep asking for frames it does not need — see `wake`. Installed
+    // before anything can submit work (the last-project reopen below).
+    //
+    // Two links in one chain: a settling `Job` calls the storage
+    // completion hook, which signals agg-gui, which calls the host waker
+    // installed here, which pushes an event at this loop.
+    atomartist_ui::install_storage_wakeups();
+    wake::install_host_waker(event_loop.create_proxy());
+    let mut frame_probe = wake::FrameRateProbe::new();
 
     // Load persisted UI settings up-front. We need both the HUD
     // state (applied to AppState below) AND the OS window
@@ -361,6 +373,13 @@ fn main() {
                 elwt.set_control_flow(ControlFlow::Wait);
             }
             match event {
+                // The host waker's nudge (`wake::install_host_waker`).
+                // Carries no payload and needs no handler: its whole job
+                // is to get us here, and the `AboutToWait` that always
+                // follows a delivered event runs the storage pump — which
+                // reads `wants_draw()`, merging the cross-thread wakeup
+                // the signaller published before nudging us.
+                Event::UserEvent(()) => {}
                 Event::WindowEvent {
                     event: WindowEvent::CloseRequested, ..
                 } => {
@@ -563,6 +582,7 @@ fn main() {
                         &mut thumbs, &state_for_save,
                     );
                     frames_painted = frames_painted.saturating_add(1);
+                    frame_probe.frame();
 
                     // Persist HUD button states to disk if anything
                     // changed since the last save AND the user isn't
@@ -640,11 +660,14 @@ fn main() {
                     // Storage job pump, ahead of the paint decision below:
                     // a job that settled since the last frame must be
                     // applied even on a frame that ends up painting
-                    // nothing. While anything is still in flight the pump
-                    // requests a draw itself, which the `wants_draw()`
-                    // branch below turns into the next redraw — so the
-                    // loop keeps ticking until the queue drains.
+                    // nothing. The pump decides for itself whether what
+                    // is queued is worth another frame (an advancing
+                    // percentage) or only a slow re-check
+                    // (`atomartist_ui::storage_wakeup`); anything that
+                    // settles off-thread wakes us through the host waker
+                    // installed at startup instead.
                     state_for_save.pump_storage();
+                    frame_probe.wakeup(|| state_for_save.pending_op_count_all());
 
                     // Deferred close: the user answered "Save" to the
                     // close prompt and that save has now landed (the
@@ -696,10 +719,26 @@ fn main() {
                     {
                         next_scheduled_redraw = None;
                         window.request_redraw();
-                    } else if let Some(deadline) = next_scheduled_redraw {
-                        if std::time::Instant::now() >= deadline {
-                            next_scheduled_redraw = None;
-                            window.request_redraw();
+                    } else {
+                        // Nothing wants a frame *now*; the only question
+                        // left is whether a scheduled one is due or
+                        // pending. See `wake::next_turn` for why the two
+                        // deadline sources are merged rather than chained.
+                        match wake::next_turn(next_scheduled_redraw) {
+                            wake::NextTurn::Now => {
+                                next_scheduled_redraw = None;
+                                window.request_redraw();
+                            }
+                            // The control flow is applied here rather than
+                            // left to the top of the next iteration: that
+                            // decision was already made for the sleep we
+                            // are about to enter, so deferring it would
+                            // park us in `Wait` and lose the wake-up.
+                            wake::NextTurn::Until(when) => {
+                                next_scheduled_redraw = Some(when);
+                                elwt.set_control_flow(ControlFlow::WaitUntil(when));
+                            }
+                            wake::NextTurn::Indefinitely => {}
                         }
                     }
                 }
@@ -707,6 +746,12 @@ fn main() {
             }
         })
         .expect("event loop run");
+
+    // Nothing is left to wake: drop both links of the wakeup chain so a
+    // late worker thread signals into nothing (and so the retained
+    // `EventLoopProxy` goes away with the waker).
+    wake::clear_host_waker();
+    atomartist_ui::clear_storage_wakeups();
 }
 
 

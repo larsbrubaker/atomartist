@@ -65,6 +65,31 @@ pub fn install_theme_and_fonts(device_scale: f64) {
     agg_gui::font_settings::set_primary_weight(1.0 / 3.0);
 }
 
+/// Teach `atomartist-storage` how to wake the UI when a job settles off
+/// the main thread. Call once at startup, from every shell.
+///
+/// `Job` is polled, not awaited, and nothing above it re-polls on its own
+/// any more (the storage pump stopped asking for a frame per frame in step
+/// 6g-1). So a provider that completes from `spawn_blocking` has to say
+/// so: this installs `agg_gui::animation::signal_async_state_change` as
+/// the crate's completion hook, which publishes the cross-thread wakeup
+/// counter and — on a reactive host that installed one — fires the agg-gui
+/// host waker that pulls the event loop out of `Wait`.
+///
+/// Cheap, thread-safe and panic-free, as the hook's contract requires: it
+/// is an atomic increment plus, at most, an `EventLoopProxy::send_event`
+/// whose error is dropped.
+pub fn install_storage_wakeups() {
+    atomartist_storage::set_completion_hook(agg_gui::animation::signal_async_state_change);
+}
+
+/// Drop the completion hook — the shutdown counterpart of
+/// [`install_storage_wakeups`], so a worker settling a job after the UI is
+/// gone signals nothing.
+pub fn clear_storage_wakeups() {
+    atomartist_storage::clear_completion_hook();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

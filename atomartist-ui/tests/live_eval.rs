@@ -97,3 +97,47 @@ fn schedule_evaluate_eventually_populates_last_mesh() {
     assert!(state.take_viewport_dirty(), "viewport_dirty should be set after eval");
     assert!(!state.take_viewport_dirty(), "second take should clear");
 }
+
+/// A background evaluation must wake a sleeping host (step 6g-1).
+///
+/// `schedule_evaluate` publishes its mesh from a spawned thread and sets
+/// `viewport_dirty` — a flag a reactive event loop parked in winit's
+/// `Wait` will never read, because it is not running. `EvalTask::run`
+/// therefore ends with `signal_async_state_change`, which is what the
+/// host's waker hangs off. Without it the new geometry sat invisible until
+/// the user happened to move the mouse.
+#[test]
+fn a_background_evaluation_signals_the_host() {
+    let state = fresh_state();
+    let id = {
+        let mut g = state.graph.lock().unwrap();
+        add_node_with_defaults(&mut g, &state.registry, "Box", [0.0, 0.0]).unwrap()
+    };
+    state.set_display_node(Some(id));
+
+    agg_gui::animation::clear_draw_request();
+    state.schedule_evaluate();
+
+    // Wait for the worker to publish, then look at the draw signal it
+    // raised on its way out. Polling rather than sleeping a fixed amount
+    // keeps a slow machine from producing a flaky failure.
+    //
+    // Sibling tests in this binary evaluate too, and every evaluation
+    // signals, so a stray bump could satisfy the assertion below - that
+    // can only turn a real failure into a false *pass*, never the
+    // reverse, which is the direction that matters for a regression test.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline
+        && state.last_mesh_output.lock().unwrap().is_none()
+    {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(
+        state.last_mesh_output.lock().unwrap().is_some(),
+        "the background evaluation published a mesh"
+    );
+    assert!(
+        agg_gui::animation::wants_draw(),
+        "a background evaluation must raise the draw signal that wakes the host"
+    );
+}

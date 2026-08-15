@@ -23,7 +23,8 @@ use std::sync::Arc;
 use agg_gui::{App, MouseButton, Modifiers, Size};
 use atomartist_storage::{BrowserProvider, StorageRegistry};
 use atomartist_ui::{
-    build_app, fresh_state_with_starter_graph_and_storage, install_theme_and_fonts,
+    build_app, fresh_state_with_starter_graph_and_storage, install_storage_wakeups,
+    install_theme_and_fonts,
     top_menu_bar::FileDialogProvider, DebugWindowHandles, FirstPaintGate,
 };
 
@@ -152,6 +153,10 @@ pub fn start() {
     // Theme, fonts, and the full text-quality recipe — shared verbatim with
     // the native shell so the two render pixel-identically.
     install_theme_and_fonts(device_scale);
+    // Let a storage job that settles outside this tick mark the tree
+    // dirty. The rAF loop pumps it either way; the signal is what makes
+    // the Reactive paint gate let that frame through.
+    install_storage_wakeups();
 
     wasm_bindgen_futures::spawn_local(async move {
         match init_wgpu().await {
@@ -409,9 +414,15 @@ pub fn render(width: u32, height: u32, frame_ms: f64) {
     // `wants_draw()` never clears the immediate flag.
     // Storage job pump, ahead of the paint gate: a provider that
     // completed since the last tick must have its continuation applied
-    // even on a frame that is about to bail out without painting. The
-    // pump re-requests a draw while anything is still in flight, so the
-    // gate below lets the next tick through.
+    // even on a frame that is about to bail out without painting.
+    //
+    // Unlike `demo-native`, this shell needs no host waker
+    // (`agg_gui::animation::set_host_waker`) and no keep-alive from the
+    // pump: requestAnimationFrame calls `render` on every vsync no matter
+    // what the app wants, and this pump runs unconditionally on each of
+    // those ticks. The Reactive gate below only decides whether to
+    // *paint*; a settled job is applied either way, and applying one
+    // requests the draw that shows it.
     //
     // The state is cloned out of the RefCell and the borrow dropped
     // before pumping: continuations are arbitrary app code and may well
