@@ -415,7 +415,10 @@ pub fn resolve_pick(
     extension: &str,
 ) -> Option<StorageUri> {
     match mode {
-        BrowserMode::Open => model
+        // `Embedded` has no OK button to resolve; it delivers picks
+        // through `on_activate`. Reading it as "the selected file" is the
+        // truthful answer for a caller that asks anyway.
+        BrowserMode::Open | BrowserMode::Embedded => model
             .selected_entry()
             .filter(|entry| !entry.is_dir)
             .map(|entry| entry.uri),

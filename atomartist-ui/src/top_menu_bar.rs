@@ -295,7 +295,9 @@ fn build_add_node_entries(state: &AppState) -> Vec<MenuEntry> {
     out
 }
 
-fn category_icon(category: &str) -> Option<char> {
+/// Icon for a node category. Shared with the favorites bar (step 6d-2),
+/// so a pinned node type shows the same glyph the Add Node menu gives it.
+pub(crate) fn category_icon(category: &str) -> Option<char> {
     match category {
         "Primitives 2D" | "Operations 2D" => Some(fa::PENCIL),
         "Primitives 3D" => Some(fa::CUBE),

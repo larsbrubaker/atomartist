@@ -80,9 +80,9 @@ use crate::app_state::AppState;
 
 /// Which face of the browser is on screen (design §2, row 1).
 ///
-/// v1 carries the two the modal needs; the bar's embedded `component`
-/// face joins in 6d, and adding a variant here is additive because the
-/// only thing the enum drives is the name field.
+/// The two modal faces plus the favorites bar's embedded one. Adding a
+/// variant is additive: the only thing the enum drives inside the widget
+/// is whether the name field exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrowserMode {
     /// Pick an existing entry. No name field.
@@ -90,6 +90,13 @@ pub enum BrowserMode {
     /// Name a destination. Shows the name field, pre-filled from the
     /// selection.
     Save,
+    /// Live inside another panel (the favorites bar, step 6d-2). Same
+    /// sidebar / breadcrumbs / grid as [`BrowserMode::Open`], but none of
+    /// the modal-only affordances: no OK / Cancel footer and no name
+    /// field, because there is nothing to confirm — a pick is delivered
+    /// straight to the host through [`FileBrowser::on_activate`]. This is
+    /// NodeDesigner's `mountEmbedded()` split.
+    Embedded,
 }
 
 impl BrowserMode {
@@ -101,9 +108,14 @@ impl BrowserMode {
         match self {
             BrowserMode::Open => "Open",
             BrowserMode::Save => "Save",
+            BrowserMode::Embedded => "Embedded",
         }
     }
 }
+
+/// Widget id a browser carries unless [`FileBrowser::with_id`] says
+/// otherwise — the one the Open/Save modal's instance uses.
+pub const DEFAULT_ID: &str = "file-browser";
 
 /// Everything `layout` derives and `paint` / `on_event` consume. Kept in
 /// one struct so the two never read half-updated state.
@@ -169,6 +181,10 @@ pub struct FileBrowser {
     /// real. Gates the eager clamp in [`FileBrowser::set_scroll_offset`].
     laid_out: bool,
     clicks: MultiClickTracker,
+    /// Widget id, so a host that mounts a *second* browser (the favorites
+    /// bar, whose panel can be up at the same time as the modal) can give
+    /// its instance a distinct one and keep `find_widget_by_id` honest.
+    id: &'static str,
     pub(super) frame: Frame,
 }
 
@@ -199,8 +215,17 @@ impl FileBrowser {
             scroll: 0.0,
             laid_out: false,
             clicks: MultiClickTracker::default(),
+            id: DEFAULT_ID,
             frame: Frame::empty(),
         }
+    }
+
+    /// Override the widget id. Defaults to [`DEFAULT_ID`]; the favorites
+    /// bar's embedded instance uses its own so a lookup can never land on
+    /// whichever of the two happens to come first in DFS order.
+    pub fn with_id(mut self, id: &'static str) -> Self {
+        self.id = id;
+        self
     }
 
     /// Called when a *file* is double-clicked. Directories are navigated
@@ -476,7 +501,7 @@ impl Widget for FileBrowser {
     }
     /// Stable id for the harness and the inspector (design §6).
     fn id(&self) -> Option<&str> {
-        Some("file-browser")
+        Some(self.id)
     }
     fn bounds(&self) -> Rect {
         self.bounds

@@ -136,6 +136,17 @@ impl TestHarness {
         })
     }
 
+    /// Boot the tree with a caller-supplied dialog provider.
+    ///
+    /// The provider is not only what [`menu_action`](Self::menu_action)
+    /// routes through — the widget tree captures it too (the favorites
+    /// bar opens projects through the same gate the File menu uses), so
+    /// this is how a test scripts the unsaved-changes prompt for a flow
+    /// that starts with a *click* rather than a menu action.
+    pub fn with_dialogs(state: AppState, dialogs: Arc<dyn FileDialogProvider>) -> Self {
+        Self::build(state, move |_handle, _state| dialogs)
+    }
+
     /// Resize the harness viewport. Re-runs `App::layout` so widget
     /// bounds reflect the new size on the next event.
     pub fn with_size(mut self, w: u32, h: u32) -> Self {

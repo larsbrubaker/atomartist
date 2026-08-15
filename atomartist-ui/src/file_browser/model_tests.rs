@@ -279,13 +279,18 @@ fn a_slow_listing_shows_loading_until_it_lands() {
 
     let model = BrowserModel::opened_on(&state);
     assert_eq!(model.listing(), Listing::Loading);
-    assert_eq!(state.pending_op_count(), 1, "the listing is in flight");
+    // `_all`, not `pending_op_count`: listings are *quiet* operations
+    // (`storage_ops`, "Loud and quiet operations"), so the loud count —
+    // the one the File menu's busy gate reads — deliberately ignores
+    // them. See `no_file_action_is_refused_while_a_listing_is_in_flight`
+    // in `atomartist-ui-test/tests/favorites_bar.rs` for why that matters.
+    assert_eq!(state.pending_op_count_all(), 1, "the listing is in flight");
 
     frames(&state, &provider, 1);
     assert_eq!(model.listing(), Listing::Loading);
 
     frames(&state, &provider, 1);
-    assert_eq!(state.pending_op_count(), 0);
+    assert_eq!(state.pending_op_count_all(), 0);
     assert_eq!(names(&model), vec!["a.atmr"]);
 }
 
@@ -308,7 +313,7 @@ fn a_stale_listing_never_replaces_the_current_one() {
     frames(&state, &provider, 1);
     model.navigate_to(&state, uri("/quick"));
     assert!(model.generation() > stale_generation);
-    assert_eq!(state.pending_op_count(), 2, "both listings are in flight");
+    assert_eq!(state.pending_op_count_all(), 2, "both listings are in flight");
 
     // The `/slow` listing lands first, into a model that has moved on.
     frames(&state, &provider, 1);
@@ -319,7 +324,7 @@ fn a_stale_listing_never_replaces_the_current_one() {
     );
 
     frames(&state, &provider, 1);
-    assert_eq!(state.pending_op_count(), 0);
+    assert_eq!(state.pending_op_count_all(), 0);
     assert_eq!(model.cwd(), Some(uri("/quick")));
     assert_eq!(names(&model), vec!["from-quick.atmr"]);
 }
@@ -338,14 +343,14 @@ fn a_refresh_during_a_refresh_keeps_only_the_newer_result() {
 
     model.refresh(&state);
     assert_eq!(model.generation(), first + 1);
-    assert_eq!(state.pending_op_count(), 2);
+    assert_eq!(state.pending_op_count_all(), 2);
 
     // The first listing settles into a superseded generation.
     frames(&state, &provider, 1);
     assert_eq!(model.listing(), Listing::Loading);
 
     frames(&state, &provider, 1);
-    assert_eq!(state.pending_op_count(), 0);
+    assert_eq!(state.pending_op_count_all(), 0);
     assert_eq!(names(&model), vec!["a.atmr"]);
     assert_eq!(model.generation(), first + 1, "no extra refresh happened");
 }
@@ -406,7 +411,7 @@ fn a_stale_failure_cannot_overwrite_a_good_listing() {
     model.navigate_to(&state, StorageUri::new("slow", "/missing"));
     model.navigate_to(&state, StorageUri::new("fast", "/good"));
     assert_eq!(
-        state.pending_op_count(),
+        state.pending_op_count_all(),
         3,
         "all three listings are in flight"
     );
@@ -422,7 +427,7 @@ fn a_stale_failure_cannot_overwrite_a_good_listing() {
         );
     }
 
-    assert_eq!(state.pending_op_count(), 0);
+    assert_eq!(state.pending_op_count_all(), 0);
     assert_eq!(model.cwd(), Some(StorageUri::new("fast", "/good")));
     assert_eq!(names(&model), vec!["x.atmr"]);
 }

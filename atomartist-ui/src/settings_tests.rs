@@ -62,6 +62,8 @@ fn non_default_values_round_trip() {
             vec![crate::file_browser::Favorite::node_type("Box", "Box")],
             true,
         ),
+        favorites_bar_expanded: true,
+        favorites_bar_width: 312.5,
     };
     let parsed = UiSettings::from_text(&s.to_text());
     assert_eq!(s, parsed);
@@ -145,6 +147,39 @@ fn recent_projects_are_truncated_to_the_cap() {
     };
     let round_tripped = UiSettings::from_text(&s.to_text());
     assert_eq!(round_tripped.recent_projects.len(), MAX_RECENT_PROJECTS);
+}
+
+/// Forward tolerance, same rule the favorites row got in 6d-1: a blob
+/// written before the bar existed loads with the documented defaults
+/// rather than dropping the settings around it.
+#[test]
+fn old_settings_without_favorites_bar_state_still_parse() {
+    let parsed = UiSettings::from_text("turntable=false\nfavorites_seeded=true\n");
+    assert!(!parsed.turntable);
+    assert!(!parsed.favorites_bar_expanded);
+    assert_eq!(
+        parsed.favorites_bar_width,
+        crate::favorites_bar::DEFAULT_EXPANDED_W
+    );
+}
+
+/// A hand-edited (or stale) width is clamped into the range the bar can
+/// actually open at, never rejected — a bar the user cannot see or cannot
+/// get out from behind is worse than a resized one.
+#[test]
+fn favorites_bar_width_is_clamped_on_parse() {
+    let tiny = UiSettings::from_text("favorites_bar_width=4\n");
+    assert_eq!(
+        tiny.favorites_bar_width,
+        crate::favorites_bar::MIN_EXPANDED_W
+    );
+    let huge = UiSettings::from_text("favorites_bar_width=99999\n");
+    assert_eq!(huge.favorites_bar_width, crate::favorites_bar::MAX_STORED_W);
+    let nonsense = UiSettings::from_text("favorites_bar_width=NaN\n");
+    assert_eq!(
+        nonsense.favorites_bar_width,
+        crate::favorites_bar::DEFAULT_EXPANDED_W
+    );
 }
 
 #[test]

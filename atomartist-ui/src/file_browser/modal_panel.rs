@@ -119,7 +119,12 @@ impl FileBrowserModal {
         on_cancel: impl FnMut() + 'static,
     ) -> Self {
         let (title, ok_label, ok_glyph) = match mode {
-            BrowserMode::Open => ("Open Project", "Open", fa::FOLDER_OPEN),
+            // `Embedded` never reaches the modal panel (it is the
+            // favorites bar's face), but a panel built with it must still
+            // be a working Open dialog rather than a panic.
+            BrowserMode::Open | BrowserMode::Embedded => {
+                ("Open Project", "Open", fa::FOLDER_OPEN)
+            }
             BrowserMode::Save => ("Save Project", "Save", fa::SAVE),
         };
         let gate = Rc::clone(&ok_enabled);

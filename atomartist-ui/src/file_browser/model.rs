@@ -217,7 +217,15 @@ impl BrowserModel {
 
         let job = list_job(&state.storage, &dir);
         let model = self.clone();
-        state.submit_op(Box::new(JobOp::new(
+        // **Quiet** (see `crate::storage_ops`, "Loud and quiet
+        // operations"). A listing reports itself: the browser paints
+        // `Loading` / `Error` in the very pane the user is looking at, so
+        // the status bar has nothing to add. And a loud listing would
+        // make `menu_actions::storage_busy` refuse File actions — and the
+        // favorites bar's own project opens — for as long as a directory
+        // is on screen, which on an asynchronous provider is most of the
+        // time the browser is open.
+        state.submit_op(Box::new(JobOp::new_quiet(
             format!("Listing {}", uri_label(&dir)),
             job,
             move |_state, result| model.apply_listing(generation, result),

@@ -321,6 +321,13 @@ pub struct UiSettings {
     /// flag set is a row the user deliberately cleared, and stays
     /// empty across launches.
     pub favorites: Favorites,
+    /// Whether the favorites bar is expanded into its full panel. The
+    /// bar starts collapsed on a fresh install, like both ancestors'.
+    pub favorites_bar_expanded: bool,
+    /// Width the favorites bar opens to, in logical pixels. Kept across
+    /// a snap-closed collapse (design §2), and clamped on parse so a
+    /// hand-edited file can't hide the node canvas behind the bar.
+    pub favorites_bar_width: f32,
 }
 
 /// Upper bound on the persisted / displayed recent-projects list.
@@ -346,6 +353,8 @@ impl Default for UiSettings {
             // Empty and *not* seeded: the first run that has a node
             // registry in hand calls `seed_defaults_once`.
             favorites: Favorites::default(),
+            favorites_bar_expanded: false,
+            favorites_bar_width: crate::favorites_bar::DEFAULT_EXPANDED_W,
         }
     }
 }
@@ -397,9 +406,20 @@ impl UiSettings {
             // (it needs a format migration for existing files).
             out.push_str(&format!("recent_project_{}={}\n", i, uri));
         }
-        // Written unconditionally (even when false / empty): the flag
-        // is what tells the next launch whether an empty row means
-        // "user cleared it" or "never seeded".
+        // Favorites bar geometry. Both are plain scalars; the parser
+        // clamps the width, so an out-of-range value costs the user their
+        // size and nothing else.
+        out.push_str(&format!(
+            "favorites_bar_expanded={}\n",
+            self.favorites_bar_expanded
+        ));
+        out.push_str(&format!(
+            "favorites_bar_width={}\n",
+            self.favorites_bar_width
+        ));
+        // The seed flag is written unconditionally (even when false, even
+        // with an empty row): it is what tells the next launch whether an
+        // empty row means "user cleared it" or "never seeded".
         out.push_str(&format!("favorites_seeded={}\n", self.favorites.seeded()));
         for (i, fav) in self.favorites.list().iter().enumerate() {
             out.push_str(&format!("favorite_{}={}\n", i, fav.to_field()));
@@ -478,6 +498,20 @@ impl UiSettings {
                 "favorites_seeded" => {
                     if let Some(b) = parse_bool(value) {
                         favorites_seeded = b;
+                    }
+                }
+                "favorites_bar_expanded" => {
+                    if let Some(b) = parse_bool(value) {
+                        out.favorites_bar_expanded = b;
+                    }
+                }
+                "favorites_bar_width" => {
+                    // Clamped, not rejected: a stale or hand-edited width
+                    // (0, NaN, 10_000) should still open a usable bar
+                    // rather than one the user cannot see or cannot get
+                    // out from behind.
+                    if let Ok(f) = value.parse::<f32>() {
+                        out.favorites_bar_width = crate::favorites_bar::clamp_stored_width(f);
                     }
                 }
                 _ => {

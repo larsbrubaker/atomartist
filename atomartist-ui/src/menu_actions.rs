@@ -278,6 +278,34 @@ fn open_recent(state: &AppState, dialogs: &Arc<dyn FileDialogProvider>, uri: Sto
     )));
 }
 
+/// Open `uri` as the project, through the same gate and the same
+/// reporting the File menu uses.
+///
+/// The entry point for UI that already *has* a location and so needs no
+/// picker: the favorites bar's project rows and its embedded browser
+/// (step 6d-2). Routing through here rather than calling
+/// [`AppState::open_project_with_outcome`] directly is what keeps the
+/// unsaved-changes prompt in front of every destructive open — the whole
+/// reason [`confirm_discard_unsaved_then`] exists.
+///
+/// Unlike [`open_recent`] there is no `stat` pre-check: these callers
+/// name a location they have just listed or that the user just pinned, so
+/// a missing file is reported by the read itself instead of being
+/// silently pruned from a list it is not in.
+pub fn open_project_gated(
+    state: &AppState,
+    dialogs: &Arc<dyn FileDialogProvider>,
+    uri: StorageUri,
+) {
+    if storage_busy(state) {
+        return;
+    }
+    let opener = dialogs.clone();
+    confirm_discard_unsaved_then(state, dialogs, move |state| {
+        open_project_reporting(state, &opener, &uri)
+    });
+}
+
 /// Apply the current theme + accent combination to agg-gui's live
 /// visuals. Called whenever either changes — same shape as the demo's
 /// `apply_theme_visuals`.

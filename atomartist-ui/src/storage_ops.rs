@@ -23,12 +23,25 @@
 //! [`crate::menu_actions`] refuses a second File action on), and the
 //! shutdown drain waits for it.
 //!
-//! Background work the user never asked for is *quiet*
-//! ([`JobOp::new_quiet`]). The file browser's thumbnail reads
-//! ([`crate::file_browser::thumbs`]) are the first of these: a directory of
-//! previews would otherwise chatter `Preview a.atmr… (+11 more)` across the
-//! status bar, make every File menu action report "storage is busy", and
-//! hold the window open at exit for images nobody will see. A quiet
+//! Background work the user never asked for — or that reports itself
+//! somewhere better — is *quiet* ([`JobOp::new_quiet`]). Two kinds so far,
+//! both from the file browser:
+//!
+//! - **Thumbnail reads** ([`crate::file_browser::thumbs`]): a directory of
+//!   previews would otherwise chatter `Preview a.atmr… (+11 more)` across
+//!   the status bar, make every File menu action report "storage is busy",
+//!   and hold the window open at exit for images nobody will see.
+//! - **Directory listings** ([`crate::file_browser::model`]): the browser
+//!   paints its own `Loading` / `Empty` / `Error` state in the pane the
+//!   user is looking at (design §2, "never a blank pane"), so the status
+//!   bar has nothing to add. Louder than that is actively wrong: a
+//!   listing in flight would make [`crate::menu_actions`] refuse File →
+//!   Open *and* the favorites bar's own project opens, and on an
+//!   asynchronous provider something is listing for most of the time the
+//!   browser is on screen. A failed listing is still reported — in the
+//!   pane, by the browser.
+//!
+//! A quiet
 //! operation is therefore excluded from [`AppState::pending_op_status`]
 //! (and so from [`AppState::storage_activity_text`]) and from
 //! [`AppState::pending_op_count`], and [`AppState::drain_pending_ops`]

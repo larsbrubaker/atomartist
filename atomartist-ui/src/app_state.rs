@@ -166,6 +166,21 @@ pub struct AppState {
     /// persisted settings at startup; updated on every successful
     /// load / save; rendered as the File → Open Recent submenu.
     pub recent_projects: Arc<Mutex<Vec<StorageUri>>>,
+    /// Pinned entries for the left favorites rail (design §2), plus the
+    /// "have we ever seeded?" flag. Owned here — not by the bar widget —
+    /// for the same reason `recent_projects` is: the shells persist the
+    /// row through [`Self::ui_settings`](crate::AppState::ui_settings),
+    /// which runs on a frame tick with no access to the widget tree. The
+    /// bar mutates this slot and the next settings write picks it up.
+    pub favorites: Arc<Mutex<crate::file_browser::Favorites>>,
+    /// Whether the favorites bar is expanded into its full panel (`true`)
+    /// or collapsed to the icon rail (`false`). Persisted in
+    /// [`UiSettings`](crate::settings::UiSettings).
+    pub favorites_bar_expanded: Arc<Mutex<bool>>,
+    /// Width the bar opens to, in logical pixels. Kept across a
+    /// snap-closed collapse so re-opening restores the user's size —
+    /// the parts-bar behaviour the design's §2 pins down.
+    pub favorites_bar_width: Arc<Mutex<f32>>,
     /// Scheme -> storage-provider lookup used by every project IO
     /// operation (`app_state_files`). The shell decides what is in it:
     /// `demo-native` registers `LocalFsProvider`, the test harness a
@@ -214,9 +229,26 @@ impl AppState {
             t.mark_saved(&graph);
             t
         };
+        let registry = Arc::new(registry);
+        // Seed the primitive palette here rather than in the shells: the
+        // registry is in hand, and every entry point that builds an
+        // `AppState` (both shells, the UI-test harness, a bare unit test)
+        // then starts with the same rail. A shell that later applies a
+        // settings file replaces this row wholesale — including with the
+        // deliberately empty one of a user who cleared it — because
+        // `apply_ui_settings` assigns the persisted value and only *then*
+        // runs the seed-once, which the persisted flag disarms.
+        //
+        // A registry with no seed types in it (plenty of unit tests build
+        // one) leaves the flag alone — see `Favorites::seed_defaults_once`.
+        let favorites = {
+            let mut favorites = crate::file_browser::Favorites::default();
+            favorites.seed_defaults_once(&registry);
+            favorites
+        };
         Self {
             graph: Arc::new(Mutex::new(graph)),
-            registry: Arc::new(registry),
+            registry,
             undo: Arc::new(Mutex::new(UndoBuffer::new())),
             edit_stack: Arc::new(Mutex::new(Vec::new())),
             last_mesh_output: Arc::new(Mutex::new(None)),
@@ -244,6 +276,9 @@ impl AppState {
             accent_color: Arc::new(Mutex::new(agg_gui::theme::AccentColor::default())),
             change_tracker: Arc::new(Mutex::new(change_tracker)),
             recent_projects: Arc::new(Mutex::new(Vec::new())),
+            favorites: Arc::new(Mutex::new(favorites)),
+            favorites_bar_expanded: Arc::new(Mutex::new(false)),
+            favorites_bar_width: Arc::new(Mutex::new(crate::favorites_bar::DEFAULT_EXPANDED_W)),
             storage,
             pending_ops: Arc::new(Mutex::new(Vec::new())),
             notices: Arc::new(Mutex::new(Vec::new())),
@@ -634,6 +669,9 @@ impl Clone for AppState {
             accent_color: self.accent_color.clone(),
             change_tracker: self.change_tracker.clone(),
             recent_projects: self.recent_projects.clone(),
+            favorites: self.favorites.clone(),
+            favorites_bar_expanded: self.favorites_bar_expanded.clone(),
+            favorites_bar_width: self.favorites_bar_width.clone(),
             storage: self.storage.clone(),
             // Shared, not copied: a clone handed to a widget must see the
             // same in-flight operations the shell's pump drains.

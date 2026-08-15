@@ -65,6 +65,24 @@ fn seeding_is_a_no_op_once_seeded() {
     assert_eq!(favs.list(), after_first.as_slice());
 }
 
+/// A registry that knows none of the seed types is not a seeding
+/// opportunity: setting the flag over an empty list would persist as
+/// "the user cleared the rail", and the next run — with a full registry
+/// — would honour a deletion nobody made. `AppState::new` hands us
+/// exactly such a registry in unit tests.
+#[test]
+fn an_empty_registry_does_not_burn_the_seed_flag() {
+    let empty = NodeRegistry::new();
+    let mut favs = Favorites::default();
+    assert!(!favs.seed_defaults_once(&empty));
+    assert!(!favs.seeded(), "the flag must still be available");
+    assert!(favs.is_empty());
+
+    // And the real registry still seeds it afterwards.
+    assert!(favs.seed_defaults_once(&registry()));
+    assert_eq!(favs.len(), SEED_NODE_TYPES.len());
+}
+
 #[test]
 fn user_emptied_row_stays_empty_across_reload() {
     let reg = registry();

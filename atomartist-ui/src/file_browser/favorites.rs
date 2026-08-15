@@ -430,10 +430,21 @@ impl Favorites {
     /// `display_name`s come from the live registry when the type is
     /// there; a seed id missing from the registry is skipped entirely
     /// (we never pin an entry that can't resolve on the very run that
-    /// created it). The flag is set either way, so the seeding never
-    /// runs twice.
+    /// created it).
+    ///
+    /// **A registry with none of the seed types registered is not a
+    /// seeding opportunity.** Such a call would set the flag over an
+    /// empty list, and that state is indistinguishable — once persisted
+    /// — from "the user cleared the rail", so the *next* run, with a
+    /// full registry, would honour a deletion nobody made. This happens
+    /// for real: [`AppState::new`](crate::AppState::new) takes whatever
+    /// registry it is handed, and a unit test's is often empty. So the
+    /// flag moves only when there is something to seed with.
     pub fn seed_defaults_once(&mut self, registry: &NodeRegistry) -> bool {
         if self.seeded {
+            return false;
+        }
+        if !SEED_NODE_TYPES.iter().any(|id| registry.get(id).is_some()) {
             return false;
         }
         self.seeded = true;

@@ -120,6 +120,36 @@ pub fn build_app(
                 }
             }),
     );
+    // The favorites bar is docked on the *canvas's* left edge, not the
+    // window's: the 3-D viewport keeps the full width, and the bar reads
+    // as chrome belonging to the node graph (its favourites add nodes to
+    // it). So the canvas pane of the splitter is a row — bar first (=
+    // leftmost), canvas taking whatever is left. Zero gap so the bar's
+    // handle sits flush against the canvas it resizes into.
+    //
+    // The row is wrapped in a `PaneWidthProbe` so the bar can cap itself
+    // at a fraction of the *pane* — a widget cannot ask its parent how
+    // big it is, and inferring it from the flex row's two layout passes
+    // is the bug that module documents.
+    let pane_width = crate::favorites_bar_host::PaneWidth::new();
+    let favorites_bar: Box<dyn Widget> = Box::new(crate::favorites_bar::FavoritesBar::new(
+        state.clone(),
+        dialogs.clone(),
+        pane_width.clone(),
+    ));
+    let canvas_row: Box<dyn Widget> = Box::new(
+        FlexRow::new()
+            .with_gap(0.0)
+            .with_h_anchor(HAnchor::STRETCH)
+            .with_v_anchor(VAnchor::STRETCH)
+            .add(favorites_bar)
+            .add_flex(canvas, 1.0),
+    );
+    let canvas: Box<dyn Widget> = Box::new(crate::favorites_bar_host::PaneWidthProbe::new(
+        pane_width,
+        canvas_row,
+    ));
+
     // Menu bar needs a font; the demo shells install one into
     // font_settings before building the tree, so this fall-through is safe.
     let font: Arc<agg_gui::text::Font> =

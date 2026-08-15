@@ -137,7 +137,7 @@ drag_insert.rs    The gesture controller (threshold, ghost, insert /
 | 6a | Thumbnail substrate | `Metadata/thumbnail.png` in atmr write/read; viewport capture on save; `read_thumbnail_from_bytes` | — | **done** |
 | 6b | Browser core | `BrowserModel` + listing states + generation guards; `ThumbnailCache` (+ quiet storage ops); shared widget | 6a | **done** |
 | 6c | Open/Save modal | modal host; `FileDialogProvider` rewired; `WebDialogs` retired; native keeps OS dialog | 6b | **done** |
-| 6d | Favorites bar | rail + handle + lazy expanded panel (embedded browser); favorites records in `UiSettings`; seeding | 6b | |
+| 6d | Favorites bar | rail + handle + lazy expanded panel (embedded browser); favorites records in `UiSettings`; seeding | 6b | **done** |
 | 6e | Drag-drop insert | gesture controller; ghost; insert-on-enter via the existing import path; single undo; cancel semantics | 6d | |
 
 Each step: implementer → reviewer → fixes → commit, tests green

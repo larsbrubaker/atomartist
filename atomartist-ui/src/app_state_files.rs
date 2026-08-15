@@ -337,12 +337,14 @@ impl AppState {
             theme: *self.theme.lock().unwrap(),
             accent_color: *self.accent_color.lock().unwrap(),
             recent_projects: self.recent_projects.lock().unwrap().clone(),
-            // Same "not owned by AppState" caveat as `main_window` /
-            // `debug_windows`: the favorites row lives with the
-            // favorites bar (step 6d-2), so whoever owns it must
-            // splice the live value in before writing the blob —
-            // otherwise a save clears the user's row.
-            favorites: crate::file_browser::Favorites::default(),
+            // Read from the live slot, NOT defaulted: `AppState` owns the
+            // favorites row (step 6d-2) precisely so the shells' "snapshot
+            // and write" loops cannot silently clear it. Anything that is
+            // still spliced in by a shell (`main_window`, `debug_windows`)
+            // is state this struct genuinely does not own.
+            favorites: self.favorites.lock().unwrap().clone(),
+            favorites_bar_expanded: *self.favorites_bar_expanded.lock().unwrap(),
+            favorites_bar_width: *self.favorites_bar_width.lock().unwrap(),
         }
     }
 
@@ -379,6 +381,21 @@ impl AppState {
         };
         drop(c);
         *self.recent_projects.lock().unwrap() = s.recent_projects.clone();
+        // Favorites: the persisted row wins outright — including when it
+        // is empty, which is how "the user cleared the rail" survives a
+        // restart. `seed_defaults_once` then fills a row that has *never*
+        // been seeded (first launch, or a settings file predating the
+        // feature); the persisted flag makes it a no-op otherwise. Doing
+        // it here means both shells and the test harness get seeding from
+        // one place.
+        {
+            let mut favorites = s.favorites.clone();
+            favorites.seed_defaults_once(&self.registry);
+            *self.favorites.lock().unwrap() = favorites;
+        }
+        *self.favorites_bar_expanded.lock().unwrap() = s.favorites_bar_expanded;
+        *self.favorites_bar_width.lock().unwrap() =
+            crate::favorites_bar::clamp_stored_width(s.favorites_bar_width);
         *self.theme.lock().unwrap() = s.theme;
         *self.accent_color.lock().unwrap() = s.accent_color;
         // Push the restored theme + accent into agg-gui's live
