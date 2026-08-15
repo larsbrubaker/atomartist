@@ -67,6 +67,7 @@ use atomartist_storage::StorageUri;
 
 use crate::app_state::AppState;
 use crate::app_state_storage::uri_extension;
+use crate::drag_insert::{DragInsertHandle, DragPayload, GestureEnd};
 use crate::favorites_bar_geom::{self as geom, BarLayout, RAIL_W};
 use crate::favorites_bar_host::PaneWidth;
 use crate::file_browser::favorites::{Favorite, FavoriteKind, FavoriteResolution};
@@ -148,6 +149,15 @@ pub struct FavoritesBar {
     /// Whether the pin-current-project row was offered this frame.
     show_pin: bool,
     drag: Option<HandleDrag>,
+    /// Drag-insert controller shared with the embedded browser (step
+    /// 6e). `None` when the host never supplied one (unit tests that
+    /// build a bare bar) — the bar then behaves exactly as it did
+    /// before drag-insert existed.
+    insert: Option<DragInsertHandle>,
+    /// Favourite row the current press landed on. Activation waits for
+    /// the release so a press that turns into a drag does not also open
+    /// a project (`parts-bar-drag.js`'s rule).
+    pressed_row: Option<usize>,
     /// Width of the pane the bar is docked in — the basis of the
     /// [`MAX_WIDTH_FRACTION`] cap. Published by the
     /// [`PaneWidthProbe`](crate::favorites_bar_host::PaneWidthProbe) that
@@ -175,8 +185,18 @@ impl FavoritesBar {
             rows: Vec::new(),
             show_pin: false,
             drag: None,
+            insert: None,
+            pressed_row: None,
             pane_w,
         }
+    }
+
+    /// Attach the drag-insert controller (step 6e). The shell builds it
+    /// from the app's floating-overlay handle — the ghost has to live at
+    /// the top of the window's `Stack`, which only the shell can reach.
+    pub fn with_drag_insert(mut self, insert: DragInsertHandle) -> Self {
+        self.insert = Some(insert);
+        self
     }
 
     pub fn expanded(&self) -> bool {
@@ -299,14 +319,19 @@ impl FavoritesBar {
         };
         let state = self.state.clone();
         let dialogs = self.dialogs.clone();
-        FileBrowser::new(
+        let mut browser = FileBrowser::new(
             self.state.clone(),
             model,
             self.cache.clone(),
             BrowserMode::Embedded,
         )
-        .with_id(EMBEDDED_BROWSER_ID)
-        .on_activate(move |entry| {
+        .with_id(EMBEDDED_BROWSER_ID);
+        // Third drag surface (design §1.3): entries in the embedded grid
+        // feed the same controller the rail and the rows do.
+        if let Some(insert) = self.insert.clone() {
+            browser = browser.with_drag_insert(insert);
+        }
+        browser.on_activate(move |entry| {
             // Only projects are actionable here in v1; a mesh activated
             // in the bar is a 6e drag-insert concern, not an open.
             if uri_extension(&entry.uri) == crate::file_browser::PROJECT_EXTENSION {
@@ -355,8 +380,38 @@ impl FavoritesBar {
         }
     }
 
+    /// What dragging favourite `index` out of the bar would insert.
+    /// Dead favourites (unregistered type, unparsable URI) are not
+    /// draggable — there is nothing to insert.
+    fn row_payload(&self, index: usize) -> Option<DragPayload> {
+        let row = self.rows.get(index)?;
+        if !row.alive {
+            return None;
+        }
+        match row.kind {
+            FavoriteKind::NodeType => Some(DragPayload::NodeType {
+                type_id: row.stable_key.clone(),
+                label: row.label.clone(),
+                glyph: row.glyph,
+            }),
+            FavoriteKind::Project => Some(DragPayload::File {
+                uri: row.stable_key.parse::<StorageUri>().ok()?,
+                label: row.label.clone(),
+                glyph: row.glyph,
+            }),
+        }
+    }
+
     fn on_mouse_down(&mut self, pos: Point) -> EventResult {
         if self.layout.handle.contains(pos) {
+            // A press that starts a *different* gesture takes over the
+            // mouse capture, so the drag-insert in flight would never
+            // see its release: end it here rather than orphan whatever
+            // it was carrying.
+            if let Some(insert) = self.insert.clone() {
+                insert.cancel();
+            }
+            self.pressed_row = None;
             let width = self.visible_width();
             self.drag = Some(HandleDrag {
                 press_x: pos.x,
@@ -370,8 +425,14 @@ impl FavoritesBar {
         if let Some(index) = self.layout.rows.iter().position(|r| r.contains(pos)) {
             if expanded && geom::unpin_rect(self.layout.rows[index]).contains(pos) {
                 self.unpin_row(index);
-            } else {
-                self.activate_row(index);
+                return EventResult::Consumed;
+            }
+            // Activation is deferred to the release: this press may
+            // still turn into a drag, and a drag must not *also* open
+            // the project it was carrying.
+            self.pressed_row = Some(index);
+            if let (Some(insert), Some(payload)) = (self.insert.clone(), self.row_payload(index)) {
+                insert.press(payload, pos);
             }
             return EventResult::Consumed;
         }
@@ -389,6 +450,13 @@ impl FavoritesBar {
         // before the mutable borrow starts.
         let max_width = self.max_width();
         let Some(drag) = self.drag.as_mut() else {
+            // No handle gesture — the press may instead be a
+            // drag-insert (a favourite on its way to the canvas).
+            if let Some(insert) = self.insert.clone() {
+                if insert.pointer_move(pos) {
+                    return EventResult::Consumed;
+                }
+            }
             return EventResult::Ignored;
         };
         let dx = pos.x - drag.press_x;
@@ -421,8 +489,32 @@ impl FavoritesBar {
     /// "keeps ≈120 px", not the width the user actually sized to. So a
     /// released-narrow gesture writes nothing at all and the previous
     /// size stands.
-    fn on_mouse_up(&mut self) -> EventResult {
+    fn on_mouse_up(&mut self, pos: Point) -> EventResult {
         let Some(drag) = self.drag.take() else {
+            // Drag-insert release: a sub-threshold press is still the
+            // row's click, anything else was handled by the controller.
+            let pressed = self.pressed_row.take();
+            if let Some(insert) = self.insert.clone() {
+                match insert.pointer_up(pos) {
+                    GestureEnd::Click => {
+                        if let Some(index) = pressed {
+                            self.activate_row(index);
+                        }
+                        return EventResult::Consumed;
+                    }
+                    GestureEnd::Dropped | GestureEnd::Cancelled => {
+                        agg_gui::animation::request_draw();
+                        return EventResult::Consumed;
+                    }
+                    GestureEnd::None => {}
+                }
+            }
+            // No controller attached: keep the pre-6e behaviour of
+            // activating on the press's row.
+            if let Some(index) = pressed {
+                self.activate_row(index);
+                return EventResult::Consumed;
+            }
             return EventResult::Ignored;
         };
         if !drag.moved {
@@ -499,6 +591,12 @@ impl Widget for FavoritesBar {
         self.rows = self.collect_rows();
         self.show_pin = self.expanded() && self.pinnable_project().is_some();
         self.layout = geom::compute(size, self.expanded(), self.rows.len(), self.show_pin);
+        // Publish the canvas-boundary geometry the drag controller
+        // hit-tests against: the canvas is the rest of the pane to our
+        // right (see `drag_insert`'s coordinate notes).
+        if let Some(insert) = &self.insert {
+            insert.set_geometry(size.width, self.pane_w.get(), size.height);
+        }
         if let (Some(child), Some(rect)) = (self.children.first_mut(), self.layout.browser) {
             // Layout *then* place: agg-gui widgets reset their own origin
             // in `layout` (see `FileBrowser`'s module docs).
@@ -521,9 +619,33 @@ impl Widget for FavoritesBar {
             } => self.on_mouse_down(*pos),
             Event::MouseMove { pos } => self.on_mouse_move(*pos),
             Event::MouseUp {
+                pos,
                 button: MouseButton::Left,
                 ..
-            } => self.on_mouse_up(),
+            } => self.on_mouse_up(*pos),
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Escape aborts a drag-insert: the carried node goes away and the
+    /// ghost drops, leaving the undo stack untouched.
+    ///
+    /// It arrives here rather than through `on_event` because nothing in
+    /// the bar takes keyboard focus — agg-gui offers focus-less keys to
+    /// the visible tree through this hook.
+    fn on_unconsumed_key(
+        &mut self,
+        key: &agg_gui::Key,
+        _modifiers: agg_gui::Modifiers,
+    ) -> EventResult {
+        if !matches!(key, agg_gui::Key::Escape) {
+            return EventResult::Ignored;
+        }
+        match self.insert.clone() {
+            Some(insert) if insert.cancel() => {
+                self.pressed_row = None;
+                EventResult::Consumed
+            }
             _ => EventResult::Ignored,
         }
     }
@@ -543,7 +665,22 @@ impl Widget for FavoritesBar {
                 "dead",
                 self.rows.iter().filter(|r| !r.alive).count().to_string(),
             ),
-            ("dragging", self.drag.is_some().to_string()),
+            // `dragging` covers both gestures the bar can be running: a
+            // handle resize and a drag-insert past its threshold
+            // (design §6 — the harness's drag-in-flight probe).
+            (
+                "dragging",
+                (self.drag.is_some() || self.insert.as_ref().is_some_and(|i| i.is_dragging()))
+                    .to_string(),
+            ),
+            (
+                "carrying",
+                self.insert
+                    .as_ref()
+                    .and_then(|i| i.carried_node())
+                    .is_some()
+                    .to_string(),
+            ),
             (
                 "resizing",
                 self.drag.as_ref().is_some_and(|d| d.moved).to_string(),

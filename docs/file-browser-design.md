@@ -138,7 +138,7 @@ drag_insert.rs    The gesture controller (threshold, ghost, insert /
 | 6b | Browser core | `BrowserModel` + listing states + generation guards; `ThumbnailCache` (+ quiet storage ops); shared widget | 6a | **done** |
 | 6c | Open/Save modal | modal host; `FileDialogProvider` rewired; `WebDialogs` retired; native keeps OS dialog | 6b | **done** |
 | 6d | Favorites bar | rail + handle + lazy expanded panel (embedded browser); favorites records in `UiSettings`; seeding | 6b | **done** |
-| 6e | Drag-drop insert | gesture controller; ghost; insert-on-enter via the existing import path; single undo; cancel semantics | 6d | |
+| 6e | Drag-drop insert | gesture controller; ghost; insert-on-enter (node types; file payloads keep the ghost and import on release — live carry of an async import needs a MatterCAD-style placeholder, hooks left in place); single undo; cancel semantics | 6d | **done** |
 
 Each step: implementer → reviewer → fixes → commit, tests green
 throughout, harness tests over MemoryProvider + FlakyProvider so async

@@ -15,6 +15,8 @@ pub mod breadcrumb_bar;
 pub mod circular_dropdown;
 pub mod circular_icon_button;
 pub mod debug_windows;
+pub mod drag_insert;
+pub mod drag_insert_ghost;
 pub mod fa;
 pub mod favorites_bar;
 pub mod favorites_bar_geom;
@@ -41,6 +43,10 @@ pub use app_state_files::MeshExportFormat;
 pub use app_state_model::{shared_model_for, AppStateModel};
 pub use app_state_storage::{display_uri, uri_file_stem};
 pub use debug_windows::{build_debug_windows, DebugWindowHandles};
+pub use drag_insert::{
+    DragInsertHandle, DragPayload, GestureEnd, DRAG_THRESHOLD as DRAG_INSERT_THRESHOLD,
+};
+pub use drag_insert_ghost::{DragGhost, GHOST_ID as DRAG_GHOST_ID};
 pub use favorites_bar::{FavoritesBar, BAR_ID as FAVORITES_BAR_ID, EMBEDDED_BROWSER_ID};
 pub use first_paint::FirstPaintGate;
 pub use floating_overlay::{FloatingOverlayHandle, FloatingOverlayHost};

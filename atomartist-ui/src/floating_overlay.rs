@@ -89,6 +89,28 @@ impl FloatingOverlayHandle {
     pub fn is_pending(&self) -> bool {
         self.slot.borrow().is_some()
     }
+
+    /// Withdraw a *queued* spawn that has not been claimed yet, matching
+    /// on its close flag so a caller can only retract its own.
+    ///
+    /// Setting the close flag is enough for a dialog the host already
+    /// owns, but a spawn still sitting in the slot has nobody watching
+    /// that flag — the host would claim it (and show it) the next time
+    /// its children fell empty, possibly many frames later. The
+    /// drag-insert ghost hits exactly that case whenever the colour
+    /// picker occupies the host while a drag starts.
+    ///
+    /// Returns `true` when something was actually withdrawn.
+    pub fn retract(&self, close_flag: &Rc<Cell<bool>>) -> bool {
+        let mut slot = self.slot.borrow_mut();
+        let matches = slot
+            .as_ref()
+            .is_some_and(|pending| Rc::ptr_eq(&pending.close_flag, close_flag));
+        if matches {
+            *slot = None;
+        }
+        matches
+    }
 }
 
 impl Default for FloatingOverlayHandle {
@@ -380,6 +402,27 @@ mod tests {
             0,
             "host should have dropped the closed dialog"
         );
+    }
+
+    /// A queued-but-unclaimed spawn can be withdrawn — and only by
+    /// whoever holds its close flag, so one caller cannot cancel
+    /// another's dialog.
+    #[test]
+    fn retract_drops_only_the_matching_pending_spawn() {
+        let handle = FloatingOverlayHandle::new();
+        let mine = Rc::new(Cell::new(false));
+        let someone_else = Rc::new(Cell::new(false));
+        handle.set(dialog_at(Rect::new(0.0, 0.0, 10.0, 10.0)), mine.clone());
+
+        assert!(
+            !handle.retract(&someone_else),
+            "a foreign flag must not withdraw this spawn"
+        );
+        assert!(handle.is_pending());
+
+        assert!(handle.retract(&mine));
+        assert!(!handle.is_pending(), "the spawn is gone, not just flagged");
+        assert!(!handle.retract(&mine), "nothing left to withdraw");
     }
 
     /// Hit-test only claims positions inside the dialog's bounds.

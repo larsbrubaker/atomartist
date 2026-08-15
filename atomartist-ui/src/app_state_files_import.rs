@@ -32,6 +32,28 @@ use crate::app_state::AppState;
 use crate::app_state_storage::{display_uri, read_job, uri_extension, uri_label};
 use crate::storage_ops::{JobOp, NoticeLevel};
 
+/// Mesh formats a drop can bring in as a single `MeshNode`.
+pub const MESH_IMPORT_EXTENSIONS: &[&str] = &["stl", "obj", "3mf"];
+/// Scene formats a drop merges into the current graph. These place
+/// themselves, so a drop position does not apply to them.
+pub const SCENE_IMPORT_EXTENSIONS: &[&str] = &["mcx", "atmr"];
+
+/// Whether [`AppState::import_dropped_file`] can do anything with this
+/// extension (lower-case, no dot).
+///
+/// The single source of truth for "is this draggable / droppable": the
+/// browser's is-this-entry-draggable check and the import dispatch read
+/// the same lists, so a new format can never be draggable-but-not-
+/// importable (or the reverse).
+pub fn is_importable_extension(ext: &str) -> bool {
+    MESH_IMPORT_EXTENSIONS.contains(&ext) || SCENE_IMPORT_EXTENSIONS.contains(&ext)
+}
+
+/// [`is_importable_extension`] applied to a URI's extension.
+pub fn is_importable_uri(uri: &StorageUri) -> bool {
+    is_importable_extension(&uri_extension(uri))
+}
+
 impl AppState {
     /// Import a mesh file (`.stl`, `.obj`, or `.3mf`) and spawn a
     /// `MeshNode` at the supplied canvas-space position.
@@ -198,6 +220,30 @@ impl AppState {
         }
     }
 
+    /// The **drop** entry point: bring `uri` into the current scene at
+    /// `canvas_pos` (canvas-space, Y-up), dispatching on extension the
+    /// way a drop has to — silently ignoring anything we have no
+    /// importer for, because a drop can carry any file at all.
+    ///
+    /// Shared by the two surfaces that drop files into the graph so
+    /// they cannot drift apart: the OS file-drop handler wired onto the
+    /// node canvas in [`crate::top_level`], and the favorites-bar /
+    /// browser drag-insert gesture in [`crate::drag_insert`].
+    ///
+    /// Returns whether the extension was one we import.
+    pub fn import_dropped_file(&self, uri: &StorageUri, canvas_pos: [f64; 2]) -> bool {
+        let ext = uri_extension(uri);
+        if MESH_IMPORT_EXTENSIONS.contains(&ext.as_str()) {
+            self.import_mesh_file(uri, canvas_pos);
+            return true;
+        }
+        if SCENE_IMPORT_EXTENSIONS.contains(&ext.as_str()) {
+            self.import_scene_file(uri);
+            return true;
+        }
+        false
+    }
+
     /// Import a MatterControl `.mcx` scene: one MeshNode per visible
     /// surface, transforms baked into each node's `matrix` property.
     fn import_mcx_file(&self, uri: &StorageUri) {
@@ -361,7 +407,10 @@ impl AppState {
         let Some(from_uid) = graph.get(id).and_then(|n| n.outputs.first().map(|s| s.uid)) else {
             return false;
         };
-        let Some(to_uid) = graph.get(output).and_then(|n| n.inputs.last().map(|s| s.uid)) else {
+        let Some(to_uid) = graph
+            .get(output)
+            .and_then(|n| n.inputs.last().map(|s| s.uid))
+        else {
             return false;
         };
         graph

@@ -77,6 +77,7 @@ use super::widget_geom::{
     self as geom, BrowserLayout, GridGeometry, CELL_H, FONT_SIZE, NAME_H, SEARCH_H,
 };
 use crate::app_state::AppState;
+use crate::drag_insert::{DragInsertHandle, DragPayload, GestureEnd};
 
 /// Which face of the browser is on screen (design §2, row 1).
 ///
@@ -181,6 +182,10 @@ pub struct FileBrowser {
     /// real. Gates the eager clamp in [`FileBrowser::set_scroll_offset`].
     laid_out: bool,
     clicks: MultiClickTracker,
+    /// Drag-insert controller, when this browser is embedded somewhere
+    /// that can drop into the scene (the favorites bar). The modal never
+    /// gets one — dragging out of a modal has nowhere to land.
+    insert: Option<DragInsertHandle>,
     /// Widget id, so a host that mounts a *second* browser (the favorites
     /// bar, whose panel can be up at the same time as the modal) can give
     /// its instance a distinct one and keep `find_widget_by_id` honest.
@@ -215,6 +220,7 @@ impl FileBrowser {
             scroll: 0.0,
             laid_out: false,
             clicks: MultiClickTracker::default(),
+            insert: None,
             id: DEFAULT_ID,
             frame: Frame::empty(),
         }
@@ -226,6 +232,49 @@ impl FileBrowser {
     pub fn with_id(mut self, id: &'static str) -> Self {
         self.id = id;
         self
+    }
+
+    /// Make grid entries a drag source for the scene (step 6e). The
+    /// controller works in the *parent's* coordinate space (it is the
+    /// favorites bar's), so every position handed to it here is
+    /// translated by this widget's own bounds origin.
+    pub fn with_drag_insert(mut self, insert: DragInsertHandle) -> Self {
+        self.insert = Some(insert);
+        self
+    }
+
+    /// Widget-local → parent-local, the space the drag controller
+    /// speaks. `self.bounds` is parent-local by construction (the host
+    /// lays this widget out and then places it).
+    fn to_parent(&self, pos: Point) -> Point {
+        Point::new(pos.x + self.bounds.x, pos.y + self.bounds.y)
+    }
+
+    /// The payload dragging `entry` out of the grid would carry, if it
+    /// is a kind we can insert (projects and meshes; directories and
+    /// unknown formats are not draggable).
+    fn drag_payload(&self, entry: &Entry) -> Option<DragPayload> {
+        if entry.is_dir {
+            return None;
+        }
+        let ext = crate::app_state_storage::uri_extension(&entry.uri);
+        // One list, shared with the import itself, so "draggable" and
+        // "importable" can never drift apart (`.mcx` used to be missing
+        // here while the importer happily took it).
+        if !crate::app_state_files_import::is_importable_extension(&ext) {
+            return None;
+        }
+        let glyph = if crate::app_state_files_import::MESH_IMPORT_EXTENSIONS.contains(&ext.as_str())
+        {
+            crate::fa::CUBE
+        } else {
+            crate::fa::FILE_NEW
+        };
+        Some(DragPayload::File {
+            uri: entry.uri.clone(),
+            label: entry.name.clone(),
+            glyph,
+        })
     }
 
     /// Called when a *file* is double-clicked. Directories are navigated
@@ -482,6 +531,13 @@ impl FileBrowser {
             if clicks == 2 {
                 self.activate(&entry);
             }
+            // Selection stays on the press (both ancestors do that);
+            // the drag is only a *candidate* until the pointer passes
+            // the threshold, so a plain click is unaffected.
+            if let (Some(insert), Some(payload)) = (self.insert.clone(), self.drag_payload(&entry))
+            {
+                insert.press(payload, self.to_parent(pos));
+            }
             return EventResult::Consumed;
         }
 
@@ -558,6 +614,27 @@ impl Widget for FileBrowser {
                 button: MouseButton::Left,
                 ..
             } => self.on_mouse_down(*pos),
+            // A drag that started on one of our entries keeps its mouse
+            // capture here, so the controller has to be driven from this
+            // widget for as long as the gesture lasts.
+            Event::MouseMove { pos } => match self.insert.clone() {
+                Some(insert) if insert.pointer_move(self.to_parent(*pos)) => EventResult::Consumed,
+                _ => EventResult::Ignored,
+            },
+            Event::MouseUp {
+                pos,
+                button: MouseButton::Left,
+                ..
+            } => match self.insert.clone() {
+                Some(insert) => match insert.pointer_up(self.to_parent(*pos)) {
+                    GestureEnd::None => EventResult::Ignored,
+                    // The click half already ran on the press (select /
+                    // activate), so a sub-threshold release has nothing
+                    // left to do.
+                    _ => EventResult::Consumed,
+                },
+                None => EventResult::Ignored,
+            },
             Event::MouseWheel { pos, delta_y, .. } if self.frame.layout.grid.contains(*pos) => {
                 // Y-up: a positive wheel delta scrolls the content up,
                 // i.e. *decreases* how far down we are.

@@ -98,6 +98,11 @@ pub struct AppState {
     /// Latest known node-canvas zoom — written by `NodeCanvas` on each
     /// wheel event and read by `StatusBar` for the bottom-bar percentage.
     pub canvas_zoom: Arc<Mutex<f64>>,
+    /// Latest known node-canvas pan offset (editor-local translation of
+    /// canvas space) — written by the node editor on each pan / zoom and
+    /// read by [`crate::drag_insert`] to map a pointer *outside* the
+    /// canvas (over the favorites bar) into canvas coordinates.
+    pub canvas_pan: Arc<Mutex<[f64; 2]>>,
     /// Shared 3-D viewport orbit camera.  The viewport widget and the
     /// tumble cube widget both read / write this through the
     /// `Arc<Mutex<>>` so click-to-orient on the cube takes effect on
@@ -259,6 +264,7 @@ impl AppState {
             selection: Arc::new(Mutex::new(None)),
             current_file: Arc::new(Mutex::new(None)),
             canvas_zoom: Arc::new(Mutex::new(1.0)),
+            canvas_pan: Arc::new(Mutex::new([0.0, 0.0])),
             camera: Arc::new(Mutex::new(OrbitCamera::default())),
             viewport_tool: Arc::new(Mutex::new(ViewportTool::default())),
             turntable: Arc::new(Mutex::new(true)),
@@ -654,6 +660,7 @@ impl Clone for AppState {
             selection: self.selection.clone(),
             current_file: self.current_file.clone(),
             canvas_zoom: self.canvas_zoom.clone(),
+            canvas_pan: self.canvas_pan.clone(),
             camera: self.camera.clone(),
             viewport_tool: self.viewport_tool.clone(),
             turntable: self.turntable.clone(),

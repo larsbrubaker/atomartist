@@ -563,6 +563,13 @@ impl ne::NodeGraphModel for AppStateModel {
         *self.state.canvas_zoom.lock().unwrap() = zoom;
     }
 
+    /// Mirror the canvas pan so widgets outside the editor (the
+    /// favorites bar's drag-insert controller) can convert a pointer
+    /// position into canvas space at the live pan / zoom.
+    fn on_canvas_pan_changed(&mut self, pan: [f64; 2]) {
+        *self.state.canvas_pan.lock().unwrap() = pan;
+    }
+
     fn on_primary_selection_changed(&mut self, id: Option<ne::NodeId>) {
         let domain = id.map(Self::from_ne);
         self.state.set_selection(domain);

@@ -105,18 +105,13 @@ pub fn build_app(
                         );
                         continue;
                     };
-                    // Both import calls submit their read to the frame
-                    // pump and report failures as notices, so there is
-                    // no result to inspect here — a `file:` drop settles
-                    // inline, a future async provider a frame later.
-                    let ext = crate::app_state_storage::uri_extension(&uri);
-                    match ext.as_str() {
-                        "stl" | "obj" | "3mf" => {
-                            drop_state.import_mesh_file(&uri, canvas_pos)
-                        }
-                        "mcx" | "atmr" => drop_state.import_scene_file(&uri),
-                        _ => continue,
-                    }
+                    // The import submits its read to the frame pump and
+                    // reports failures as notices, so there is no result
+                    // to inspect here — a `file:` drop settles inline, a
+                    // future async provider a frame later. The same call
+                    // backs the favorites-bar drag-insert drop, so the
+                    // two surfaces cannot diverge.
+                    drop_state.import_dropped_file(&uri, canvas_pos);
                 }
             }),
     );
@@ -132,11 +127,15 @@ pub fn build_app(
     // big it is, and inferring it from the flex row's two layout passes
     // is the bug that module documents.
     let pane_width = crate::favorites_bar_host::PaneWidth::new();
-    let favorites_bar: Box<dyn Widget> = Box::new(crate::favorites_bar::FavoritesBar::new(
-        state.clone(),
-        dialogs.clone(),
-        pane_width.clone(),
-    ));
+    // Drag-insert (step 6e): the bar and its embedded browser share one
+    // gesture controller, and the ghost it floats goes into the same
+    // top-of-`Stack` overlay slot the colour picker uses.
+    let drag_insert =
+        crate::drag_insert::DragInsertHandle::new(state.clone(), overlay_handle.clone());
+    let favorites_bar: Box<dyn Widget> = Box::new(
+        crate::favorites_bar::FavoritesBar::new(state.clone(), dialogs.clone(), pane_width.clone())
+            .with_drag_insert(drag_insert),
+    );
     let canvas_row: Box<dyn Widget> = Box::new(
         FlexRow::new()
             .with_gap(0.0)
