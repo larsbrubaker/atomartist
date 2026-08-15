@@ -46,8 +46,8 @@ pub use shell_init::install_theme_and_fonts;
 pub use storage_ops::{JobOp, Notice, NoticeLevel, PendingOp};
 pub use thumbnail::{
     framebuffer_crop_from_widget_rect, thumbnail_png_from_exact_rgba, thumbnail_png_from_rgba,
-    thumbnail_png_from_rgba_region, thumbnail_source_region, CropRect, THUMBNAIL_HEIGHT,
-    THUMBNAIL_WIDTH,
+    thumbnail_png_from_rgba_region, thumbnail_source_region, viewport_framebuffer_crop, CropRect,
+    THUMBNAIL_HEIGHT, THUMBNAIL_WIDTH, VIEWPORT_WIDGET_ID,
 };
 pub use top_level::{
     build_app, fresh_state_with_builtins, fresh_state_with_builtins_and_storage,

@@ -62,6 +62,13 @@ pub use inputs::{ViewportInputs, ViewportTool};
 // the bottom of this file. Re-imported below so the widget + its
 // interaction submodules keep referring to it as `CameraDrag`.
 
+/// Stable [`Widget::id`] of the 3-D viewport. Owned here because this
+/// widget is what carries the id; hosts that need to find the viewport in
+/// a laid-out tree (the UI test harness, thumbnail crops in
+/// `atomartist-ui`) reference this constant rather than re-spelling the
+/// literal.
+pub const VIEWPORT_WIDGET_ID: &str = "viewport-3d";
+
 pub struct Viewport3dWidget {
     bounds: Rect,
     children: Vec<Box<dyn Widget>>,
@@ -513,7 +520,7 @@ impl Widget for Viewport3dWidget {
     fn type_name(&self) -> &'static str { "Viewport3dWidget" }
 
     /// Stable instance id for the test harness — see [`NodeCanvas::id`].
-    fn id(&self) -> Option<&str> { Some("viewport-3d") }
+    fn id(&self) -> Option<&str> { Some(VIEWPORT_WIDGET_ID) }
     fn h_anchor(&self) -> HAnchor { self.base.h_anchor }
     fn v_anchor(&self) -> VAnchor { self.base.v_anchor }
     fn widget_base(&self) -> Option<&WidgetBase> { Some(&self.base) }

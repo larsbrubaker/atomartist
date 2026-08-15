@@ -135,3 +135,61 @@ fn opening_a_project_with_a_preview_still_loads_the_graph() {
     h.pump_until_idle(4);
     assert_eq!(h.state().graph.lock().unwrap().nodes().count(), nodes_before);
 }
+
+/// Regression: the preview must frame the *3-D viewport*, not the node
+/// canvas below it.
+///
+/// `Widget::bounds()` is parent-local — `Viewport3dWidget::layout` even
+/// resets its own origin to (0, 0) — so deriving the crop from
+/// `find_widget_by_id(...).bounds()` produced a rect anchored at the
+/// window's bottom-left, i.e. exactly the node canvas + status bar.
+/// The crop must come from *absolute* screen bounds instead.
+#[test]
+fn thumbnail_crop_frames_the_viewport_not_the_node_canvas() {
+    let (w, h_px) = (1280u32, 720u32);
+    let h = TestHarness::new().with_size(w, h_px);
+
+    // Absolute (Y-up) placement of both panes, straight from agg-gui's
+    // inspector walk — the tree's own answer, so the test doesn't
+    // hard-code a splitter ratio.
+    let screen_rect = |type_name: &str| {
+        h.snapshot()
+            .into_iter()
+            .find(|n| n.type_name == type_name)
+            .unwrap_or_else(|| panic!("{type_name} must be in the tree"))
+            .screen_bounds
+    };
+    let viewport = screen_rect("Viewport3dWidget");
+    let canvas = screen_rect("NodeEditor");
+    // Sanity: the default layout really does stack viewport over canvas.
+    assert!(
+        viewport.y >= canvas.y + canvas.height,
+        "viewport should sit above the node canvas: {viewport:?} vs {canvas:?}"
+    );
+
+    // Framebuffer rows (top-down) each pane occupies.
+    let fb_rows = |r: agg_gui::Rect| {
+        let top = h_px as f64 - (r.y + r.height);
+        (top, top + r.height)
+    };
+    let (vp_top, vp_bottom) = fb_rows(viewport);
+    let (canvas_top, canvas_bottom) = fb_rows(canvas);
+
+    let crop = atomartist_ui::viewport_framebuffer_crop(h.app().root(), w, h_px)
+        .expect("viewport is on screen, so the capture path yields a crop");
+    let region = atomartist_ui::thumbnail_source_region(crop);
+
+    for (label, r) in [("crop", crop), ("source region", region)] {
+        let (top, bottom) = (r.y as f64, (r.y + r.h) as f64);
+        assert!(
+            top >= vp_top - 1.0 && bottom <= vp_bottom + 1.0,
+            "{label} {r:?} must lie inside the viewport's framebuffer rows \
+             {vp_top}..{vp_bottom}"
+        );
+        assert!(
+            bottom <= canvas_top || top >= canvas_bottom,
+            "{label} {r:?} must not overlap the node canvas's rows \
+             {canvas_top}..{canvas_bottom}"
+        );
+    }
+}

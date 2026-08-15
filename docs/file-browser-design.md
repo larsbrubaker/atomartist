@@ -85,14 +85,14 @@ slicers and other tools that sniff that path get our previews for free.
 - Headless shells (tests, `--screenshot-to` off-path) save without a
   thumbnail; the entry is optional forever.
 
-> **Known issue (first item for 6b):** on the default layout the
-> captured preview frames the node canvas, not the 3-D view, even
-> though the crop asks for the `"viewport-3d"` widget's rect —
-> observed identically before and after the scaled-readback switch,
-> so the suspect is the rect lookup itself (local-vs-absolute bounds
-> from `find_widget_by_id`, or the id landing on a different widget),
-> not the GPU path. Verify with `ATOMARTIST_THUMB_LOG=1` + a manual
-> save, and fix the rect derivation.
+> **Resolved (6b, first item):** the capture used to frame the node
+> canvas because `Widget::bounds()` is *parent-local* and the viewport
+> widget resets its origin to (0, 0) in layout. Fixed by adding
+> `find_widget_screen_rect` to agg-gui (absolute placement via the
+> inspector's transform walk; hidden subtrees return `None`) and
+> extracting the crop derivation into
+> `atomartist_ui::viewport_framebuffer_crop`, pinned by
+> `thumbnail_crop_frames_the_viewport_not_the_node_canvas`.
 
 Mesh files (`.stl`/`.obj`/`.3mf`) shown in the browser: 3MF may carry
 its own `Metadata/thumbnail.png` (read it); STL/OBJ get the format

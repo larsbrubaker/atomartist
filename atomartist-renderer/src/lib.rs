@@ -68,7 +68,9 @@ pub use picking::{
 };
 pub use scene_renderer::{RenderStyle, WgpuSceneRenderer};
 pub use tumble_cube::{TumbleCubeInputs, TumbleCubeWidget};
-pub use viewport_widget::{Viewport3dWidget, ViewportInputs, ViewportTool};
+pub use viewport_widget::{
+    Viewport3dWidget, ViewportInputs, ViewportTool, VIEWPORT_WIDGET_ID,
+};
 
 /// Phase 0 placeholder kept so `demo-native` / `demo-wasm` stubs continue
 /// to compile while real wiring lands. Removed in Phase 6.

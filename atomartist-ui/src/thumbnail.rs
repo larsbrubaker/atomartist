@@ -22,6 +22,17 @@
 
 use std::io::Cursor;
 
+use agg_gui::Widget;
+
+/// Widget id of the 3-D viewport in the app tree (see
+/// [`crate::build_app`]); the preview is a crop of this widget, never of
+/// the whole window.
+///
+/// Re-exported from `atomartist-renderer`, which owns the id because
+/// `Viewport3dWidget::id` is what returns it — one literal, one source of
+/// truth.
+pub use atomartist_renderer::VIEWPORT_WIDGET_ID;
+
 /// Preview width in pixels. 4:3 with [`THUMBNAIL_HEIGHT`], matching
 /// NodeDesigner's `capturePreviewImage` aspect so previews from either
 /// app crop the same way.
@@ -113,6 +124,35 @@ pub fn framebuffer_crop_from_widget_rect(
         w: (x1 - x0) as u32,
         h: (y1 - y0) as u32,
     })
+}
+
+/// Framebuffer rectangle covering the 3-D viewport widget in `root`, or
+/// `None` when it isn't in the tree / isn't visibly on the surface.
+///
+/// This is the whole rect-derivation half of the shell's capture path,
+/// kept here (rather than in `demo-native`) so it can be exercised
+/// headlessly against the real widget tree.
+///
+/// `surface_w` / `surface_h` are the framebuffer's dimensions, which on
+/// both shells are also the coordinate space the widget tree is laid out
+/// in.
+///
+/// The rect comes from [`agg_gui::find_widget_screen_rect`], *not* from
+/// `find_widget_by_id(..).bounds()`: `Widget::bounds` is parent-local
+/// (and `Viewport3dWidget::layout` resets its own origin to (0, 0)), so
+/// the local rect would place the viewport at the window's bottom-left
+/// and the preview would show the node canvas instead.
+///
+/// That helper skips hidden subtrees, so a viewport that is in the tree
+/// but not visible yields `None` here rather than a crop of whatever now
+/// occupies those pixels.
+pub fn viewport_framebuffer_crop(
+    root: &dyn Widget,
+    surface_w: u32,
+    surface_h: u32,
+) -> Option<CropRect> {
+    let b = agg_gui::find_widget_screen_rect(root, VIEWPORT_WIDGET_ID)?;
+    framebuffer_crop_from_widget_rect(b.x, b.y, b.width, b.height, surface_w, surface_h)
 }
 
 /// The exact source rectangle a preview is sampled from, given the

@@ -31,9 +31,9 @@
 //! ## What ends up in the picture
 //!
 //! The snapshot is the whole window, but the preview is cropped to the
-//! **3-D viewport widget's** rectangle (looked up by id, converted from
-//! agg-gui's bottom-up coordinates by
-//! [`atomartist_ui::framebuffer_crop_from_widget_rect`]) — a preview of
+//! **3-D viewport widget's** rectangle (looked up by id, resolved to
+//! absolute screen coordinates and flipped out of agg-gui's bottom-up
+//! space by [`atomartist_ui::viewport_framebuffer_crop`]) — a preview of
 //! the node canvas and the side panels would tell the user nothing about
 //! which model a file holds. The preview's 4:3 aspect crop is applied
 //! *within* that rectangle by
@@ -54,10 +54,6 @@ use agg_gui::{App, DrawCtx};
 use atomartist_ui::{AppState, CropRect, THUMBNAIL_HEIGHT, THUMBNAIL_WIDTH};
 use demo_wgpu::{RectInPixels, WgpuGfxCtx};
 use web_time::Instant;
-
-/// Widget id of the 3-D viewport in the app tree (see
-/// `atomartist_ui::build_app`); the preview is a crop of this widget.
-const VIEWPORT_WIDGET_ID: &str = "viewport-3d";
 
 /// Minimum wall-clock gap between two preview snapshots. Long enough
 /// that the cost is irrelevant even if a capture were expensive; short
@@ -207,15 +203,11 @@ impl ThumbnailCapture {
 /// Framebuffer rectangle covering the 3-D viewport widget, or `None`
 /// when it isn't in the tree / isn't visibly on the surface.
 ///
-/// `Widget::bounds` is in agg-gui's bottom-up window coordinates; the
-/// flip and the clip both live in `atomartist_ui::thumbnail` so they can
-/// be unit-tested without a window.
+/// The widget lookup, the bottom-up→top-down flip and the clip all live
+/// in `atomartist_ui::thumbnail` so the whole rect derivation can be
+/// unit-tested against the real widget tree without a window.
 fn viewport_region(app: &App, surface_w: u32, surface_h: u32) -> Option<CropRect> {
-    let widget = agg_gui::find_widget_by_id(app.root(), VIEWPORT_WIDGET_ID)?;
-    let b = widget.bounds();
-    atomartist_ui::framebuffer_crop_from_widget_rect(
-        b.x, b.y, b.width, b.height, surface_w, surface_h,
-    )
+    atomartist_ui::viewport_framebuffer_crop(app.root(), surface_w, surface_h)
 }
 
 /// The blit's source rectangle: the preview's 4:3 window inside the
