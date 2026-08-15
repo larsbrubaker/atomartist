@@ -15,13 +15,18 @@
 //! * **Snapshot** (`capture_screenshot`) is a GPU-side
 //!   `copy_texture_to_texture` — no CPU readback, no stall. It runs at
 //!   most once per [`CAPTURE_INTERVAL`].
-//! * **Readback** uses demo-wgpu's *non-blocking* pair
-//!   (`begin_capture_readback` / `poll_capture_readback`), never the
-//!   blocking `read_captured_screenshot` the `--screenshot` path uses.
-//!   The map resolves a frame or two later; the poll is a `try_recv`.
-//! * **Encode** (crop → downscale → PNG) happens on a spawned thread,
-//!   so the only main-thread work is the row-unpadding memcpy inside
-//!   `poll_capture_readback`.
+//! * **Readback** uses demo-wgpu's *non-blocking, scaled* pair
+//!   (`begin_capture_readback_scaled` / `poll_capture_readback_scaled`),
+//!   never the blocking `read_captured_screenshot` the `--screenshot`
+//!   path uses. The GPU crops to the preview's source region and
+//!   resamples to 256×192 during the blit, so only ~192 KB — not a whole
+//!   framebuffer — is mapped back; the map resolves a frame or two later
+//!   and the poll is a `try_recv`. The scaled readback has its own
+//!   in-flight slot, so it can never collide with a `--screenshot` run's
+//!   full-surface readback.
+//! * **Encode** (drop alpha → PNG) happens on a spawned thread, so the
+//!   only main-thread work is the row-unpadding memcpy inside
+//!   `poll_capture_readback_scaled`.
 //!
 //! ## What ends up in the picture
 //!
@@ -30,8 +35,12 @@
 //! agg-gui's bottom-up coordinates by
 //! [`atomartist_ui::framebuffer_crop_from_widget_rect`]) — a preview of
 //! the node canvas and the side panels would tell the user nothing about
-//! which model a file holds. When the viewport isn't on screen the
-//! capture is skipped entirely rather than falling back to the window.
+//! which model a file holds. The preview's 4:3 aspect crop is applied
+//! *within* that rectangle by
+//! [`atomartist_ui::thumbnail_source_region`] before the blit, so the
+//! rectangle handed to the GPU is exactly what the PNG shows. When the
+//! viewport isn't on screen the capture is skipped entirely rather than
+//! falling back to the window.
 //!
 //! Set `ATOMARTIST_THUMB_LOG=1` to print the measured cost of each
 //! stage — per CLAUDE.md, the per-frame budget claim above is something
@@ -42,8 +51,8 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 
 use agg_gui::{App, DrawCtx};
-use atomartist_ui::{AppState, CropRect};
-use demo_wgpu::WgpuGfxCtx;
+use atomartist_ui::{AppState, CropRect, THUMBNAIL_HEIGHT, THUMBNAIL_WIDTH};
+use demo_wgpu::{RectInPixels, WgpuGfxCtx};
 use web_time::Instant;
 
 /// Widget id of the 3-D viewport in the app tree (see
@@ -77,10 +86,10 @@ pub struct ThumbnailCapture {
     /// A snapshot was taken this frame; the readback starts after
     /// present so the copy has been submitted.
     snapshot_taken: bool,
-    /// Framebuffer rectangle of the 3-D viewport as it stood when the
-    /// snapshot was taken — the readback that lands a frame or two
-    /// later is cropped to it.
-    snapshot_region: Option<CropRect>,
+    /// Preview source rectangle (the 4:3 window inside the 3-D
+    /// viewport) as it stood when the snapshot was taken — handed to the
+    /// GPU blit when the readback starts after present.
+    snapshot_region: Option<RectInPixels>,
     /// Set while an encode thread is in flight, so a slow encode can't
     /// pile threads up behind a fast capture cadence.
     encoding: Arc<AtomicBool>,
@@ -115,15 +124,16 @@ impl ThumbnailCapture {
         surface_w: u32,
         surface_h: u32,
     ) {
-        if !self.enabled || !self.due() || ctx.has_pending_readback() {
+        if !self.enabled || !self.due() || ctx.has_pending_scaled_readback() {
             return;
         }
         // No viewport on screen (hidden, collapsed, or not laid out
         // yet) means there is nothing worth previewing — skip rather
         // than capture a window full of panels.
-        let Some(region) = viewport_region(app, surface_w, surface_h) else {
+        let Some(viewport) = viewport_region(app, surface_w, surface_h) else {
             return;
         };
+        let region = source_rect_in_pixels(viewport);
         let t = Instant::now();
         if ctx.capture_screenshot() {
             self.snapshot_taken = true;
@@ -148,24 +158,25 @@ impl ThumbnailCapture {
         if self.snapshot_taken {
             self.snapshot_taken = false;
             let t = Instant::now();
-            ctx.begin_capture_readback();
+            // The crop *and* the downscale happen on the GPU here: only
+            // THUMBNAIL_WIDTH x THUMBNAIL_HEIGHT RGBA pixels are ever
+            // mapped back.
+            let region = self.snapshot_region.take();
+            ctx.begin_capture_readback_scaled(region, THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT);
             log_stage("readback_begin", t);
             return; // the map cannot possibly be ready in the same frame
         }
-        if !ctx.has_pending_readback() {
+        if !ctx.has_pending_scaled_readback() {
             return;
         }
         let t = Instant::now();
-        let Some((pixels, w, h)) = ctx.poll_capture_readback() else {
+        let Some((pixels, w, h)) = ctx.poll_capture_readback_scaled() else {
             return;
         };
         log_stage("readback_harvest", t);
         if pixels.is_empty() || w == 0 || h == 0 {
             return;
         }
-        let Some(region) = self.snapshot_region.take() else {
-            return; // readback with no matching snapshot region
-        };
         if self.encoding.swap(true, Ordering::SeqCst) {
             return; // an earlier encode is still running
         }
@@ -173,8 +184,9 @@ impl ThumbnailCapture {
         let flag = self.encoding.clone();
         std::thread::spawn(move || {
             let t = Instant::now();
-            if let Some(png) = atomartist_ui::thumbnail_png_from_rgba_region(&pixels, w, h, region)
-            {
+            // Already cropped and resampled by the blit — all that is
+            // left is shedding alpha and running the PNG encoder.
+            if let Some(png) = atomartist_ui::thumbnail_png_from_exact_rgba(&pixels, w, h) {
                 // A closed receiver just means the app is shutting
                 // down; the preview is disposable either way.
                 let _ = tx.send(png);
@@ -204,6 +216,17 @@ fn viewport_region(app: &App, surface_w: u32, surface_h: u32) -> Option<CropRect
     atomartist_ui::framebuffer_crop_from_widget_rect(
         b.x, b.y, b.width, b.height, surface_w, surface_h,
     )
+}
+
+/// The blit's source rectangle: the preview's 4:3 window inside the
+/// viewport, expressed in demo-wgpu's top-down framebuffer pixels.
+///
+/// Both `CropRect` and `RectInPixels` are already top-down (the flip
+/// happened in `framebuffer_crop_from_widget_rect`), so this is a pure
+/// field rename around the shared aspect math.
+fn source_rect_in_pixels(viewport: CropRect) -> RectInPixels {
+    let r = atomartist_ui::thumbnail_source_region(viewport);
+    RectInPixels::new(r.x, r.y, r.w, r.h)
 }
 
 fn thumb_log_enabled() -> bool {

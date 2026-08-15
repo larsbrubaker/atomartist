@@ -115,6 +115,18 @@ pub fn framebuffer_crop_from_widget_rect(
     })
 }
 
+/// The exact source rectangle a preview is sampled from, given the
+/// viewport's framebuffer rectangle: the largest centered
+/// [`THUMBNAIL_WIDTH`] : [`THUMBNAIL_HEIGHT`] (4:3) sub-rectangle of it.
+///
+/// The native shell hands this straight to the GPU as the blit's source
+/// region, so the crop happens before any pixels cross back to the CPU.
+/// It is the same rectangle [`thumbnail_png_from_rgba_region`] would
+/// sample on the CPU, which keeps both paths framing previews alike.
+pub fn thumbnail_source_region(viewport: CropRect) -> CropRect {
+    center_crop_within(viewport, THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT)
+}
+
 /// The largest centered 4:3 rectangle *inside* `region` — the preview
 /// crop applied to a sub-rectangle of the frame rather than the whole
 /// frame.
@@ -225,6 +237,29 @@ pub fn thumbnail_png_from_rgba_region(
         THUMBNAIL_HEIGHT,
     )?;
     encode_rgb_png(&rgb, THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT)
+}
+
+/// Encode an already-preview-sized RGBA8 buffer as a PNG, dropping
+/// alpha.
+///
+/// The GPU path (`demo-native`'s scaled readback) hands back pixels that
+/// are *already* cropped and resampled to `w` × `h`, so there is nothing
+/// left to do but shed the alpha channel and encode — no box filter, no
+/// bounds math. `None` when the buffer doesn't match the stated size or
+/// the encoder fails.
+pub fn thumbnail_png_from_exact_rgba(rgba: &[u8], w: u32, h: u32) -> Option<Vec<u8>> {
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let pixels = (w as u64) * (h as u64);
+    if rgba.len() as u64 != pixels * 4 {
+        return None;
+    }
+    let mut rgb = Vec::with_capacity(rgba.len() / 4 * 3);
+    for px in rgba.chunks_exact(4) {
+        rgb.extend_from_slice(&px[..3]);
+    }
+    encode_rgb_png(&rgb, w, h)
 }
 
 /// Encode tightly packed RGB8 as a PNG. Separate from the resampler so
@@ -353,6 +388,80 @@ mod tests {
         assert!(
             out.chunks_exact(3).all(|p| p == [0, 255, 0]),
             "every preview pixel must come from the viewport region"
+        );
+    }
+
+    #[test]
+    fn source_region_is_the_4_3_rect_inside_the_viewport() {
+        // 16:9 viewport parked at (100, 40): full height, 960-wide 4:3
+        // window centered horizontally, offsets carried through.
+        let viewport = CropRect { x: 100, y: 40, w: 1280, h: 720 };
+        assert_eq!(
+            thumbnail_source_region(viewport),
+            CropRect { x: 100 + 160, y: 40, w: 960, h: 720 }
+        );
+        // A viewport that is already 4:3 is used whole.
+        let square_ish = CropRect { x: 5, y: 7, w: 800, h: 600 };
+        assert_eq!(thumbnail_source_region(square_ish), square_ish);
+        // Taller than 4:3: rows come off the top and bottom.
+        let tall = CropRect { x: 0, y: 0, w: 600, h: 1000 };
+        assert_eq!(
+            thumbnail_source_region(tall),
+            CropRect { x: 0, y: 275, w: 600, h: 450 }
+        );
+    }
+
+    #[test]
+    fn source_region_matches_what_the_cpu_pipeline_samples() {
+        // The GPU path must frame previews exactly like the CPU path:
+        // filling only `thumbnail_source_region` with green and leaving
+        // the rest of the viewport blue must still yield an all-green
+        // preview from `thumbnail_png_from_rgba_region`.
+        let (w, h) = (400u32, 400u32);
+        let mut src = vec![0u8, 0, 255, 255].repeat((w * h) as usize);
+        let viewport = CropRect { x: 40, y: 30, w: 320, h: 300 };
+        let region = thumbnail_source_region(viewport);
+        for y in region.y..region.y + region.h {
+            for x in region.x..region.x + region.w {
+                let i = ((y * w + x) * 4) as usize;
+                src[i..i + 4].copy_from_slice(&[0, 255, 0, 255]);
+            }
+        }
+        let png_bytes =
+            thumbnail_png_from_rgba_region(&src, w, h, viewport).expect("region thumbnail");
+        let decoder = png::Decoder::new(Cursor::new(&png_bytes));
+        let mut reader = decoder.read_info().expect("png header");
+        let mut out = vec![0u8; reader.output_buffer_size()];
+        reader.next_frame(&mut out).expect("png pixels");
+        assert!(out.chunks_exact(3).all(|p| p == [0, 255, 0]));
+    }
+
+    #[test]
+    fn exact_rgba_encodes_without_resampling() {
+        // 2x2 RGBA with distinct pixels → 2x2 RGB PNG, alpha dropped,
+        // pixel order preserved.
+        let rgba: Vec<u8> = vec![
+            255, 0, 0, 255, 0, 255, 0, 128, // row 0
+            0, 0, 255, 255, 9, 8, 7, 0, // row 1
+        ];
+        let png_bytes = thumbnail_png_from_exact_rgba(&rgba, 2, 2).expect("encode");
+        let decoder = png::Decoder::new(Cursor::new(&png_bytes));
+        let mut reader = decoder.read_info().expect("png header");
+        assert_eq!((reader.info().width, reader.info().height), (2, 2));
+        let mut out = vec![0u8; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut out).expect("png pixels");
+        assert_eq!(info.color_type, png::ColorType::Rgb);
+        assert_eq!(out, vec![255, 0, 0, 0, 255, 0, 0, 0, 255, 9, 8, 7]);
+    }
+
+    #[test]
+    fn exact_rgba_rejects_mis_sized_buffers() {
+        assert!(thumbnail_png_from_exact_rgba(&[0u8; 16], 3, 3).is_none());
+        assert!(thumbnail_png_from_exact_rgba(&[], 0, 0).is_none());
+        // A preview-sized buffer is accepted at the real thumbnail size.
+        let full = vec![7u8; (THUMBNAIL_WIDTH * THUMBNAIL_HEIGHT * 4) as usize];
+        assert!(
+            thumbnail_png_from_exact_rgba(&full, THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT).is_some()
         );
     }
 
