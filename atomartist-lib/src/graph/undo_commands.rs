@@ -14,6 +14,7 @@ use agg_gui::undo::UndoRedoCommand;
 
 use crate::graph::graph::{Noodle, Graph};
 use crate::graph::node::{NodeId, NodeInstance, PortValue};
+use crate::graph::socket::SocketUid;
 use crate::registry::NodeRegistry;
 
 /// Add a node to the graph. On do, inserts the node; on undo, removes it
@@ -117,6 +118,72 @@ impl UndoRedoCommand for ConnectCmd {
         if self.succeeded {
             let mut g = self.graph.lock().unwrap();
             let _ = g.disconnect(&self.noodle, &self.registry);
+        }
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+}
+
+/// Connect an output socket to whichever input of `to_node` is free
+/// **at the moment the command runs** — the undoable form of
+/// NodeDesigner's `autoConnectToOutput`.
+///
+/// Why this is not just a [`ConnectCmd`] with a pre-computed noodle: the
+/// `Output` node is a dynamic-input node. Disconnecting one of its
+/// inputs *deletes* that slot and regrows a trailing empty one with a
+/// **new** [`SocketUid`], so the uid an undo tore down no longer exists
+/// when redo replays. A cached noodle would then fail
+/// `SocketNotFound`, silently, and the user would get their node back
+/// unwired. Re-resolving the target on every `do_it` reproduces the
+/// ancestor's "auto-wire again" semantics exactly.
+///
+/// `undo_it` disconnects whatever `do_it` actually made, so the pair is
+/// symmetric even though the endpoint moves between runs.
+pub struct ConnectToFreeInputCmd {
+    graph: Arc<Mutex<Graph>>,
+    registry: Arc<NodeRegistry>,
+    from: NodeId,
+    from_socket: SocketUid,
+    to_node: NodeId,
+    /// The noodle the most recent `do_it` created, if it succeeded.
+    connected: Option<Noodle>,
+}
+
+impl ConnectToFreeInputCmd {
+    pub fn new(
+        graph: Arc<Mutex<Graph>>,
+        registry: Arc<NodeRegistry>,
+        from: NodeId,
+        from_socket: SocketUid,
+        to_node: NodeId,
+    ) -> Self {
+        Self {
+            graph,
+            registry,
+            from,
+            from_socket,
+            to_node,
+            connected: None,
+        }
+    }
+}
+
+impl UndoRedoCommand for ConnectToFreeInputCmd {
+    fn name(&self) -> &str { "Connect" }
+    fn do_it(&mut self) {
+        let mut g = self.graph.lock().unwrap();
+        let Some(to_socket) = g.first_free_input(self.to_node) else {
+            // No slot left: the wire is best-effort, exactly as the
+            // ancestor's silent `return false`.
+            self.connected = None;
+            return;
+        };
+        let noodle = Noodle::new(self.from, self.from_socket, self.to_node, to_socket);
+        self.connected = g.connect(noodle, &self.registry).ok().map(|_| noodle);
+    }
+    fn undo_it(&mut self) {
+        if let Some(noodle) = self.connected.take() {
+            let mut g = self.graph.lock().unwrap();
+            let _ = g.disconnect(&noodle, &self.registry);
         }
     }
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }

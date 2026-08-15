@@ -507,6 +507,141 @@ fn starting_a_handle_drag_mid_gesture_gives_the_carried_node_back() {
     h.mouse_up(MouseButton::Left);
 }
 
+// ── Step 6f-4: dropping on the 3-D bed ──────────────────────────────────
+
+/// A point in the middle of the 3-D viewport — the bed, the second drop
+/// target since 6f-4.
+fn viewport_point(h: &TestHarness) -> Point {
+    let v = rect_of(h, "viewport-3d");
+    Point::new(v.x + v.width * 0.5, v.y + v.height * 0.5)
+}
+
+/// The deliverable of step 6f-4: dragging a palette favourite onto the
+/// **bed** inserts it, places it left of the Output node, wires it in,
+/// and undoes as one step.
+#[test]
+fn dropping_a_node_type_on_the_bed_places_and_wires_it() {
+    let mut h = TestHarness::with_starter_graph();
+    let before_nodes = node_count(&h);
+    let before_noodles = h.state().graph.lock().unwrap().noodle_count();
+    let row = item_center(&h, 0);
+    let drop = viewport_point(&h);
+
+    press_and_move(&mut h, row, &[nudged(row), drop]);
+    // v1 ghosts over the bed — nothing is carried live there.
+    assert!(
+        h.find_by_id(DRAG_GHOST_ID).is_some(),
+        "the ghost stays up over the bed"
+    );
+    assert_eq!(
+        node_count(&h),
+        before_nodes,
+        "nothing inserted before release"
+    );
+    release_at(&mut h, drop);
+
+    assert_eq!(node_count(&h), before_nodes + 1);
+    {
+        let graph = h.state().graph.lock().unwrap();
+        let node = graph
+            .nodes()
+            .find(|n| n.type_id.as_ref() == SEED_NODE_TYPES[0])
+            .expect("the dragged type landed in the graph");
+        let output = graph
+            .nodes()
+            .find(|n| n.type_id.as_ref() == "Output")
+            .expect("the starter graph has an Output");
+        assert!(
+            graph
+                .noodles()
+                .iter()
+                .any(|n| n.from.node == node.id && n.to.node == output.id),
+            "the bed drop auto-wires into the Output"
+        );
+        assert!(
+            node.position[0] < output.position[0],
+            "and is placed left of it, got {:?}",
+            node.position
+        );
+    }
+    h.evaluate_now();
+
+    let undo = h.state().active_undo();
+    assert!(undo.lock().unwrap().can_undo());
+    undo.lock().unwrap().undo();
+    assert_eq!(node_count(&h), before_nodes);
+    assert_eq!(
+        h.state().graph.lock().unwrap().noodle_count(),
+        before_noodles,
+        "insert and wire undo together"
+    );
+    assert!(
+        !undo.lock().unwrap().can_undo(),
+        "the gesture pushed exactly one undo entry"
+    );
+}
+
+/// The bar and its handle share the viewport's pane but are not the bed:
+/// releasing over them cancels, as it always has.
+#[test]
+fn releasing_over_the_bar_handle_is_not_a_bed_drop() {
+    let mut h = TestHarness::with_starter_graph();
+    let before = node_count(&h);
+    let row = item_center(&h, 0);
+    let handle = handle_center(&h);
+
+    let bed = viewport_point(&h);
+    press_and_move(&mut h, row, &[nudged(row), bed, handle]);
+    release_at(&mut h, handle);
+
+    assert_eq!(
+        node_count(&h),
+        before,
+        "the bar's chrome is not a drop target"
+    );
+    assert!(!h.state().active_undo().lock().unwrap().can_undo());
+    assert!(h.find_by_id(DRAG_GHOST_ID).is_none());
+}
+
+/// A canvas drop keeps the position the user picked (the placement
+/// helper is only for insertions the user did not position) and now
+/// wires into the Output as well.
+#[test]
+fn a_canvas_drop_keeps_its_position_and_gains_a_wire() {
+    let mut h = TestHarness::with_starter_graph();
+    let before_noodles = h.state().graph.lock().unwrap().noodle_count();
+    let row = item_center(&h, 0);
+    let drop = canvas_point(&h);
+
+    press_and_move(&mut h, row, &[nudged(row), drop]);
+    release_at(&mut h, drop);
+
+    let canvas = rect_of(&h, "node-canvas");
+    let graph = h.state().graph.lock().unwrap();
+    let node = graph
+        .nodes()
+        .find(|n| n.type_id.as_ref() == SEED_NODE_TYPES[0])
+        .expect("the dragged node is in the graph");
+    assert!(
+        (node.position[0] - (drop.x - canvas.x)).abs() < 1.0
+            && (node.position[1] - (drop.y - canvas.y)).abs() < 1.0,
+        "the drop position the user chose must stand, got {:?}",
+        node.position
+    );
+    let output = graph
+        .nodes()
+        .find(|n| n.type_id.as_ref() == "Output")
+        .expect("the starter graph has an Output");
+    assert!(
+        graph
+            .noodles()
+            .iter()
+            .any(|n| n.from.node == node.id && n.to.node == output.id),
+        "and it is wired into the Output"
+    );
+    assert_eq!(graph.noodle_count(), before_noodles + 1);
+}
+
 /// The drop position is computed from the canvas's *live* pan and zoom,
 /// both of which the editor publishes through the node-editor model
 /// hooks. This drives real pan / zoom input first, then drags a

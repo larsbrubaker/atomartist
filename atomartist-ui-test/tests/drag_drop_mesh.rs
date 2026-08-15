@@ -14,8 +14,8 @@
 use std::path::PathBuf;
 
 use atomartist_lib::graph::node::PortValue;
-use atomartist_storage::StorageUri;
 use atomartist_lib::nodes::mesh::mesh_node;
+use atomartist_storage::StorageUri;
 use atomartist_ui_test::TestHarness;
 
 /// Path to a bundled mesh fixture. The fixture files live in
@@ -204,6 +204,88 @@ fn dropped_mesh_is_wired_to_output_and_visible() {
             .any(|n| n.from.node == mesh_id && n.to.node == output_id),
         "imported mesh must be connected into the Output node",
     );
+}
+
+/// Step 6f-4 unified the import's wiring with every other insertion
+/// path: the wire goes to the Output's first **free** input (not its
+/// last input), and it lives inside the import's *own* undo step — one
+/// Ctrl+Z takes the node and its wire back together, and redo restores
+/// both (the Output regrows its placeholder under a new uid on
+/// disconnect, so the wiring command re-resolves the slot each run).
+#[test]
+fn imported_mesh_wiring_is_part_of_the_imports_undo_step() {
+    let mut h = TestHarness::with_starter_graph();
+    let noodles_before = h.state().graph.lock().unwrap().noodle_count();
+    let canvas = h.find_by_id("node-canvas").expect("canvas widget");
+    let b = canvas.bounds();
+    h.drop_file(
+        b.x + b.width * 0.5,
+        720.0 - (b.y + b.height * 0.5),
+        mesh_fixture("simple_box.stl"),
+    );
+
+    let wired_slot = {
+        let graph = h.state().graph.lock().unwrap();
+        assert_eq!(graph.noodle_count(), noodles_before + 1);
+        let mesh_id = graph
+            .nodes()
+            .find(|n| n.type_id.as_ref() == mesh_node::TYPE_ID)
+            .expect("MeshNode added")
+            .id;
+        let output = graph
+            .nodes()
+            .find(|n| n.type_id.as_ref() == "Output")
+            .expect("starter graph has an Output");
+        let noodle = graph
+            .noodles()
+            .iter()
+            .find(|n| n.from.node == mesh_id)
+            .copied()
+            .expect("the import wired itself in");
+        assert_eq!(noodle.to.node, output.id);
+        // First *free* input, which on a starter graph whose Output
+        // already feeds one source is the trailing placeholder — and
+        // notably not "the last input" as a matter of policy.
+        assert_ne!(
+            Some(noodle.to.socket),
+            output.inputs.first().map(|s| s.uid),
+            "the already-fed first slot is not the target"
+        );
+        noodle.to.socket
+    };
+
+    let undo = h.state().active_undo();
+    undo.lock().unwrap().undo();
+    {
+        let graph = h.state().graph.lock().unwrap();
+        assert_eq!(
+            graph.noodle_count(),
+            noodles_before,
+            "the wire undoes with the node, not separately"
+        );
+        assert!(graph
+            .nodes()
+            .all(|n| n.type_id.as_ref() != mesh_node::TYPE_ID));
+    }
+
+    undo.lock().unwrap().redo();
+    let graph = h.state().graph.lock().unwrap();
+    let mesh_id = graph
+        .nodes()
+        .find(|n| n.type_id.as_ref() == mesh_node::TYPE_ID)
+        .expect("redo restored the MeshNode")
+        .id;
+    let noodle = graph
+        .noodles()
+        .iter()
+        .find(|n| n.from.node == mesh_id)
+        .copied()
+        .expect("redo restored the wire as well");
+    assert_ne!(
+        noodle.to.socket, wired_slot,
+        "the Output regrew its placeholder under a fresh uid — which is          exactly why the wire is re-resolved rather than replayed"
+    );
+    assert_eq!(graph.noodle_count(), noodles_before + 1);
 }
 
 #[test]

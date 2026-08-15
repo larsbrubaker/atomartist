@@ -26,6 +26,19 @@
 //!    gesture undoes in one press of Ctrl+Z. Release outside the canvas
 //!    (or Escape) leaves the undo stack untouched.
 //!
+//! # Two drop targets since 6f-4
+//!
+//! The node canvas is one; the **3-D viewport** is the other (design
+//! §5b, step 6f-4 — "parts drag targets the 3-D viewport"). A drop on
+//! the bed carries nothing live: v1 keeps the ghost over the viewport
+//! all the way to the release (a live carry needs the drop-position
+//! raycast that step defers), then inserts through
+//! [`crate::node_insertion`] — placed left of the Output node and wired
+//! into its first free input, both inside the gesture's single undo
+//! step. Releasing over the viewport pane's *chrome* (the bar, its
+//! handle) is still a cancel: the published viewport rectangle starts
+//! where the bar ends.
+//!
 //! # File payloads drop on release
 //!
 //! A `.atmr` / `.stl` / `.obj` / `.3mf` payload cannot be carried live:
@@ -57,14 +70,16 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use agg_gui::undo::UndoRedoCommand;
 use agg_gui::{Point, Rect};
 use atomartist_lib::graph::node::NodeId;
-use atomartist_lib::graph::undo_commands::AddNodeCmd;
+use atomartist_lib::graph::undo_commands::{AddNodeCmd, BatchCmd, ConnectToFreeInputCmd};
 use atomartist_storage::StorageUri;
 
 use crate::app_state::AppState;
 use crate::drag_insert_ghost::DragGhost;
 use crate::floating_overlay::FloatingOverlayHandle;
+use crate::node_insertion;
 use crate::storage_ops::NoticeLevel;
 
 /// Pointer travel that turns a press into a drag. NodeDesigner's
@@ -144,6 +159,11 @@ struct DragInsert {
     /// coordinates. Zero-sized until the first layout, which reads as
     /// "no canvas yet" — the drop target is not guessed.
     canvas: Rect,
+    /// The 3-D viewport's rectangle in **bar-local** coordinates, also
+    /// published every layout by the bar (step 6f-4). Deliberately
+    /// excludes the bar and its handle, so a release over the bar's own
+    /// chrome cancels. Zero-sized until the first layout.
+    viewport: Rect,
     gesture: Option<Gesture>,
 }
 
@@ -161,6 +181,7 @@ impl DragInsertHandle {
                 state,
                 overlay,
                 canvas: Rect::default(),
+                viewport: Rect::default(),
                 gesture: None,
             })),
         }
@@ -171,6 +192,14 @@ impl DragInsertHandle {
     /// both work from. Called from the bar's `layout`.
     pub fn set_canvas_rect(&self, canvas: Rect) {
         self.inner.borrow_mut().canvas = canvas;
+    }
+
+    /// Publish the 3-D viewport's rectangle in bar-local coordinates —
+    /// the second drop target (step 6f-4). The bar passes the part of
+    /// its pane that is *not* the bar, so its own chrome never reads as
+    /// the bed.
+    pub fn set_viewport_rect(&self, viewport: Rect) {
+        self.inner.borrow_mut().viewport = viewport;
     }
 
     /// A press landed on a draggable item at bar-local `pos`. Does
@@ -240,6 +269,26 @@ impl DragInsert {
     /// than inferred (see the module docs).
     fn in_canvas(&self, pos: Point) -> bool {
         self.canvas.width > 0.0 && self.canvas.height > 0.0 && self.canvas.contains(pos)
+    }
+
+    /// Is this bar-local point over the 3-D viewport? The bar sits in
+    /// the same pane, and the rectangle the bar publishes starts where
+    /// the bar ends, so its rail / panel / handle are never "the bed".
+    fn in_viewport(&self, pos: Point) -> bool {
+        self.viewport.width > 0.0 && self.viewport.height > 0.0 && self.viewport.contains(pos)
+    }
+
+    /// Canvas-space centre of the node canvas — the position fallback
+    /// when the graph has no Output node to place relative to. Zero when
+    /// the canvas rectangle has not been published yet.
+    fn canvas_center(&self) -> [f64; 2] {
+        if self.canvas.width <= 0.0 || self.canvas.height <= 0.0 {
+            return [0.0, 0.0];
+        }
+        self.canvas_pos(Point::new(
+            self.canvas.x + self.canvas.width * 0.5,
+            self.canvas.y + self.canvas.height * 0.5,
+        ))
     }
 
     /// Bar-local → canvas-space, at the editor's live pan / zoom.
@@ -345,6 +394,13 @@ impl DragInsert {
         self.hide_ghost(&mut gesture);
         agg_gui::animation::request_draw();
         if !inside {
+            if self.in_viewport(pos) {
+                // Dropped on the bed (step 6f-4): nothing was carried
+                // live there, so the insert happens now, positioned and
+                // wired by the shared helper.
+                self.remove_live(&mut gesture);
+                return self.drop_on_viewport(&gesture);
+            }
             // Released over the bar / chrome: nothing inserted, nothing
             // on the undo stack.
             self.remove_live(&mut gesture);
@@ -482,27 +538,119 @@ impl DragInsert {
     }
 
     /// Turn the carried node into exactly one undo step: lift it back
-    /// out of the graph and re-add it through [`AddNodeCmd`], which owns
-    /// the instance for redo. Net graph state is unchanged; net undo
-    /// state is one entry.
+    /// out of the graph and re-add it — together with its auto-wire, if
+    /// one applies — through a single command. Net graph state is
+    /// unchanged apart from the new noodle; net undo state is one entry.
+    ///
+    /// The node keeps **where the user dropped it**: a position the user
+    /// chose is never overridden by the placement helper (design §5b,
+    /// step 6f-4). Only the wiring is shared with the bed drop.
     fn commit_live(&mut self, gesture: &mut Gesture) {
         let Some(live) = gesture.live.take() else {
             return;
         };
+        self.lift_into_one_undo_step(live.id);
+    }
+
+    /// A drop on the 3-D viewport. Nothing was carried live there, so
+    /// this is the whole insert: place through
+    /// [`crate::node_insertion`], wire to Output, one undo step.
+    fn drop_on_viewport(&mut self, gesture: &Gesture) -> GestureEnd {
+        match &gesture.payload {
+            DragPayload::NodeType { type_id, .. } => {
+                let graph = self.state.active_graph();
+                let id = {
+                    let mut g = graph.lock().unwrap();
+                    crate::node_helpers::add_node_with_defaults(
+                        &mut g,
+                        &self.state.registry,
+                        type_id,
+                        [0.0, 0.0],
+                    )
+                };
+                let Some(id) = id else {
+                    return GestureEnd::Cancelled;
+                };
+                let center = self.canvas_center();
+                {
+                    let mut g = graph.lock().unwrap();
+                    node_insertion::place_inserted_node(&mut g, &self.state.registry, id, center);
+                }
+                self.lift_into_one_undo_step(id);
+                GestureEnd::Dropped
+            }
+            DragPayload::File { uri, label, .. } => {
+                // The import spawns its node asynchronously, so it gets
+                // the helper's position for a node that does not exist
+                // yet — the ancestor's `[200, 100]` default size.
+                //
+                // Resolved against **the root graph**, because that is
+                // where `import_dropped_file` inserts: while the user is
+                // drilled into a component the active graph is a
+                // different one, and placing against its Output would
+                // put the import somewhere unrelated to where it lands.
+                let pos = {
+                    let g = self.state.graph.lock().unwrap();
+                    node_insertion::position_for_insertion(
+                        &g,
+                        &self.state.registry,
+                        node_insertion::DEFAULT_NODE_SIZE,
+                        None,
+                        self.canvas_center(),
+                    )
+                };
+                if !self.state.import_dropped_file(uri, pos) {
+                    self.state
+                        .notify(NoticeLevel::Error, format!("Cannot import {label}"));
+                    return GestureEnd::Cancelled;
+                }
+                GestureEnd::Dropped
+            }
+        }
+    }
+
+    /// Lift `id` out of the graph and re-add it — plus its auto-wire, if
+    /// [`node_insertion::plan_auto_connect`] finds one — as a single
+    /// undo entry. The node was inserted with no undo entry of its own
+    /// (that is what makes the whole gesture undo in one step), so this
+    /// is the only thing the undo stack ever sees for it.
+    fn lift_into_one_undo_step(&mut self, id: NodeId) {
         let graph = self.state.active_graph();
+        // Plan the wire *before* the lift, while the node's own sockets
+        // are still readable. The plan carries the source endpoint and
+        // the Output *node* only — the Output's target slot is re-
+        // resolved by the command on every do / redo, because
+        // disconnecting deletes that slot and regrows it under a new uid
+        // (see `AutoWirePlan`).
+        let plan = {
+            let g = graph.lock().unwrap();
+            node_insertion::plan_auto_connect(&g, id)
+        };
         let node = {
             let mut g = graph.lock().unwrap();
-            g.remove_node(live.id).ok().map(|(node, _detached)| node)
+            g.remove_node(id).ok().map(|(node, _detached)| node)
         };
         let Some(node) = node else {
             return;
         };
-        let cmd = AddNodeCmd::new(graph, node);
-        self.state
-            .active_undo()
-            .lock()
-            .unwrap()
-            .add_and_do(Box::new(cmd));
+        let add = AddNodeCmd::new(graph.clone(), node);
+        let cmd: Box<dyn UndoRedoCommand> = match plan {
+            Some(plan) => Box::new(BatchCmd::new(
+                "Add Node",
+                vec![
+                    Box::new(add),
+                    Box::new(ConnectToFreeInputCmd::new(
+                        graph,
+                        self.state.registry.clone(),
+                        plan.from,
+                        plan.from_socket,
+                        plan.output,
+                    )),
+                ],
+            )),
+            None => Box::new(add),
+        };
+        self.state.active_undo().lock().unwrap().add_and_do(cmd);
         self.state.schedule_evaluate_after_edit();
         agg_gui::animation::request_draw();
     }

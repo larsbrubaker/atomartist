@@ -432,3 +432,79 @@ fn change_props_cmd_restores_all_batch_disconnections_on_undo() {
         assert_eq!(graph.noodle_count(), 2);
     }
 }
+
+/// `ConnectToFreeInputCmd` re-resolves its target every run, which is
+/// the whole point: the real `Output` node deletes the slot it lost on
+/// disconnect and regrows a trailing empty with a **fresh** uid, so a
+/// command holding the old uid would redo into `SocketNotFound` and
+/// leave the node silently unwired.
+#[test]
+fn connect_to_free_input_cmd_rewires_on_redo_after_the_slot_uid_changed() {
+    let mut r = NodeRegistry::new();
+    crate::nodes::register_all(&mut r);
+    let reg = Arc::new(r);
+    let g = Arc::new(Mutex::new(Graph::new()));
+
+    let (boxed, out, from_uid, slot_before) = {
+        let mut graph = g.lock().unwrap();
+        let boxed = graph.add_new_node("Box", [0.0, 0.0], &reg).unwrap();
+        let out = graph.add_new_node("Output", [400.0, 0.0], &reg).unwrap();
+        let from_uid = graph.get(boxed).unwrap().outputs[0].uid;
+        let slot = graph.first_free_input(out).unwrap();
+        (boxed, out, from_uid, slot)
+    };
+
+    let mut cmd = ConnectToFreeInputCmd::new(g.clone(), reg.clone(), boxed, from_uid, out);
+    cmd.do_it();
+    assert_eq!(g.lock().unwrap().noodle_count(), 1, "the wire is made");
+
+    cmd.undo_it();
+    assert_eq!(g.lock().unwrap().noodle_count(), 0, "and taken back");
+    let slot_after = g.lock().unwrap().first_free_input(out).unwrap();
+    assert_ne!(
+        slot_after, slot_before,
+        "the Output regrew its placeholder with a new uid — the case a \
+         cached noodle would redo into nothing"
+    );
+
+    cmd.do_it();
+    let graph = g.lock().unwrap();
+    assert_eq!(graph.noodle_count(), 1, "redo re-wires against the new slot");
+    assert!(graph
+        .noodles()
+        .iter()
+        .any(|n| n.from.node == boxed && n.to.node == out));
+}
+
+/// No free input left: the wire is skipped silently and undo is a no-op
+/// (best-effort wiring, the ancestor's bare `return false`).
+#[test]
+fn connect_to_free_input_cmd_is_silent_when_nothing_is_free() {
+    let mut r = NodeRegistry::new();
+    r.register(ConstNode);
+    r.register(TwoIn);
+    let reg = Arc::new(r);
+    let g = Arc::new(Mutex::new(Graph::new()));
+
+    let (a, b, sink) = {
+        let mut graph = g.lock().unwrap();
+        let a = graph.add_new_node("Const", [0.0, 0.0], &reg).unwrap();
+        let b = graph.add_new_node("Const", [0.0, 50.0], &reg).unwrap();
+        let sink = graph.add_new_node("TwoIn", [100.0, 0.0], &reg).unwrap();
+        (a, b, sink)
+    };
+    let a_out = g.lock().unwrap().get(a).unwrap().outputs[0].uid;
+    let b_out = g.lock().unwrap().get(b).unwrap().outputs[0].uid;
+
+    // Fill TwoIn's single input.
+    let mut first = ConnectToFreeInputCmd::new(g.clone(), reg.clone(), a, a_out, sink);
+    first.do_it();
+    assert_eq!(g.lock().unwrap().noodle_count(), 1);
+    assert!(g.lock().unwrap().first_free_input(sink).is_none());
+
+    let mut second = ConnectToFreeInputCmd::new(g.clone(), reg.clone(), b, b_out, sink);
+    second.do_it();
+    assert_eq!(g.lock().unwrap().noodle_count(), 1, "nothing was wired");
+    second.undo_it();
+    assert_eq!(g.lock().unwrap().noodle_count(), 1, "and undo touches nothing");
+}

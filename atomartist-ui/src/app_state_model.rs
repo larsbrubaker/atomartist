@@ -143,12 +143,17 @@ impl AppStateModel {
     }
 }
 
-impl ne::NodeGraphModel for AppStateModel {
-    fn nodes(&self) -> Vec<ne::NodeView> {
-        let ag = self.state.active_graph();
-        let g = ag.lock().unwrap();
-        let reg = &self.state.registry;
-        g.nodes()
+/// Project every node of `g` into the editor's [`NodeView`](ne::NodeView)
+/// form — the snapshot the canvas lays out and paints from.
+///
+/// A free function over an explicit graph (rather than a method reading
+/// [`AppState::active_graph`]) because two callers need it against
+/// *different* graphs: the widget always wants the active one, while
+/// [`crate::node_insertion`] must size and place nodes in whichever
+/// graph the insertion actually targets (the mesh import, for one,
+/// always inserts into the root graph).
+pub fn node_views(g: &atomartist_lib::Graph, reg: &atomartist_lib::registry::NodeRegistry) -> Vec<ne::NodeView> {
+    g.nodes()
             .filter_map(|n| {
                 let def = reg.get(&n.type_id)?;
                 // Row-by-row visibility runs through `NodeDef::row_visible`,
@@ -182,7 +187,7 @@ impl ne::NodeGraphModel for AppStateModel {
                     .filter(|s| !hidden_sockets.contains(s.name.as_ref()))
                     .map(|s| ne::SocketView {
                         name: s.name.to_string(),
-                        socket_type: Self::socket_type_to_id(s.socket_type),
+                        socket_type: AppStateModel::socket_type_to_id(s.socket_type),
                         display_label: s.display_label.as_ref().map(|l| l.to_string()),
                     })
                     .collect();
@@ -191,7 +196,7 @@ impl ne::NodeGraphModel for AppStateModel {
                     .iter()
                     .map(|s| ne::SocketView {
                         name: s.name.to_string(),
-                        socket_type: Self::socket_type_to_id(s.socket_type),
+                        socket_type: AppStateModel::socket_type_to_id(s.socket_type),
                         display_label: s.display_label.as_ref().map(|l| l.to_string()),
                     })
                     .collect();
@@ -220,11 +225,11 @@ impl ne::NodeGraphModel for AppStateModel {
                         ne::PropertyView {
                             name: p.name.to_string(),
                             display_label: p.label.as_ref().map(|l| l.to_string()),
-                            current: Self::property_value_to_ne(&current, &editor),
+                            current: AppStateModel::property_value_to_ne(&current, &editor),
                             min,
                             max,
                             bound_input: p.bound_input.as_ref().map(|s| s.to_string()),
-                            editor: Self::editor_kind_to_ne(&editor),
+                            editor: AppStateModel::editor_kind_to_ne(&editor),
                             // Forward the full schema-side editor so
                             // the per-kind row renderers (`paint_row`)
                             // can mount the right pill, toggle,
@@ -234,7 +239,7 @@ impl ne::NodeGraphModel for AppStateModel {
                     })
                     .collect();
                 Some(ne::NodeView {
-                    id: Self::to_ne(n.id),
+                    id: AppStateModel::to_ne(n.id),
                     type_id: def.type_id().into(),
                     display_name: def.display_name().into(),
                     category: def.category().into(),
@@ -245,6 +250,13 @@ impl ne::NodeGraphModel for AppStateModel {
                 })
             })
             .collect()
+}
+
+impl ne::NodeGraphModel for AppStateModel {
+    fn nodes(&self) -> Vec<ne::NodeView> {
+        let ag = self.state.active_graph();
+        let g = ag.lock().unwrap();
+        node_views(&g, &self.state.registry)
     }
 
     fn noodles(&self) -> Vec<ne::NoodleView> {

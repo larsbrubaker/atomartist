@@ -388,6 +388,264 @@ fn a_canvas_below_the_bar_is_still_the_drop_target() {
     assert_eq!(node_count(&state), 1);
 }
 
+// ── Step 6f-4: the 3-D viewport is the second drop target ───────────────
+
+/// The viewport as the 6f-4 fixtures publish it: the pane the bar is
+/// docked in, minus the bar. Bar-local x < BAR_W is chrome.
+fn viewport_rect() -> Rect {
+    Rect::new(BAR_W, 0.0, PANE_W - BAR_W, PANE_H)
+}
+
+/// Controller wired the way production is since 6f-4: the canvas is the
+/// pane *below* (the splitter's other pane) and the viewport is the rest
+/// of the bar's own pane.
+fn controller_with_viewport() -> (AppState, DragInsertHandle) {
+    let state = crate::top_level::fresh_state_with_starter_graph();
+    let overlay = FloatingOverlayHandle::new();
+    let handle = DragInsertHandle::new(state.clone(), overlay);
+    handle.set_canvas_rect(Rect::new(0.0, -206.0, PANE_W, 200.0));
+    handle.set_viewport_rect(viewport_rect());
+    (state, handle)
+}
+
+fn output_left_edge(state: &AppState) -> f64 {
+    let g = state.graph.lock().unwrap();
+    let id = crate::node_insertion::find_output_node(&g).expect("starter graph has an Output");
+    g.get(id).unwrap().position[0]
+}
+
+/// The deliverable: a node type dropped on the bed is inserted, placed
+/// left of the Output node, wired into it — and the insert *and* the
+/// wire undo together in one step.
+#[test]
+fn dropping_a_node_type_on_the_viewport_places_and_wires_it() {
+    let (state, handle) = controller_with_viewport();
+    let before_nodes = node_count(&state);
+    let before_noodles = state.graph.lock().unwrap().noodle_count();
+
+    handle.press(box_payload(), Point::new(20.0, 200.0));
+    handle.pointer_move(Point::new(20.0, 180.0));
+    // Over the bed: nothing is carried live there (v1 ghosts until the
+    // release), so the ghost stays up and the graph is untouched.
+    handle.pointer_move(Point::new(400.0, 150.0));
+    assert!(handle.ghost_active(), "the bed drop ghosts until release");
+    assert!(handle.carried_node().is_none());
+    assert_eq!(node_count(&state), before_nodes);
+
+    assert_eq!(
+        handle.pointer_up(Point::new(400.0, 150.0)),
+        GestureEnd::Dropped
+    );
+    assert_eq!(node_count(&state), before_nodes + 1);
+
+    let (pos, wired) = {
+        let g = state.graph.lock().unwrap();
+        let node = g
+            .nodes()
+            .find(|n| n.type_id.as_ref() == "Box")
+            .expect("the dropped type landed in the graph");
+        let output = crate::node_insertion::find_output_node(&g).unwrap();
+        let wired = g
+            .noodles()
+            .iter()
+            .any(|n| n.from.node == node.id && n.to.node == output);
+        (node.position, wired)
+    };
+    assert!(wired, "the drop auto-wires into the Output");
+    assert!(
+        pos[0] < output_left_edge(&state),
+        "and lands left of the Output, got {pos:?}"
+    );
+
+    // One Ctrl+Z takes back the node *and* its wire.
+    let undo = state.active_undo();
+    assert!(undo.lock().unwrap().can_undo());
+    undo.lock().unwrap().undo();
+    assert_eq!(node_count(&state), before_nodes);
+    assert_eq!(
+        state.graph.lock().unwrap().noodle_count(),
+        before_noodles,
+        "the wire is part of the same undo step"
+    );
+    assert!(
+        !undo.lock().unwrap().can_undo(),
+        "the gesture pushed exactly one entry"
+    );
+}
+
+/// Redo must bring the wire back too. The Output node's disconnect hook
+/// *deletes* the input slot and regrows a fresh trailing empty with a
+/// **new** uid, so a redo that replayed the original noodle would
+/// reconnect nothing and hand the user an unwired node. The wiring
+/// command therefore re-resolves the Output's first free input every
+/// time it runs.
+#[test]
+fn redoing_a_bed_drop_restores_the_wire() {
+    let (state, handle) = controller_with_viewport();
+    let before_noodles = state.graph.lock().unwrap().noodle_count();
+
+    handle.press(box_payload(), Point::new(20.0, 200.0));
+    handle.pointer_move(Point::new(20.0, 180.0));
+    handle.pointer_move(Point::new(400.0, 150.0));
+    assert_eq!(
+        handle.pointer_up(Point::new(400.0, 150.0)),
+        GestureEnd::Dropped
+    );
+    assert_eq!(
+        state.graph.lock().unwrap().noodle_count(),
+        before_noodles + 1
+    );
+
+    let undo = state.active_undo();
+    undo.lock().unwrap().undo();
+    assert_eq!(state.graph.lock().unwrap().noodle_count(), before_noodles);
+    undo.lock().unwrap().redo();
+
+    let g = state.graph.lock().unwrap();
+    let node = g
+        .nodes()
+        .find(|n| n.type_id.as_ref() == "Box")
+        .expect("redo brought the node back");
+    let output = crate::node_insertion::find_output_node(&g).unwrap();
+    assert!(
+        g.noodles()
+            .iter()
+            .any(|n| n.from.node == node.id && n.to.node == output),
+        "redo must re-wire the node, not just re-add it"
+    );
+    assert_eq!(g.noodle_count(), before_noodles + 1);
+}
+
+/// A file payload dropped on the bed goes through the same import path
+/// as a canvas drop — at the placement helper's position, since the bed
+/// has no canvas coordinates of its own. Where that position comes from
+/// is asserted here; what the import then does with it (spawn + wire +
+/// undo) is pinned end-to-end by
+/// `atomartist-ui-test/tests/drag_drop_mesh.rs`.
+#[test]
+fn dropping_a_file_on_the_viewport_imports_it() {
+    let (state, handle) = controller_with_viewport();
+    // The position the drop will hand the import: resolved against the
+    // ROOT graph, which is where `import_dropped_file` inserts.
+    let expected = {
+        let g = state.graph.lock().unwrap();
+        crate::node_insertion::position_for_insertion(
+            &g,
+            &state.registry,
+            crate::node_insertion::DEFAULT_NODE_SIZE,
+            None,
+            [0.0, 0.0],
+        )
+    };
+    let output_x = output_left_edge(&state);
+    assert!(
+        expected[0] < output_x,
+        "a bed drop is placed left of the Output, got {expected:?}"
+    );
+    handle.press(
+        DragPayload::File {
+            uri: StorageUri::new("mem", "/models/part.stl"),
+            label: "part.stl".to_string(),
+            glyph: 'F',
+        },
+        Point::new(20.0, 200.0),
+    );
+    handle.pointer_move(Point::new(20.0, 180.0));
+    handle.pointer_move(Point::new(400.0, 150.0));
+    assert!(handle.ghost_active());
+    // The read is submitted to the job pump; the extension is one we
+    // import, so the gesture reports a drop.
+    assert_eq!(
+        handle.pointer_up(Point::new(400.0, 150.0)),
+        GestureEnd::Dropped
+    );
+}
+
+/// The bar's own chrome is not the bed: a release over it still
+/// cancels, exactly as before 6f-4.
+#[test]
+fn releasing_over_the_bar_chrome_still_cancels() {
+    let (state, handle) = controller_with_viewport();
+    let before = node_count(&state);
+    handle.press(box_payload(), Point::new(20.0, 200.0));
+    handle.pointer_move(Point::new(20.0, 180.0));
+    // x < BAR_W: the strip / handle, inside the viewport *pane* but not
+    // the viewport rectangle.
+    assert_eq!(
+        handle.pointer_up(Point::new(20.0, 180.0)),
+        GestureEnd::Cancelled
+    );
+    assert_eq!(node_count(&state), before);
+    assert!(!state.active_undo().lock().unwrap().can_undo());
+}
+
+/// A canvas drop keeps the position the user chose — the helper never
+/// re-places a node the user placed — but still auto-wires.
+#[test]
+fn a_canvas_drop_keeps_the_user_position_and_still_wires() {
+    let (state, handle) = controller_with_viewport();
+    let before_noodles = state.graph.lock().unwrap().noodle_count();
+    handle.press(box_payload(), Point::new(20.0, 200.0));
+    handle.pointer_move(Point::new(20.0, 180.0));
+    handle.pointer_move(Point::new(300.0, -100.0));
+    let dropped = handle.carried_node().expect("carried over the canvas");
+    assert_eq!(
+        handle.pointer_up(Point::new(300.0, -100.0)),
+        GestureEnd::Dropped
+    );
+
+    let g = state.graph.lock().unwrap();
+    let node = g.get(dropped).expect("the node stayed in the graph");
+    // Canvas-local = bar-local minus the canvas origin (pan 0, zoom 1).
+    assert_eq!(
+        node.position,
+        [300.0, -100.0 + 206.0],
+        "a user-chosen position is never re-placed"
+    );
+    let output = crate::node_insertion::find_output_node(&g).unwrap();
+    assert!(
+        g.noodles()
+            .iter()
+            .any(|n| n.from.node == dropped && n.to.node == output),
+        "and the canvas drop auto-wires too"
+    );
+    assert_eq!(g.noodle_count(), before_noodles + 1);
+}
+
+/// A canvas drop of a node with nothing geometric to say is still one
+/// undo step — the wire is optional, the single-entry rule is not.
+#[test]
+fn an_unwirable_canvas_drop_is_still_one_undo_step() {
+    let (state, handle) = controller_with_viewport();
+    let before_noodles = state.graph.lock().unwrap().noodle_count();
+    let before_nodes = node_count(&state);
+    handle.press(
+        DragPayload::NodeType {
+            // Rectangle outputs a Path2d — no geometry socket to wire.
+            type_id: "Rectangle".to_string(),
+            label: "Rectangle".to_string(),
+            glyph: 'R',
+        },
+        Point::new(20.0, 200.0),
+    );
+    handle.pointer_move(Point::new(20.0, 180.0));
+    handle.pointer_move(Point::new(300.0, -100.0));
+    assert_eq!(
+        handle.pointer_up(Point::new(300.0, -100.0)),
+        GestureEnd::Dropped
+    );
+    assert_eq!(
+        state.graph.lock().unwrap().noodle_count(),
+        before_noodles,
+        "no geometry output, no wire — silently"
+    );
+
+    let undo = state.active_undo();
+    undo.lock().unwrap().undo();
+    assert_eq!(node_count(&state), before_nodes);
+    assert!(!undo.lock().unwrap().can_undo());
+}
+
 /// `.mcx` is importable, so it is draggable — the two lists are one.
 #[test]
 fn every_importable_extension_is_draggable() {

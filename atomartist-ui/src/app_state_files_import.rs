@@ -24,7 +24,7 @@ use atomartist_storage::StorageUri;
 
 use atomartist_lib::graph::merge::merge_graph;
 use atomartist_lib::graph::node::{NodeId, PortValue};
-use atomartist_lib::graph::undo_commands::AddNodeCmd;
+use atomartist_lib::graph::undo_commands::{AddNodeCmd, BatchCmd, ConnectToFreeInputCmd};
 use atomartist_lib::nodes::mesh::mesh_node;
 use atomartist_lib::serialization::{export_3mf, import_mcx, read_project_from_bytes};
 
@@ -174,19 +174,43 @@ impl AppState {
                     )),
                 )
                 .ok();
+            // Wire the import into the Output node so it shows up in the
+            // viewport right away — the viewport renders only what's
+            // connected to Output, and an invisible import reads as "the
+            // drop did nothing".
+            //
+            // Same policy as every other insertion path since step
+            // 6f-4: first `Geometry3d` output → the Output's first
+            // *free* input (`crate::node_insertion`), rather than the
+            // old "first output socket → last input". Planned here,
+            // applied by the command below, so the wire lands inside
+            // the import's single undo step instead of dangling outside
+            // it.
+            let plan = crate::node_insertion::plan_auto_connect(&graph, id);
             let (node, _detached) = graph
                 .remove_node(id)
                 .map_err(|e| format!("snapshot for undo: {:?}", e))?;
             drop(graph);
-            let cmd = AddNodeCmd::new(self.graph.clone(), node).with_label("Import Mesh");
-            self.undo.lock().unwrap().add_and_do(Box::new(cmd));
+            let add = AddNodeCmd::new(self.graph.clone(), node).with_label("Import Mesh");
+            let cmd: Box<dyn agg_gui::undo::UndoRedoCommand> = match plan {
+                Some(plan) => Box::new(BatchCmd::new(
+                    "Import Mesh",
+                    vec![
+                        Box::new(add),
+                        Box::new(ConnectToFreeInputCmd::new(
+                            self.graph.clone(),
+                            self.registry.clone(),
+                            plan.from,
+                            plan.from_socket,
+                            plan.output,
+                        )),
+                    ],
+                )),
+                None => Box::new(add),
+            };
+            self.undo.lock().unwrap().add_and_do(cmd);
             id
         };
-        // Wire the import into the Output node so it shows up in the
-        // viewport right away — the viewport renders only what's
-        // connected to Output, and an invisible import reads as "the
-        // drop did nothing".
-        self.connect_to_output(new_id);
         Ok(new_id)
     }
 

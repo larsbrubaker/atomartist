@@ -256,6 +256,15 @@ impl Graph {
     /// First input socket on `node` with no incoming noodle, in
     /// declaration order. Returns `None` if every input is wired (or
     /// the node has no inputs).
+    ///
+    /// This is also the auto-wiring target resolver (NodeDesigner's
+    /// `findEmptyInputSocket`), and callers that persist a wire across
+    /// undo must re-run it on every do / redo rather than cache its
+    /// answer: dynamic-input nodes like `Output` *delete* a slot on
+    /// disconnect and regrow a trailing empty one with a fresh
+    /// [`SocketUid`], so a uid captured before an undo is dead
+    /// afterwards. See
+    /// [`ConnectToFreeInputCmd`](crate::graph::undo_commands::ConnectToFreeInputCmd).
     pub fn first_free_input(&self, node: NodeId) -> Option<SocketUid> {
         let n = self.nodes.get(&node)?;
         n.inputs

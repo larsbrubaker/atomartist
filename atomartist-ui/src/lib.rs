@@ -33,6 +33,7 @@ pub mod menu_actions;
 pub mod mesh_raster;
 pub mod node_helpers;
 pub mod node_icons;
+pub mod node_insertion;
 pub mod settings;
 pub mod shell_init;
 pub mod status_bar;
@@ -55,6 +56,9 @@ pub use favorites_bar::{FavoritesBar, BAR_ID as FAVORITES_BAR_ID, EMBEDDED_BROWS
 pub use first_paint::FirstPaintGate;
 pub use floating_overlay::{FloatingOverlayHandle, FloatingOverlayHost};
 pub use node_helpers::add_node_with_defaults;
+pub use node_insertion::{
+    auto_connect_to_output, find_position_left_of_output, position_for_insertion, NodeBox,
+};
 pub use settings::{
     DebugWindowState, DebugWindowsState, MainWindowState, UiSettings, WindowPlacement,
 };

@@ -90,6 +90,51 @@ impl PaneRect {
     }
 }
 
+/// The node canvas's rectangle in **bar-local** coordinates, or `None`
+/// before both pane probes have published. The bar's origin *is* its
+/// pane's origin (it is the pane row's first, left-anchored child), so
+/// the offset is simply the difference between the two pane rectangles.
+///
+/// This is the rectangle [`DragInsertHandle::set_canvas_rect`](
+/// crate::drag_insert::DragInsertHandle::set_canvas_rect) is fed.
+pub fn canvas_rect_local(pane: Rect, canvas: Rect) -> Option<Rect> {
+    if pane.width <= 0.0 || canvas.width <= 0.0 || canvas.height <= 0.0 {
+        return None;
+    }
+    Some(Rect::new(
+        canvas.x - pane.x,
+        canvas.y - pane.y,
+        canvas.width,
+        canvas.height,
+    ))
+}
+
+/// The 3-D viewport's rectangle in **bar-local** coordinates: whatever
+/// is left of the bar's own pane once the bar (strip + panel + handle,
+/// i.e. `bar_width`) has taken its share. `None` before the pane probe
+/// has published, or when nothing is left beside the bar.
+///
+/// Starting the rectangle at the bar's right edge is what makes a
+/// release over the bar's own chrome a *cancel* rather than a bed drop
+/// (design §5b, step 6f-4).
+///
+/// **Accepted v1 limitation:** the rectangle is the whole viewport,
+/// *including* the overlay chrome drawn on top of it (the HUD bay's
+/// buttons, the view gizmo). A drop on one of those reads as a drop on
+/// the bed. NodeDesigner excluded overlays by hit-testing the DOM
+/// (`elementFromPoint`); doing the equivalent here means asking the
+/// widget tree what is under the cursor, which is a follow-up.
+pub fn viewport_rect_local(pane: Rect, bar_width: f64) -> Option<Rect> {
+    if pane.width <= 0.0 || pane.height <= 0.0 {
+        return None;
+    }
+    let width = pane.width - bar_width;
+    if width <= 0.0 {
+        return None;
+    }
+    Some(Rect::new(bar_width, 0.0, width, pane.height))
+}
+
 /// Pass-through widget that publishes its own layout size and placement
 /// into a [`PaneRect`] and then lays its single child out in the same
 /// slot.
@@ -210,6 +255,40 @@ mod tests {
         // A re-layout keeps the placement until the parent moves us.
         probe.layout(Size::new(1280.0, 300.0));
         assert_eq!(rect.get(), Rect::new(0.0, 286.0, 1280.0, 300.0));
+    }
+
+    /// The viewport rectangle starts where the bar ends, so the bar's own
+    /// strip / panel / handle are never inside it — that is what keeps a
+    /// release over the chrome a cancel rather than a bed drop.
+    #[test]
+    fn viewport_rect_excludes_the_bar() {
+        let pane = Rect::new(0.0, 286.0, 1280.0, 400.0);
+        let rect = viewport_rect_local(pane, 88.0).expect("room beside the bar");
+        assert_eq!(rect, Rect::new(88.0, 0.0, 1192.0, 400.0));
+        assert!(
+            !rect.contains(agg_gui::Point::new(40.0, 200.0)),
+            "the strip"
+        );
+        assert!(
+            !rect.contains(agg_gui::Point::new(87.0, 200.0)),
+            "the handle"
+        );
+        assert!(rect.contains(agg_gui::Point::new(600.0, 200.0)), "the bed");
+        // Unknown pane, or a bar that fills it: no drop target at all.
+        assert!(viewport_rect_local(Rect::default(), 88.0).is_none());
+        assert!(viewport_rect_local(pane, 1280.0).is_none());
+    }
+
+    /// The canvas rectangle is the *other* pane expressed relative to the
+    /// bar's pane — below it, hence a negative `y`, in the 6f-1 shape.
+    #[test]
+    fn canvas_rect_is_relative_to_the_bars_pane() {
+        let viewport = Rect::new(0.0, 286.0, 1280.0, 400.0);
+        let canvas = Rect::new(0.0, 80.0, 1280.0, 200.0);
+        let rect = canvas_rect_local(viewport, canvas).expect("both panes published");
+        assert_eq!(rect, Rect::new(0.0, -206.0, 1280.0, 200.0));
+        assert!(canvas_rect_local(Rect::default(), canvas).is_none());
+        assert!(canvas_rect_local(viewport, Rect::default()).is_none());
     }
 
     /// The child is laid out in the same slot, so wrapping content in the

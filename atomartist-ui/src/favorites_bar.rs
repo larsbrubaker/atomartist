@@ -400,22 +400,19 @@ impl FavoritesBar {
         }
     }
 
-    /// The node canvas's rectangle in bar-local coordinates, or `None`
-    /// before both pane probes have published. The bar's origin *is* its
-    /// pane's origin (it is the pane row's first, left-anchored child),
-    /// so the offset is the difference between the two pane rectangles.
+    /// The node canvas's rectangle in bar-local coordinates — the
+    /// drag-insert drop target in the splitter's *other* pane. Derived in
+    /// [`favorites_bar_host`](crate::favorites_bar_host), which owns the
+    /// pane-rect arithmetic.
     fn canvas_rect_local(&self) -> Option<Rect> {
-        let pane = self.pane.get();
-        let canvas = self.canvas_pane.get();
-        if pane.width <= 0.0 || canvas.width <= 0.0 || canvas.height <= 0.0 {
-            return None;
-        }
-        Some(Rect::new(
-            canvas.x - pane.x,
-            canvas.y - pane.y,
-            canvas.width,
-            canvas.height,
-        ))
+        crate::favorites_bar_host::canvas_rect_local(self.pane.get(), self.canvas_pane.get())
+    }
+
+    /// The 3-D viewport's rectangle in bar-local coordinates — the
+    /// second drop target (step 6f-4), likewise derived in
+    /// [`favorites_bar_host`](crate::favorites_bar_host).
+    fn viewport_rect_local(&self, bar: Size) -> Option<Rect> {
+        crate::favorites_bar_host::viewport_rect_local(self.pane.get(), bar.width)
     }
 
     fn on_mouse_down(&mut self, pos: Point) -> EventResult {
@@ -631,6 +628,11 @@ impl Widget for FavoritesBar {
         // (see `drag_insert`'s coordinate notes).
         if let (Some(insert), Some(canvas)) = (&self.insert, self.canvas_rect_local()) {
             insert.set_canvas_rect(canvas);
+        }
+        // …and the second drop target (step 6f-4): the 3-D viewport
+        // beside the bar, in the same pane.
+        if let (Some(insert), Some(viewport)) = (&self.insert, self.viewport_rect_local(size)) {
+            insert.set_viewport_rect(viewport);
         }
         if let (Some(child), Some(rect)) = (self.children.first_mut(), self.layout.panel) {
             // Layout *then* place: agg-gui widgets reset their own origin
