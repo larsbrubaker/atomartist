@@ -61,17 +61,21 @@ impl ScriptedDialogs {
 }
 
 impl crate::top_menu_bar::FileDialogProvider for ScriptedDialogs {
-    fn pick_open_project(&self) -> Option<StorageUri> {
-        self.open_path.clone()
+    // Canned answers settle immediately, the way a blocking native
+    // picker's do — `submit_op` then runs the continuation inline, so
+    // these flows stay as step-by-step assertable as they were before the
+    // pickers became asynchronous.
+    fn pick_open_project(&self) -> Job<Option<StorageUri>> {
+        Job::ready(self.open_path.clone())
     }
-    fn pick_save_project(&self, _name: &str) -> Option<StorageUri> {
-        self.save_path.clone()
+    fn pick_save_project(&self, _name: &str) -> Job<Option<StorageUri>> {
+        Job::ready(self.save_path.clone())
     }
-    fn pick_save_export(&self, _ext: &str, _name: &str) -> Option<StorageUri> {
-        self.export_path.clone()
+    fn pick_save_export(&self, _ext: &str, _name: &str) -> Job<Option<StorageUri>> {
+        Job::ready(self.export_path.clone())
     }
-    fn pick_import_file(&self) -> Option<StorageUri> {
-        None
+    fn pick_import_file(&self) -> Job<Option<StorageUri>> {
+        Job::ready(None)
     }
     fn confirm_unsaved_changes(&self) -> UnsavedChoice {
         self.prompts
@@ -81,6 +85,32 @@ impl crate::top_menu_bar::FileDialogProvider for ScriptedDialogs {
     fn show_error(&self, message: &str) {
         self.errors.lock().unwrap().push(message.to_string());
     }
+    fn show_info(&self, _title: &str, _message: &str) {}
+}
+
+/// Dialogs whose pickers *break* rather than answering — the case a
+/// cancelled pick must not be confused with. The modal handle produces it
+/// by refusing a stacked open; a future provider-backed picker could
+/// produce it for any reason at all.
+struct BrokenPickers(StorageError);
+
+impl crate::top_menu_bar::FileDialogProvider for BrokenPickers {
+    fn pick_open_project(&self) -> Job<Option<StorageUri>> {
+        Job::failed(self.0.clone())
+    }
+    fn pick_save_project(&self, _name: &str) -> Job<Option<StorageUri>> {
+        Job::failed(self.0.clone())
+    }
+    fn pick_save_export(&self, _ext: &str, _name: &str) -> Job<Option<StorageUri>> {
+        Job::failed(self.0.clone())
+    }
+    fn pick_import_file(&self) -> Job<Option<StorageUri>> {
+        Job::failed(self.0.clone())
+    }
+    fn confirm_unsaved_changes(&self) -> UnsavedChoice {
+        UnsavedChoice::Discard
+    }
+    fn show_error(&self, _message: &str) {}
     fn show_info(&self, _title: &str, _message: &str) {}
 }
 
@@ -214,6 +244,75 @@ fn a_destructive_file_action_is_refused_while_storage_is_busy() {
         "notice should explain the refusal: {}",
         notice.text
     );
+}
+
+/// A picker that *fails* is not a picker the user dismissed: the first
+/// says nothing (an abandoned action needs no explanation), the second
+/// leaves an error the user can act on.
+#[test]
+fn a_broken_picker_notices_while_a_cancelled_one_stays_silent() {
+    let state = fresh_state_with_starter_graph();
+    let broken: Arc<dyn crate::top_menu_bar::FileDialogProvider> =
+        Arc::new(BrokenPickers(StorageError::Io("no picker".into())));
+
+    handle_action(&state, &broken, &debug_handles(), "file.open");
+    state.pump_storage();
+
+    let notice = shown_error(&state).expect("a broken picker must be reported");
+    assert!(
+        notice.contains("picker"),
+        "the notice should name what broke: {notice}"
+    );
+
+    // The refusal a stacked open produces reads as "someone else is being
+    // asked", which is not an error the user can do anything about.
+    let refused: Arc<dyn crate::top_menu_bar::FileDialogProvider> =
+        Arc::new(BrokenPickers(StorageError::Cancelled));
+    let quiet = fresh_state_with_starter_graph();
+    handle_action(&quiet, &refused, &debug_handles(), "file.open");
+    quiet.pump_storage();
+    assert_eq!(shown_error(&quiet), None);
+
+    // As does an ordinary cancel.
+    let none: Arc<dyn crate::top_menu_bar::FileDialogProvider> = Arc::new(NoFileDialogs);
+    let quiet = fresh_state_with_starter_graph();
+    handle_action(&quiet, &none, &debug_handles(), "file.import");
+    quiet.pump_storage();
+    assert_eq!(shown_error(&quiet), None);
+}
+
+/// Import and Export put a picker up and touch storage like every other
+/// File action, so they take the same re-entry guard: while something the
+/// user asked for is in flight, they are refused with the "busy" notice
+/// rather than stacking a second picker.
+#[test]
+fn import_and_export_are_refused_while_storage_is_busy() {
+    use atomartist_storage::FlakyConfig;
+    for action in ["file.import", "file.export.stl"] {
+        let (state, _provider) = flaky_state(FlakyConfig::default().with_latency(2));
+        state.evaluate_now();
+        dirty(&state);
+        let scripted = Arc::new(ScriptedDialogs::new().saving_to(mem_uri("busy.atmr")));
+        let dialogs: Arc<dyn crate::top_menu_bar::FileDialogProvider> = scripted.clone();
+
+        // Put a save in flight through the unsaved-changes gate.
+        handle_action(&state, &dialogs, &debug_handles(), "file.new");
+        assert_eq!(state.pending_op_count(), 1, "the gate's save is in flight");
+
+        handle_action(&state, &dialogs, &debug_handles(), action);
+        assert_eq!(
+            state.pending_op_count(),
+            1,
+            "{action} must not submit anything while storage is busy"
+        );
+        state.pump_storage();
+        let notice = state.last_notice().expect("the user must be told why");
+        assert!(
+            notice.text.contains("busy"),
+            "{action}: notice should explain the refusal: {}",
+            notice.text
+        );
+    }
 }
 
 /// A stale entry in the Open Recent list — the project was deleted,

@@ -285,6 +285,38 @@ fn the_job_settles_exactly_once() {
     assert_eq!(job.take(), None, "and there is nothing left to take");
 }
 
+/// A pick job can be settled by someone who never saw the dialog — the
+/// status bar's "cancel all storage activity", or the shutdown drain,
+/// reaching the `JobOp` that wraps it. The dialog must then take itself
+/// down: an OK the completer would silently ignore is a picker that eats
+/// the user's answer.
+#[test]
+fn a_job_cancelled_from_outside_takes_the_dialog_down() {
+    let mut h = harness();
+    let job = h.browser_modal().open(BrowserMode::Open, "");
+    h.frame();
+    assert!(h.find_by_id("file-browser").is_some(), "the dialog is up");
+
+    // Whoever holds the job gives up on it.
+    job.cancel();
+    h.frame();
+
+    assert!(h.find_by_id("file-browser").is_none(), "the dialog closed");
+    assert!(!h.browser_modal().is_open());
+    assert_eq!(
+        job.take(),
+        Some(Err(atomartist_storage::StorageError::Cancelled)),
+        "and the cancellation stands — the close must not settle over it"
+    );
+
+    // The handle is free again, which it would not be if the host had
+    // kept the stranded session.
+    let next = h.browser_modal().open(BrowserMode::Open, "");
+    h.frame();
+    assert!(h.find_by_id("file-browser").is_some());
+    assert!(next.poll().is_pending());
+}
+
 /// Every open lists afresh: where the *previous* dialog was browsing has
 /// no bearing on where this one starts. The model is rebuilt per open
 /// precisely so a directory that changed (or vanished) between two opens

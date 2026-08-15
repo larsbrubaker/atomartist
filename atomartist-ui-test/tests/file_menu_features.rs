@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use atomartist_storage::{Precondition, StorageRegistry, StorageUri};
+use atomartist_storage::{Job, Precondition, StorageRegistry, StorageUri};
 use atomartist_ui::menu_actions::confirm_discard_unsaved_then;
 use atomartist_ui::top_menu_bar::{FileDialogProvider, UnsavedChoice};
 use atomartist_ui::{
@@ -80,17 +80,21 @@ impl ScriptedDialogs {
 }
 
 impl FileDialogProvider for ScriptedDialogs {
-    fn pick_open_project(&self) -> Option<StorageUri> {
-        None
+    // Canned answers settle immediately, the way a blocking native
+    // picker's do: `submit_op` applies an already-settled job inline, so
+    // these flows behave exactly as they did before the pickers became
+    // asynchronous.
+    fn pick_open_project(&self) -> Job<Option<StorageUri>> {
+        Job::ready(None)
     }
-    fn pick_save_project(&self, _name: &str) -> Option<StorageUri> {
-        self.save_path.clone()
+    fn pick_save_project(&self, _name: &str) -> Job<Option<StorageUri>> {
+        Job::ready(self.save_path.clone())
     }
-    fn pick_save_export(&self, _ext: &str, _name: &str) -> Option<StorageUri> {
-        None
+    fn pick_save_export(&self, _ext: &str, _name: &str) -> Job<Option<StorageUri>> {
+        Job::ready(None)
     }
-    fn pick_import_file(&self) -> Option<StorageUri> {
-        None
+    fn pick_import_file(&self) -> Job<Option<StorageUri>> {
+        Job::ready(None)
     }
     fn confirm_unsaved_changes(&self) -> UnsavedChoice {
         self.prompts.fetch_add(1, Ordering::SeqCst);

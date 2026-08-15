@@ -19,8 +19,22 @@
 //! a frame or more later for a network one. A failed or cancelled save
 //! simply never runs it; the error notice explains why.
 //!
-//! The blocking `rfd` pickers stay synchronous — they are native modal
-//! dialogs, not storage IO.
+//! # Picking a file is asynchronous too
+//!
+//! Since step 6c-2 every [`FileDialogProvider`] picker answers with a
+//! [`Job<Option<StorageUri>>`], because the in-app file browser is a
+//! widget and cannot settle before the frame loop runs. Each call site
+//! therefore submits the picker's job as a *loud* [`JobOp`] and does its
+//! work from that operation's continuation ([`pick_then`]). Two
+//! consequences worth knowing:
+//!
+//! - A blocking picker (`rfd` on native) hands back [`Job::ready`], which
+//!   `submit_op` applies inline, so the desktop path — including the
+//!   window-close save gate — stays synchronous in practice.
+//! - While a picker is up it counts as storage activity, so [`storage_busy`]
+//!   refuses a second File action. That is the intended reading: a dialog
+//!   the user has not answered is exactly the state in which a second
+//!   Open must not stack another one.
 //!
 //! # How failures are reported
 //!
@@ -37,7 +51,7 @@ use std::sync::Arc;
 
 use agg_gui::theme::{AccentColor, ThemePreference};
 use atomartist_lib::graph::undo_commands::AddNodeCmd;
-use atomartist_storage::StorageUri;
+use atomartist_storage::{Job, StorageError, StorageUri};
 
 use crate::app_state::AppState;
 use crate::app_state_files::MeshExportFormat;
@@ -77,6 +91,41 @@ pub fn confirm_discard_unsaved_then(
     }
 }
 
+/// Run `then` with the location the user picked.
+///
+/// The picker's job goes onto the frame pump as a **loud** operation: the
+/// user asked for the dialog by name, it belongs in the status bar's
+/// activity readout, and it must make [`storage_busy`] refuse a second
+/// File action for as long as it is up.
+///
+/// Outcomes:
+/// - `Ok(Some(uri))` → `then` runs, from the pump (or inline, for a
+///   blocking picker whose job is already settled).
+/// - `Ok(None)` → the user cancelled. Nothing happens and nothing is
+///   said; a cancelled picker has never been a failure here.
+/// - `Err(Cancelled)` → the picker was refused or torn down (the modal
+///   handle refuses a stacked open this way). Also silent: the user is
+///   already looking at the dialog that won.
+/// - any other `Err` → a notice, because a picker that broke is not the
+///   same as one the user dismissed.
+fn pick_then(
+    state: &AppState,
+    label: impl Into<String>,
+    job: Job<Option<StorageUri>>,
+    then: impl FnOnce(&AppState, StorageUri) + Send + 'static,
+) {
+    state.submit_op(Box::new(JobOp::new(label, job, move |state, result| {
+        match result {
+            Ok(Some(uri)) => then(state, uri),
+            Ok(None) | Err(StorageError::Cancelled) => {}
+            Err(err) => state.notify(
+                NoticeLevel::Error,
+                format!("The file picker failed: {err}"),
+            ),
+        }
+    })));
+}
+
 /// Save to the current location, prompting for one when the project has
 /// never been saved.
 pub fn save_current(state: &AppState, dialogs: &Arc<dyn FileDialogProvider>) {
@@ -92,14 +141,19 @@ pub fn save_current_then(
     on_success: impl FnOnce(&AppState) + Send + 'static,
 ) {
     let existing = state.current_file.lock().unwrap().clone();
-    let target = match existing {
-        Some(uri) => Some(uri),
-        None => dialogs.pick_save_project("untitled.atmr"),
-    };
-    // A cancelled picker is not a failure and gets no notice; it just
-    // means nothing (including the follow-up) happens.
-    let Some(uri) = target else { return };
-    save_project_reporting(state, dialogs, &uri, on_success);
+    match existing {
+        Some(uri) => save_project_reporting(state, dialogs, &uri, on_success),
+        None => {
+            // Never saved: ask where. A cancelled picker is not a failure
+            // and gets no notice; it just means nothing (including the
+            // follow-up) happens.
+            let dialogs = dialogs.clone();
+            let job = dialogs.pick_save_project("untitled.atmr");
+            pick_then(state, "Choosing where to save", job, move |state, uri| {
+                save_project_reporting(state, &dialogs, &uri, on_success)
+            });
+        }
+    }
 }
 
 /// Save to `uri`, reporting a failure **both** ways: the status-bar
@@ -144,7 +198,8 @@ fn open_project_reporting(
     });
 }
 
-/// Cheap re-entry guard for the destructive file actions.
+/// Cheap re-entry guard on **every** File action — New, Open, recent-open,
+/// Save, Save As, Import, and Export alike.
 ///
 /// Double-clicking File → Open (or New / Save) while a slow provider
 /// still has the previous chain in flight used to re-prompt and
@@ -237,7 +292,11 @@ fn apply_theme_visuals(theme: ThemePreference, accent: AccentColor) {
     set_visuals(base.with_accent_color(accent));
 }
 
-pub(crate) fn handle_action(
+/// Dispatch one menu action id — the entry point
+/// [`crate::top_menu_bar`]'s callback calls, and the one an end-to-end
+/// test drives to exercise a File-menu flow exactly as a click would
+/// (the ids are the same strings `compose_menus` bakes into the items).
+pub fn handle_action(
     state: &AppState,
     dialogs: &Arc<dyn FileDialogProvider>,
     debug: &DebugWindowHandles,
@@ -318,6 +377,9 @@ pub(crate) fn handle_action(
         return;
     }
     if let Some(ext) = action.strip_prefix("file.export.") {
+        if storage_busy(state) {
+            return;
+        }
         let format = match ext {
             "stl" => Some(MeshExportFormat::Stl),
             "3mf" => Some(MeshExportFormat::ThreeMf),
@@ -326,14 +388,16 @@ pub(crate) fn handle_action(
         };
         if let Some(format) = format {
             let name = export_default_name(state, format.extension());
-            if let Some(uri) = dialogs.pick_save_export(format.extension(), &name) {
-                state.export_mesh_to_uri(&uri, format);
-            }
+            let job = dialogs.pick_save_export(format.extension(), &name);
+            pick_then(state, "Choosing an export destination", job, move |state, uri| {
+                state.export_mesh_to_uri(&uri, format)
+            });
         } else if ext == "atmr" {
             let name = export_default_name(state, "atmr");
-            if let Some(uri) = dialogs.pick_save_export("atmr", &name) {
-                state.export_project_copy_to_uri(&uri);
-            }
+            let job = dialogs.pick_save_export("atmr", &name);
+            pick_then(state, "Choosing an export destination", job, |state, uri| {
+                state.export_project_copy_to_uri(&uri)
+            });
         }
         return;
     }
@@ -365,9 +429,10 @@ pub(crate) fn handle_action(
             // leave a picked file with nowhere to go.
             let picker = dialogs.clone();
             confirm_discard_unsaved_then(state, dialogs, move |state| {
-                if let Some(uri) = picker.pick_open_project() {
-                    open_project_reporting(state, &picker, &uri);
-                }
+                let job = picker.pick_open_project();
+                pick_then(state, "Choosing a project to open", job, move |state, uri| {
+                    open_project_reporting(state, &picker, &uri)
+                });
             });
         }
         "file.save" => {
@@ -387,16 +452,25 @@ pub(crate) fn handle_action(
                 .as_ref()
                 .and_then(|uri| uri.file_name().map(|n| n.to_string()))
                 .unwrap_or_else(|| "untitled.atmr".to_string());
-            if let Some(uri) = dialogs.pick_save_project(&suggested) {
-                save_project_reporting(state, dialogs, &uri, |_state| {});
-            }
+            let dialogs = dialogs.clone();
+            let job = dialogs.pick_save_project(&suggested);
+            pick_then(state, "Choosing where to save", job, move |state, uri| {
+                save_project_reporting(state, &dialogs, &uri, |_state| {})
+            });
         }
         "file.import" => {
             // Import adds to the scene rather than replacing it, so no
-            // unsaved-changes gate.
-            if let Some(uri) = dialogs.pick_import_file() {
-                state.import_scene_file(&uri);
+            // unsaved-changes gate — but it does put a picker up and read
+            // bytes, so it takes the same re-entry guard every other File
+            // action does (a second Import while the first picker is up
+            // would stack pickers).
+            if storage_busy(state) {
+                return;
             }
+            let job = dialogs.pick_import_file();
+            pick_then(state, "Choosing a file to import", job, |state, uri| {
+                state.import_scene_file(&uri)
+            });
         }
         "help.about" => {
             dialogs.show_info(

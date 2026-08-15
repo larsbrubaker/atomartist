@@ -81,6 +81,9 @@ pub const PROJECT_EXTENSION: &str = "atmr";
 struct OpenRequest {
     mode: BrowserMode,
     default_name: String,
+    /// Extension a save-mode name is forced to — see
+    /// [`FileBrowserModalHandle::open_with_extension`].
+    extension: String,
     completer: JobCompleter<Option<StorageUri>>,
 }
 
@@ -125,6 +128,27 @@ impl FileBrowserModalHandle {
     /// middle of. Callers that want to avoid the refusal entirely check
     /// [`is_open`](Self::is_open) first.
     pub fn open(&self, mode: BrowserMode, default_name: &str) -> Job<Option<StorageUri>> {
+        self.open_with_extension(mode, default_name, PROJECT_EXTENSION)
+    }
+
+    /// [`open`](Self::open) for a destination that is *not* a project.
+    ///
+    /// `extension` (lowercase, no dot) is the extension a save-mode name
+    /// is forced to by [`resolve_pick`] — `"stl"` for File → Export → STL,
+    /// and so on. Without it every export would come back named `.atmr`,
+    /// because forcing the project extension is exactly what the plain
+    /// [`open`](Self::open) does.
+    ///
+    /// In [`BrowserMode::Open`] the extension is carried but unused: the
+    /// pick is an entry that already exists. Filtering the *listing* by
+    /// extension is deliberately not part of this step (design §5, 6d
+    /// polish) — an import picker still shows everything.
+    pub fn open_with_extension(
+        &self,
+        mode: BrowserMode,
+        default_name: &str,
+        extension: &str,
+    ) -> Job<Option<StorageUri>> {
         let (job, completer) = Job::pending();
         let mut inner = self.lock();
         if inner.open || inner.pending.is_some() {
@@ -135,6 +159,7 @@ impl FileBrowserModalHandle {
         inner.pending = Some(OpenRequest {
             mode,
             default_name: default_name.to_string(),
+            extension: extension.to_string(),
             completer,
         });
         drop(inner);
@@ -236,10 +261,30 @@ impl FileBrowserModalHost {
     /// consistent whichever pass sees the close first — a click on OK is
     /// consumed by the button and never bubbles up here, so `layout` is
     /// usually the pass that notices.
+    ///
+    /// # A job that settles behind the dialog's back
+    ///
+    /// The pick job can be cancelled by someone who never saw the dialog:
+    /// the status bar's "cancel all storage activity", or the shutdown
+    /// drain, both reach the [`crate::storage_ops::JobOp`] wrapping it and
+    /// settle it [`StorageError::Cancelled`]. Leaving the sheet up then
+    /// strands the user in front of a picker whose OK cannot do anything —
+    /// the completer would silently ignore it. So a session whose
+    /// completer reports [`JobCompleter::is_settled`] lowers its own
+    /// visibility and takes the ordinary close path from there. That path
+    /// still calls `succeed`, which an already-settled job ignores, so
+    /// nothing is settled twice and the cancellation stands.
     fn settle_if_closed(&mut self) {
         let Some(session) = self.session.as_mut() else {
             return;
         };
+        if session
+            .completer
+            .as_ref()
+            .is_some_and(JobCompleter::is_settled)
+        {
+            session.visible.set(false);
+        }
         if session.visible.get() {
             return;
         }
@@ -297,10 +342,13 @@ impl FileBrowserModalHost {
 
         let gate_model = model.clone();
         let gate_name = Rc::clone(&name_cell);
-        let ok_enabled: Rc<dyn Fn() -> bool> =
-            Rc::new(move || resolve_pick(mode, &gate_model, &gate_name.borrow()).is_some());
+        let gate_ext = request.extension.clone();
+        let ok_enabled: Rc<dyn Fn() -> bool> = Rc::new(move || {
+            resolve_pick(mode, &gate_model, &gate_name.borrow(), &gate_ext).is_some()
+        });
 
         let ok_model = model;
+        let ok_ext = request.extension.clone();
         let ok_name = Rc::clone(&name_cell);
         let ok_outcome = Rc::clone(&outcome);
         let ok_visible = Rc::clone(&visible);
@@ -309,7 +357,7 @@ impl FileBrowserModalHost {
             // this case, but a refused pick must never close the dialog.
             let picked = {
                 let name = ok_name.borrow();
-                resolve_pick(mode, &ok_model, &name)
+                resolve_pick(mode, &ok_model, &name, &ok_ext)
             };
             if let Some(uri) = picked {
                 *ok_outcome.borrow_mut() = Some(uri);
@@ -357,8 +405,15 @@ impl FileBrowserModalHost {
 /// is refused rather than quietly interpreted as a path. So is an empty
 /// name, and so is anything [`StorageUri::try_join`] rejects — it is the
 /// traversal guard, and this is a name the *user* authored. The extension
-/// is forced to `.atmr` by [`with_project_extension`].
-pub fn resolve_pick(mode: BrowserMode, model: &BrowserModel, name: &str) -> Option<StorageUri> {
+/// is forced to `extension` by [`with_forced_extension`] — `"atmr"` for
+/// the project picker, the format's own for File → Export (see
+/// [`FileBrowserModalHandle::open_with_extension`]).
+pub fn resolve_pick(
+    mode: BrowserMode,
+    model: &BrowserModel,
+    name: &str,
+    extension: &str,
+) -> Option<StorageUri> {
     match mode {
         BrowserMode::Open => model
             .selected_entry()
@@ -370,7 +425,7 @@ pub fn resolve_pick(mode: BrowserMode, model: &BrowserModel, name: &str) -> Opti
             if typed.is_empty() || typed.contains('/') || typed.contains('\\') {
                 return None;
             }
-            let joined = cwd.try_join(&with_project_extension(typed)?).ok()?;
+            let joined = cwd.try_join(&with_forced_extension(typed, extension)?).ok()?;
             // Belt and braces: nothing that survives the rules above can
             // normalise back to the directory itself, and saving *over* a
             // directory is not a thing we ever want to hand a caller.
@@ -379,10 +434,12 @@ pub fn resolve_pick(mode: BrowserMode, model: &BrowserModel, name: &str) -> Opti
     }
 }
 
-/// Force the project extension onto a user-typed name.
+/// Force `extension` onto a user-typed name.
 ///
-/// The picker saves projects, so — like `rfd`'s single-filter save dialog
-/// on native — the answer always ends in `.atmr`:
+/// A save-mode picker has exactly one format — the project picker saves
+/// `.atmr`, the STL export picker saves `.stl` — so, like `rfd`'s
+/// single-filter save dialog on native, the answer always ends in it.
+/// With `extension = "atmr"`:
 ///
 /// - `Version 1.2` → `Version 1.2.atmr`. A dot mid-name is part of the
 ///   name, not an extension the user chose.
@@ -394,12 +451,12 @@ pub fn resolve_pick(mode: BrowserMode, model: &BrowserModel, name: &str) -> Opti
 /// - `bracket.atmr` / `BRACKET.ATMR` → unchanged, matched case-insensitively.
 ///
 /// `None` when nothing is left after trimming (`.`, `...`).
-fn with_project_extension(name: &str) -> Option<String> {
+fn with_forced_extension(name: &str, extension: &str) -> Option<String> {
     let trimmed = name.trim_end_matches('.');
     if trimmed.is_empty() {
         return None;
     }
-    let suffix = format!(".{PROJECT_EXTENSION}");
+    let suffix = format!(".{extension}");
     let already =
         trimmed.len() > suffix.len() && trimmed.to_ascii_lowercase().ends_with(suffix.as_str());
     Some(if already {

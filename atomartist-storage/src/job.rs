@@ -249,6 +249,22 @@ impl<T> JobCompleter<T> {
         self.lock().cancel_requested
     }
 
+    /// True once the job has an outcome — so anything this completer
+    /// publishes from now on is ignored.
+    ///
+    /// The counterpart to [`is_cancelled`](Self::is_cancelled) for workers
+    /// that own *user-visible* state rather than a computation:
+    /// [`Job::cancel`] settles the job on the spot, and a UI holding the
+    /// completer (AtomArtist's file-picker modal, which keeps its dialog up
+    /// until the user answers) must be able to notice that nobody is
+    /// waiting for that answer any more and take itself down. Asking
+    /// "was cancel *requested*" is not the same question — a job can be
+    /// settled without it, and the useful trigger is the outcome, not the
+    /// request.
+    pub fn is_settled(&self) -> bool {
+        !matches!(self.lock().outcome, Outcome::Pending { .. })
+    }
+
     /// Takes `self` by value so a job can only be settled once. The `Drop`
     /// guard below then sees a non-`Pending` outcome and stays quiet.
     fn settle(self, outcome: Outcome<T>) {
@@ -385,6 +401,26 @@ mod tests {
         // A late result from the worker does not overwrite the cancellation.
         completer.succeed(3);
         assert_eq!(job.error(), Some(StorageError::Cancelled));
+    }
+
+    /// A completer can tell whether the job it holds still wants an
+    /// answer — the question a UI that keeps a dialog up until the user
+    /// replies has to ask, since a cancel settles the job behind its back.
+    #[test]
+    fn a_completer_sees_that_its_job_already_settled() {
+        let (job, completer) = Job::<u32>::pending();
+        assert!(!completer.is_settled(), "nothing has happened yet");
+
+        job.cancel();
+        assert!(completer.is_settled(), "a cancelled job has an outcome");
+        // And publishing anyway is the no-op it always was.
+        completer.succeed(1);
+        assert_eq!(job.error(), Some(StorageError::Cancelled));
+
+        // Progress is not an outcome.
+        let (_job, completer) = Job::<u32>::pending();
+        completer.set_progress(Some(0.5));
+        assert!(!completer.is_settled());
     }
 
     #[cfg(not(target_arch = "wasm32"))]

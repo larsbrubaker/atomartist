@@ -24,12 +24,12 @@ use agg_gui::widget::{
 };
 use agg_gui::{App, Key, Modifiers, MouseButton, Size, Widget};
 use atomartist_storage::{MemoryProvider, StorageRegistry};
-use atomartist_ui::file_browser::FileBrowserModalHandle;
+use atomartist_ui::file_browser::{FileBrowserModalHandle, ModalFileDialogs};
 use atomartist_ui::{
     build_app, fresh_state_with_builtins_and_storage, fresh_state_with_starter_graph_and_storage,
     AppState, DebugWindowHandles,
 };
-use atomartist_ui::top_menu_bar::NoFileDialogs;
+use atomartist_ui::top_menu_bar::{FileDialogProvider, NoFileDialogs};
 
 /// Default viewport size — matches NodeDesigner's reference window so
 /// hit-testing coordinates ported from those tests land on the same widgets.
@@ -76,9 +76,12 @@ pub struct TestHarness {
     /// shell drains each paint.
     debug: DebugWindowHandles,
     /// Handle to the in-app Open/Save picker the tree hosts. Tests open
-    /// the dialog through this, exactly as step 6c-2's dialog provider
-    /// will.
+    /// the dialog through this, exactly as the dialog provider does.
     browser_modal: FileBrowserModalHandle,
+    /// The provider the tree's menu callbacks use — and the one
+    /// [`TestHarness::menu_action`] dispatches through, so a test drives
+    /// the same routing a real click does.
+    dialogs: Arc<dyn FileDialogProvider>,
     cursor: (f64, f64),
     modifiers: Modifiers,
     size: (f64, f64),
@@ -117,6 +120,22 @@ impl TestHarness {
         Self::from_state(state)
     }
 
+    /// Boot the tree with the **real** in-app file dialogs
+    /// ([`ModalFileDialogs`]) instead of [`NoFileDialogs`] — the web
+    /// shell's exact wiring.
+    ///
+    /// This is what lets a test drive a whole File-menu flow end to end:
+    /// [`menu_action`](Self::menu_action) → the picker puts the browser
+    /// modal up → synthetic clicks answer it → [`pump`](Self::pump)
+    /// applies the pick. Every other constructor uses `NoFileDialogs`,
+    /// whose pickers answer "cancelled" immediately, because most tests
+    /// want the menu action and not the dialog.
+    pub fn with_modal_dialogs(state: AppState) -> Self {
+        Self::build(state, |handle, state| {
+            Arc::new(ModalFileDialogs::new(handle.clone(), state))
+        })
+    }
+
     /// Resize the harness viewport. Re-runs `App::layout` so widget
     /// bounds reflect the new size on the next event.
     pub fn with_size(mut self, w: u32, h: u32) -> Self {
@@ -126,19 +145,31 @@ impl TestHarness {
     }
 
     fn from_state(state: AppState) -> Self {
+        Self::build(state, |_handle, _state| Arc::new(NoFileDialogs))
+    }
+
+    /// Shared constructor: the dialog provider is built *from* the modal
+    /// handle, so it has to be made between the handle and the tree.
+    fn build(
+        state: AppState,
+        make_dialogs: impl FnOnce(&FileBrowserModalHandle, &AppState) -> Arc<dyn FileDialogProvider>,
+    ) -> Self {
         // Install the bundled font into agg-gui's thread-local font
         // slot — most chrome widgets (MenuBar, Label) need it. Idempotent
         // across multiple harness instances in one test process.
         let font = Arc::new(Font::from_bytes(FONT_BYTES.to_vec()).expect("bundled NotoSans"));
         agg_gui::font_settings::set_system_font(Some(font));
-        let dialogs: Arc<dyn atomartist_ui::top_menu_bar::FileDialogProvider> =
-            Arc::new(NoFileDialogs);
         // Harness always starts with the documented default debug
         // window layout — tests that care about persistence build
         // their own UiSettings and pass it directly to build_app.
         let browser_modal = FileBrowserModalHandle::new();
-        let (root, debug): (Box<dyn Widget>, DebugWindowHandles) =
-            build_app(state.clone(), dialogs, None, browser_modal.clone());
+        let dialogs = make_dialogs(&browser_modal, &state);
+        let (root, debug): (Box<dyn Widget>, DebugWindowHandles) = build_app(
+            state.clone(),
+            dialogs.clone(),
+            None,
+            browser_modal.clone(),
+        );
         let mut app = App::new(root);
         app.layout(Size::new(DEFAULT_WIDTH, DEFAULT_HEIGHT));
         Self {
@@ -146,10 +177,26 @@ impl TestHarness {
             app,
             debug,
             browser_modal,
+            dialogs,
             cursor: (0.0, 0.0),
             modifiers: Modifiers::default(),
             size: (DEFAULT_WIDTH, DEFAULT_HEIGHT),
         }
+    }
+
+    /// Dispatch a menu action id (`"file.open"`, `"file.save_as"`,
+    /// `"edit.undo"`, …) through the production routing the top menu
+    /// bar's callback uses, with this harness's dialog provider and debug
+    /// handles. A layout pass follows, so a picker that put the browser
+    /// modal up is on screen when this returns.
+    pub fn menu_action(&mut self, action: &str) -> &mut Self {
+        atomartist_ui::menu_actions::handle_action(
+            &self.state,
+            &self.dialogs,
+            &self.debug,
+            action,
+        );
+        self.frame()
     }
 
     // ── State accessors ────────────────────────────────────────────────

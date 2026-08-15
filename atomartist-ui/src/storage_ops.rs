@@ -274,6 +274,46 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Post a message onto a notice queue, honouring [`NOTICE_CAP`].
+///
+/// The body of [`AppState::notify`], factored out for the one caller that
+/// has a queue but *not* an [`AppState`]:
+/// [`crate::file_browser::ModalFileDialogs`] must be `Send + Sync` (the
+/// dialog trait is) and `AppState` is `!Send`, so it holds the queue
+/// directly. Any-thread safe for the same reason `notify` is.
+///
+/// # Consecutive duplicates are dropped
+///
+/// A message identical (same level, same text) to the one already at the
+/// tail of the queue is not enqueued. One failure now reaches the queue
+/// twice by two legitimate routes — the continuation's own
+/// [`AppState::notify`] and a [`crate::top_menu_bar::FileDialogProvider`]
+/// whose `show_error` posts here too, which is what
+/// `ModalFileDialogs` does in the absence of a message dialog — and the
+/// user should not read the same sentence twice. Only *consecutive*
+/// duplicates are suppressed: a message that recurs after something else
+/// was said is news (the same export failing again, say), and the queue is
+/// drained every frame anyway, so this cannot swallow a repeat the user
+/// would otherwise have seen as new.
+pub(crate) fn push_notice(notices: &Notices, level: NoticeLevel, text: impl Into<String>) {
+    {
+        let mut queue = lock(notices);
+        let text = text.into();
+        if queue
+            .last()
+            .is_some_and(|last| last.level == level && last.text == text)
+        {
+            return;
+        }
+        if queue.len() >= NOTICE_CAP {
+            let overflow = queue.len() + 1 - NOTICE_CAP;
+            queue.drain(0..overflow);
+        }
+        queue.push(Notice { level, text });
+    }
+    agg_gui::animation::signal_async_state_change();
+}
+
 impl AppState {
     /// Post a message for the UI to show on its next paint.
     ///
@@ -282,18 +322,13 @@ impl AppState {
     /// strategy. Drops the oldest messages once the queue exceeds
     /// [`NOTICE_CAP`], so an embedder that never drains cannot leak.
     pub fn notify(&self, level: NoticeLevel, text: impl Into<String>) {
-        {
-            let mut queue = lock(&self.notices);
-            if queue.len() >= NOTICE_CAP {
-                let overflow = queue.len() + 1 - NOTICE_CAP;
-                queue.drain(0..overflow);
-            }
-            queue.push(Notice {
-                level,
-                text: text.into(),
-            });
-        }
-        agg_gui::animation::signal_async_state_change();
+        push_notice(&self.notices, level, text);
+    }
+
+    /// The shared notice queue — for the one collaborator that cannot
+    /// hold an [`AppState`]; see [`push_notice`].
+    pub(crate) fn notice_queue(&self) -> Notices {
+        self.notices.clone()
     }
 
     /// Take every queued message, leaving the queue empty.
@@ -679,3 +714,8 @@ mod storage_ops_tests;
 #[cfg(test)]
 #[path = "storage_ops_quiet_tests.rs"]
 mod storage_ops_quiet_tests;
+
+// …as do the notice-queue de-duplication tests.
+#[cfg(test)]
+#[path = "storage_ops_notice_tests.rs"]
+mod storage_ops_notice_tests;

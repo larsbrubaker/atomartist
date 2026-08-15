@@ -39,18 +39,18 @@ fn open_mode_resolves_only_a_selected_file() {
     let state = state_with_memory();
     let model = BrowserModel::opened_on(&state);
 
-    assert_eq!(resolve_pick(BrowserMode::Open, &model, ""), None);
+    assert_eq!(resolve_pick(BrowserMode::Open, &model, "", PROJECT_EXTENSION), None);
 
     model.select(Some(StorageUri::new("mem", "/alpha.atmr")));
     assert_eq!(
-        resolve_pick(BrowserMode::Open, &model, ""),
+        resolve_pick(BrowserMode::Open, &model, "", PROJECT_EXTENSION),
         Some(StorageUri::new("mem", "/alpha.atmr"))
     );
 
     // A selection that is not in the listing resolves to nothing —
     // `selected_entry`, not the raw `selected()` URI.
     model.select(Some(StorageUri::new("mem", "/ghost.atmr")));
-    assert_eq!(resolve_pick(BrowserMode::Open, &model, ""), None);
+    assert_eq!(resolve_pick(BrowserMode::Open, &model, "", PROJECT_EXTENSION), None);
 }
 
 #[test]
@@ -59,12 +59,12 @@ fn save_mode_joins_the_name_onto_the_current_directory() {
     let model = BrowserModel::opened_on(&state);
 
     assert_eq!(
-        resolve_pick(BrowserMode::Save, &model, "design"),
+        resolve_pick(BrowserMode::Save, &model, "design", PROJECT_EXTENSION),
         Some(StorageUri::new("mem", "/design.atmr"))
     );
     // Surrounding whitespace is not part of a file name.
     assert_eq!(
-        resolve_pick(BrowserMode::Save, &model, "  design  "),
+        resolve_pick(BrowserMode::Save, &model, "  design  ", PROJECT_EXTENSION),
         Some(StorageUri::new("mem", "/design.atmr"))
     );
 }
@@ -76,7 +76,7 @@ fn save_mode_joins_the_name_onto_the_current_directory() {
 fn save_mode_forces_the_project_extension() {
     let state = state_with_memory();
     let model = BrowserModel::opened_on(&state);
-    let save = |name: &str| resolve_pick(BrowserMode::Save, &model, name);
+    let save = |name: &str| resolve_pick(BrowserMode::Save, &model, name, PROJECT_EXTENSION);
 
     // A dot inside the name is part of the name, not a chosen extension.
     assert_eq!(
@@ -123,24 +123,51 @@ fn save_mode_forces_the_project_extension() {
     }
 }
 
+/// File → Export saves an `.stl` (or `.3mf`, or `.obj`), so the picker it
+/// opens forces *that* extension, not the project one. Without the
+/// parameter every export would come back named `.atmr`.
+#[test]
+fn save_mode_forces_the_extension_the_caller_asked_for() {
+    let state = state_with_memory();
+    let model = BrowserModel::opened_on(&state);
+    let export = |name: &str| resolve_pick(BrowserMode::Save, &model, name, "stl");
+
+    assert_eq!(export("part"), Some(StorageUri::new("mem", "/part.stl")));
+    // Already the right extension: left exactly as typed.
+    assert_eq!(export("part.stl"), Some(StorageUri::new("mem", "/part.stl")));
+    // Any other extension is part of the name — this picker has one format.
+    assert_eq!(
+        export("part.atmr"),
+        Some(StorageUri::new("mem", "/part.atmr.stl"))
+    );
+    // …and the project picker is unaffected by the same input.
+    assert_eq!(
+        resolve_pick(BrowserMode::Save, &model, "part", PROJECT_EXTENSION),
+        Some(StorageUri::new("mem", "/part.atmr"))
+    );
+}
+
 #[test]
 fn save_mode_refuses_empty_traversing_and_path_like_names() {
     let state = state_with_memory();
     let model = BrowserModel::opened_on(&state);
 
-    assert_eq!(resolve_pick(BrowserMode::Save, &model, ""), None);
-    assert_eq!(resolve_pick(BrowserMode::Save, &model, "   "), None);
+    assert_eq!(resolve_pick(BrowserMode::Save, &model, "", PROJECT_EXTENSION), None);
+    assert_eq!(resolve_pick(BrowserMode::Save, &model, "   ", PROJECT_EXTENSION), None);
     // `try_join` rejects the escape; the modal must not fall back to
     // anything cleverer.
-    assert_eq!(resolve_pick(BrowserMode::Save, &model, "../escape"), None);
+    assert_eq!(resolve_pick(BrowserMode::Save, &model, "../escape", PROJECT_EXTENSION), None);
     // Nothing survives the trim.
-    assert_eq!(resolve_pick(BrowserMode::Save, &model, "."), None);
-    assert_eq!(resolve_pick(BrowserMode::Save, &model, "..."), None);
+    assert_eq!(resolve_pick(BrowserMode::Save, &model, ".", PROJECT_EXTENSION), None);
+    assert_eq!(resolve_pick(BrowserMode::Save, &model, "...", PROJECT_EXTENSION), None);
     // The name field names a file in the directory on screen; navigating
     // is the browser's job, so a separator is refused rather than
     // silently obeyed.
-    assert_eq!(resolve_pick(BrowserMode::Save, &model, "docs/inner"), None);
-    assert_eq!(resolve_pick(BrowserMode::Save, &model, "docs\\inner"), None);
+    assert_eq!(resolve_pick(BrowserMode::Save, &model, "docs/inner", PROJECT_EXTENSION), None);
+    assert_eq!(
+        resolve_pick(BrowserMode::Save, &model, "docs\\inner", PROJECT_EXTENSION),
+        None
+    );
 }
 
 #[test]

@@ -31,10 +31,8 @@ use demo_wgpu::{begin_frame, WgpuGfxCtx};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
-mod dialogs;
 pub mod web_lifecycle;
 pub mod web_settings;
-use dialogs::WebDialogs;
 
 thread_local! {
     static APP:      RefCell<Option<App>>           = RefCell::new(None);
@@ -326,14 +324,15 @@ async fn init_wgpu() -> Result<(), String> {
     if let Some(last) = loaded_settings.last_project_path.as_ref() {
         state.reopen_last_project(last);
     }
-    // Placeholder pickers (see `dialogs.rs`): save goes to a fixed
-    // `browser:///projects/…` location so Ctrl+S persists, and open /
-    // import still do nothing until the in-app file browser lands in
-    // Phase 6.
-    let dialogs: Arc<dyn FileDialogProvider> = Arc::new(WebDialogs);
-    // Handle to the in-app Open/Save picker — step 6c-2 hands it to the
-    // dialog provider that replaces `WebDialogs`.
+    // Handle to the in-app Open/Save picker: the tree hosts the dialog,
+    // and `ModalFileDialogs` — this shell's whole file-dialog story now
+    // that the `WebDialogs` placeholder is gone — is what puts it up.
+    // Open, Save As, Import and Export all browse the `browser:` provider
+    // for real; messages land in the status bar's notice queue.
     let browser_modal = atomartist_ui::file_browser::FileBrowserModalHandle::new();
+    let dialogs: Arc<dyn FileDialogProvider> = Arc::new(
+        atomartist_ui::file_browser::ModalFileDialogs::new(browser_modal.clone(), &state),
+    );
     let (root, debug) = build_app(
         state.clone(),
         dialogs,

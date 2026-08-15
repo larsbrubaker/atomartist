@@ -33,8 +33,15 @@
 //!   holds the chrome (title, OK / Cancel) so neither file grows past the
 //!   line cap.
 //!
+//! - [`dialogs`] — [`ModalFileDialogs`]: the
+//!   [`FileDialogProvider`](crate::top_menu_bar::FileDialogProvider) that
+//!   answers every File-menu pick through that modal (step 6c-2). The web
+//!   shell's only picker; a native shell uses it for anything `rfd`
+//!   cannot address.
+//!
 //! The favorites bar (6d) embeds the widget the same way.
 
+pub mod dialogs;
 pub mod modal;
 pub mod modal_panel;
 pub mod model;
@@ -43,7 +50,10 @@ pub mod widget;
 pub mod widget_geom;
 mod widget_paint;
 
-pub use modal::{resolve_pick, FileBrowserModalHandle, FileBrowserModalHost, PANEL_SIZE};
+pub use dialogs::ModalFileDialogs;
+pub use modal::{
+    resolve_pick, FileBrowserModalHandle, FileBrowserModalHost, PANEL_SIZE, PROJECT_EXTENSION,
+};
 pub use modal_panel::{FileBrowserModal, ModalLayout};
 pub use model::{BrowserModel, Crumb, Listing, ProviderRoot};
 pub use thumbs::{

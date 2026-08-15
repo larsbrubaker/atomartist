@@ -2,7 +2,7 @@
 //! `atomartist_ui::top_menu_bar::FileDialogProvider`. Split from
 //! `main.rs` to keep it under the 800-line cap.
 
-use atomartist_storage::StorageUri;
+use atomartist_storage::{Job, StorageUri};
 use atomartist_ui::top_menu_bar::{FileDialogProvider, UnsavedChoice};
 
 /// File-dialog provider for native — backed by `rfd`. Blocking dialogs
@@ -20,6 +20,29 @@ use atomartist_ui::top_menu_bar::{FileDialogProvider, UnsavedChoice};
 /// layer knows about. A path with no round-trippable URI form (a UNC
 /// share or a verbatim prefix) is reported to the user and the pick is
 /// treated as cancelled — see [`uri_or_explain`].
+///
+/// # Blocking pickers behind an asynchronous trait
+///
+/// [`FileDialogProvider`]'s pickers return a
+/// [`Job`](atomartist_storage::Job) since step 6c-2, because the in-app
+/// browser cannot answer before the frame loop runs. `rfd` *can* — so each
+/// picker here blocks as it always did and wraps the answer in
+/// [`Job::ready`]. `AppState::submit_op` applies an already-settled job
+/// inline, so nothing about the desktop timing changes: the pick is acted
+/// on before the menu callback returns, which is what keeps the
+/// window-close save gate (`close_gate` + `main`'s drain) synchronous.
+///
+/// # When this stops being the whole story
+///
+/// Native registers only `LocalFsProvider` today, so every pick is a
+/// `file:` pick and the OS dialog is the right answer for all of them —
+/// the `native_picker()` case of `docs/storage-architecture-plan.md` §3.3.
+/// The day a native build registers a provider `rfd` cannot address (a
+/// cloud or `browser:`-style scheme), this type stops being sufficient:
+/// the shell then uses
+/// [`atomartist_ui::file_browser::ModalFileDialogs`] — the in-app browser
+/// covers every scheme — and routes back to an OS dialog only for the
+/// schemes that declare a native picker.
 pub struct NativeDialogs;
 
 /// Message shown when the user picks a location AtomArtist cannot yet
@@ -28,21 +51,29 @@ pub struct NativeDialogs;
 const UNC_NOT_SUPPORTED: &str =
     "Network (UNC) paths are not yet supported — map the share to a drive letter";
 impl FileDialogProvider for NativeDialogs {
-    fn pick_open_project(&self) -> Option<StorageUri> {
-        rfd::FileDialog::new()
-            .add_filter("AtomArtist project", &["atmr"])
-            .add_filter("All files", &["*"])
-            .pick_file()
-            .and_then(uri_or_explain)
+    fn pick_open_project(&self) -> Job<Option<StorageUri>> {
+        Job::ready(
+            rfd::FileDialog::new()
+                .add_filter("AtomArtist project", &["atmr"])
+                .add_filter("All files", &["*"])
+                .pick_file()
+                .and_then(uri_or_explain),
+        )
     }
-    fn pick_save_project(&self, default_name: &str) -> Option<StorageUri> {
-        rfd::FileDialog::new()
-            .add_filter("AtomArtist project", &["atmr"])
-            .set_file_name(default_name)
-            .save_file()
-            .and_then(uri_or_explain)
+    fn pick_save_project(&self, default_name: &str) -> Job<Option<StorageUri>> {
+        Job::ready(
+            rfd::FileDialog::new()
+                .add_filter("AtomArtist project", &["atmr"])
+                .set_file_name(default_name)
+                .save_file()
+                .and_then(uri_or_explain),
+        )
     }
-    fn pick_save_export(&self, extension: &str, default_name: &str) -> Option<StorageUri> {
+    fn pick_save_export(
+        &self,
+        extension: &str,
+        default_name: &str,
+    ) -> Job<Option<StorageUri>> {
         let label = match extension {
             "stl" => "Binary STL",
             "3mf" => "3MF model",
@@ -50,23 +81,27 @@ impl FileDialogProvider for NativeDialogs {
             "atmr" => "AtomArtist project",
             _ => "Export",
         };
-        rfd::FileDialog::new()
-            .add_filter(label, &[extension])
-            .set_file_name(default_name)
-            .save_file()
-            .and_then(uri_or_explain)
+        Job::ready(
+            rfd::FileDialog::new()
+                .add_filter(label, &[extension])
+                .set_file_name(default_name)
+                .save_file()
+                .and_then(uri_or_explain),
+        )
     }
-    fn pick_import_file(&self) -> Option<StorageUri> {
-        rfd::FileDialog::new()
-            .add_filter(
-                "All importable files",
-                &["stl", "3mf", "obj", "mcx", "atmr"],
-            )
-            .add_filter("Meshes", &["stl", "3mf", "obj"])
-            .add_filter("MatterControl scene", &["mcx"])
-            .add_filter("AtomArtist project", &["atmr"])
-            .pick_file()
-            .and_then(uri_or_explain)
+    fn pick_import_file(&self) -> Job<Option<StorageUri>> {
+        Job::ready(
+            rfd::FileDialog::new()
+                .add_filter(
+                    "All importable files",
+                    &["stl", "3mf", "obj", "mcx", "atmr"],
+                )
+                .add_filter("Meshes", &["stl", "3mf", "obj"])
+                .add_filter("MatterControl scene", &["mcx"])
+                .add_filter("AtomArtist project", &["atmr"])
+                .pick_file()
+                .and_then(uri_or_explain),
+        )
     }
     fn confirm_unsaved_changes(&self) -> UnsavedChoice {
         // Yes = save first, No = discard, Cancel = keep working.

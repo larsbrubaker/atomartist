@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use atomartist_storage::StorageUri;
+use atomartist_storage::{Job, StorageUri};
 
 use agg_gui::{
     text::Font,
@@ -36,27 +36,54 @@ pub enum UnsavedChoice {
 }
 
 /// Platform-supplied file-picker hooks. demo-native provides an `rfd`-
-/// backed implementation; demo-wasm will provide a browser File API
-/// version. The trait is invoked from the menu's action callback so the
-/// platform can put up a modal dialog and return the chosen location.
+/// backed implementation; demo-wasm (and any shell with non-`file:`
+/// providers) uses
+/// [`ModalFileDialogs`](crate::file_browser::ModalFileDialogs), which
+/// routes every pick through the in-app file browser. The trait is
+/// invoked from the menu's action callback so the platform can put a
+/// picker up and answer with the chosen location.
 ///
 /// Pickers answer with a [`StorageUri`], not a path: a native shell
 /// converts its `PathBuf` with `StorageUri::from_local_path`, while a
-/// cloud-backed picker names an object in its own scheme. The calls stay
-/// blocking for now — `rfd` blocks, and the whole app loop is paused
-/// while a modal is up; the `Job`-returning form lands with the in-app
-/// file browser in Phase 6.
+/// cloud-backed picker names an object in its own scheme.
+///
+/// # Why the pickers return a `Job`
+///
+/// The in-app browser is a widget: it cannot answer before the frame loop
+/// has run, so a blocking signature is impossible for it (step 6c-2 of
+/// `docs/file-browser-design.md`). Every picker therefore hands back a
+/// [`Job<Option<StorageUri>>`] that settles
+/// `Ok(Some(uri))` on confirm and `Ok(None)` on cancel;
+/// [`crate::menu_actions`] wraps it in a [`crate::storage_ops::JobOp`] so
+/// the continuation runs from the frame pump. A blocking implementation
+/// (`rfd`) simply returns [`Job::ready`], which `submit_op` applies inline
+/// — the desktop path stays exactly as immediate as it was.
+///
+/// A failed job is *not* a cancellation: the modal handle fails a stacked
+/// open with [`atomartist_storage::StorageError::Cancelled`], and
+/// `menu_actions` reports anything else as a notice.
+///
+/// # Still blocking, deliberately
+///
+/// [`confirm_unsaved_changes`](Self::confirm_unsaved_changes),
+/// [`show_error`](Self::show_error), and [`show_info`](Self::show_info)
+/// keep their synchronous shapes. A generic in-app confirm/notice modal is
+/// future work (design §5, 6d); until it exists, implementations without a
+/// native message box answer `Cancel` (recoverable) and route messages to
+/// the status-bar notice queue.
 pub trait FileDialogProvider: Send + Sync {
-    fn pick_open_project(&self) -> Option<StorageUri>;
-    fn pick_save_project(&self, default_name: &str) -> Option<StorageUri>;
+    fn pick_open_project(&self) -> Job<Option<StorageUri>>;
+    fn pick_save_project(&self, default_name: &str) -> Job<Option<StorageUri>>;
     /// Destination picker for File → Export. `extension` is the
     /// lowercase format extension without the dot ("stl", "3mf",
-    /// "obj", "atmr"); implementations use it for the dialog filter.
-    fn pick_save_export(&self, extension: &str, default_name: &str) -> Option<StorageUri>;
+    /// "obj", "atmr"); implementations use it for the dialog filter and
+    /// for the extension a typed name is forced to.
+    fn pick_save_export(&self, extension: &str, default_name: &str)
+        -> Job<Option<StorageUri>>;
     /// Source picker for File → Import — meshes (`.stl` / `.obj` /
     /// `.3mf`), MatterControl scenes (`.mcx`), and AtomArtist projects
     /// (`.atmr`).
-    fn pick_import_file(&self) -> Option<StorageUri>;
+    fn pick_import_file(&self) -> Job<Option<StorageUri>>;
     /// "You have unsaved changes" — Save / Discard / Cancel. Shown
     /// before New / Open / recent-open and by the shell before close.
     fn confirm_unsaved_changes(&self) -> UnsavedChoice;
@@ -67,15 +94,18 @@ pub trait FileDialogProvider: Send + Sync {
     fn show_info(&self, title: &str, message: &str);
 }
 
-/// No-op file-dialog provider used by tests / WASM (until Phase 10 wires
-/// up the browser File API). Every picker returns `None`; the unsaved-
-/// changes prompt answers `Discard` so scripted flows never block.
+/// No-op file-dialog provider used by tests and by any shell with no
+/// picker at all. Every picker settles `None` immediately — the same
+/// answer a cancelled dialog gives — and the unsaved-changes prompt
+/// answers `Discard` so scripted flows never block.
 pub struct NoFileDialogs;
 impl FileDialogProvider for NoFileDialogs {
-    fn pick_open_project(&self) -> Option<StorageUri> { None }
-    fn pick_save_project(&self, _name: &str) -> Option<StorageUri> { None }
-    fn pick_save_export(&self, _ext: &str, _name: &str) -> Option<StorageUri> { None }
-    fn pick_import_file(&self) -> Option<StorageUri> { None }
+    fn pick_open_project(&self) -> Job<Option<StorageUri>> { Job::ready(None) }
+    fn pick_save_project(&self, _name: &str) -> Job<Option<StorageUri>> { Job::ready(None) }
+    fn pick_save_export(&self, _ext: &str, _name: &str) -> Job<Option<StorageUri>> {
+        Job::ready(None)
+    }
+    fn pick_import_file(&self) -> Job<Option<StorageUri>> { Job::ready(None) }
     fn confirm_unsaved_changes(&self) -> UnsavedChoice { UnsavedChoice::Discard }
     fn show_error(&self, _message: &str) {}
     fn show_info(&self, _title: &str, _message: &str) {}

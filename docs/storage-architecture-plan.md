@@ -349,20 +349,30 @@ account UI is shown, no network code is reachable.
    for it, so `AppState::reopen_last_project` reports at `Info` and prunes
    the stale entry rather than parking a sticky error in the one display
    slot.
+
+   **Phase 6c caveat:** on shells without an OS message box (wasm),
+   `ModalFileDialogs::show_error` collapses into the status-bar notice —
+   the "modal half" of the policy degrades to notice-only until a
+   ModalSheet-based message dialog exists. Consecutive identical notices
+   are deduplicated so the two channels landing in one queue don't
+   double-post.
 6. **Web gets Open/Save for the first time** — even without any cloud, the
    `browser:` provider plus this UI fixes today's `NoFileDialogs` gap.
    Native file-system access on web also gets a `file:` bridge where the
    browser supports the File System Access API, with download/upload
    fallback elsewhere.
 
-   **Interim state after Phase 5b.** Saving works on the web *before* this
-   UI exists: `demo-wasm`'s `WebDialogs` is an explicitly temporary stand-in
-   that sends every save to `browser:///projects/<name>` and returns `None`
-   for open / import / export (picking an existing location needs the
-   listing pane). It answers the unsaved-changes prompt with `Cancel`, not
-   `Discard` — with no modal to ask through, making File → New look inert is
-   recoverable and discarding real work is not. The whole file disappears
-   when the browser widget lands.
+   **Phase 6c outcome.** `WebDialogs` is gone: the four pickers on
+   `FileDialogProvider` now return `Job<Option<StorageUri>>`, and
+   `ModalFileDialogs` (atomartist-ui) serves every pick through the
+   in-app browser modal — the web has real Open/Save/Import/Export.
+   `NativeDialogs` keeps rfd's blocking dialogs wrapped in `Job::ready`,
+   preserving the zero-latency desktop feel and the synchronous
+   window-close save gate; when non-file providers register on native,
+   the modal-backed impl takes over with `native_picker()` routing per
+   provider. `confirm_unsaved_changes` still answers `Cancel` on the
+   modal impl — a generic confirm sheet is future work, and discarding
+   real work without asking is not an option.
 
 ---
 
