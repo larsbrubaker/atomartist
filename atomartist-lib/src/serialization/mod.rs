@@ -19,11 +19,13 @@ pub mod mesh_io;
 pub mod mesh_mcx;
 pub mod mesh_obj;
 pub mod nodedesigner_import;
+pub mod thumbnail;
 
 pub use asset_store::{AssetEntry, AssetRef, AssetStore};
 pub use change_detection::{ChangeTracker, SavedBaseline};
 pub use atmr::{
-    read_graph_json_from_atmr, read_project_from_bytes, write_atmr_into, write_project_to_bytes,
+    read_graph_json_from_atmr, read_project_from_bytes, write_atmr_into,
+    write_atmr_into_with_thumbnail, write_project_to_bytes, write_project_to_bytes_with_thumbnail,
     AtmrError, GRAPH_ENTRY_NAME, PROJECT_EXTENSION,
 };
 pub use graph_json::{
@@ -35,3 +37,4 @@ pub use mesh_mcx::{import_mcx, McxError, McxPart};
 pub use mesh_io::{export_stl, import_stl, StlError};
 pub use mesh_obj::{export_obj, import_obj, ObjError};
 pub use nodedesigner_import::import_nodedesigner_scene_str;
+pub use thumbnail::{read_thumbnail_from_bytes, THUMBNAIL_ENTRY_NAME};

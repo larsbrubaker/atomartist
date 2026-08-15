@@ -55,14 +55,31 @@ servers (no server here).
 already reads from 3MF packages (`dfs-local-backend.ts:676-733`), so
 slicers and other tools that sniff that path get our previews for free.
 
-- Captured on save from the live viewport render (NodeDesigner's
-  `capturePreviewImage` model: crop to a fixed aspect, ~4:3), scaled to
-  256×192 PNG. Capture happens at serialize time on the caller — same
-  moment the baseline snapshot is taken, same "the bytes describe this
-  graph state" argument.
+- **Implemented as an opportunistic background capture, not a
+  save-time one.** Reading pixels back off the GPU can only happen
+  inside the frame loop and cannot be made synchronous without stalling
+  the save, so the shell (`demo-native::thumbnail_capture`) refreshes a
+  preview roughly every **5 s** (first one after a 2 s warm-up, and only
+  on frames that actually paint — an idle app's preview simply ages) and
+  parks the encoded PNG in `AppState::latest_thumbnail` via
+  `set_thumbnail_png`. Save embeds whatever is in that slot.
+- The crop is the **3-D viewport widget's rectangle** (found by the
+  `"viewport-3d"` id, flipped from agg-gui's bottom-up coordinates into
+  framebuffer rows and clipped to the surface), with NodeDesigner's
+  fixed ~4:3 `capturePreviewImage` crop applied *inside* it, box-scaled
+  to a 256×192 PNG. A window-wide crop would mostly show the node
+  canvas and the side panels. No viewport on screen ⇒ no capture.
+- **Accepted staleness:** the embedded preview can be a few seconds
+  older than the graph it ships with. What is *not* accepted is a
+  preview of a different project — File → New and File → Open both
+  clear the slot, so a save issued before the next capture writes no
+  preview rather than the previous model's.
 - `read_project_from_bytes` ignores it; a separate cheap
   `read_thumbnail_from_bytes(bytes) -> Option<Vec<u8>>` lets the
-  browser pull previews without decoding graphs.
+  browser pull previews without decoding graphs. It reads only the
+  `.rels` part plus the declared/conventional image paths, each with a
+  hard size cap, so a hostile package can't turn a listing into an
+  out-of-memory abort.
 - Absent entry ⇒ glyph fallback (never a broken image — the
   ancestors' rule).
 - Headless shells (tests, `--screenshot-to` off-path) save without a

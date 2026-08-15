@@ -36,8 +36,8 @@ use atomartist_storage::StorageUri;
 
 use atomartist_lib::nodes::mesh::mesh_node;
 use atomartist_lib::serialization::{
-    export_3mf, export_obj, export_stl, read_project_from_bytes, write_project_to_bytes,
-    ChangeTracker,
+    export_3mf, export_obj, export_stl, read_project_from_bytes,
+    write_project_to_bytes_with_thumbnail, ChangeTracker,
 };
 use atomartist_lib::Graph;
 
@@ -78,6 +78,10 @@ impl AppState {
         *self.display_node.lock().unwrap() = None;
         *self.selection.lock().unwrap() = None;
         *self.last_mesh_output.lock().unwrap() = None;
+        // The parked preview shows the model we just discarded; a save
+        // before the shell's next capture would bake it into the new
+        // project's file.
+        self.clear_thumbnail_png();
         self.mark_saved_baseline();
         self.mark_viewport_dirty();
     }
@@ -201,6 +205,10 @@ impl AppState {
         // graph).
         self.edit_stack.lock().unwrap().clear();
         *self.current_file.lock().unwrap() = Some(uri.clone());
+        // Same reason as File → New: the slot still holds a picture of
+        // the project we just replaced. Better no preview than the
+        // wrong one until the shell captures this model.
+        self.clear_thumbnail_png();
         self.mark_saved_baseline();
         self.note_recent_project(uri);
         // Pick a default display node — the highest-id node with a
@@ -262,11 +270,15 @@ impl AppState {
         // baseline installed when the write confirms describes exactly the
         // document that was written — not whatever the graph has become
         // while an asynchronous provider was busy.
+        // The preview is read *before* the graph lock: it is an
+        // independent slot the shell fills from its paint loop, and
+        // taking it first keeps the graph lock's scope to serialization.
+        let thumbnail = self.thumbnail_png();
         let (bytes, baseline) = {
             let graph = self.graph.lock().unwrap();
             let assets = self.assets.lock().unwrap();
             (
-                write_project_to_bytes(&graph, &assets),
+                write_project_to_bytes_with_thumbnail(&graph, &assets, thumbnail.as_deref()),
                 ChangeTracker::baseline_of(&graph),
             )
         };
@@ -418,10 +430,11 @@ impl AppState {
     /// `current_file`, the recent list, and the unsaved-changes
     /// baseline all stay put, unlike [`Self::save_project`].
     pub fn export_project_copy_to_uri(&self, uri: &StorageUri) {
+        let thumbnail = self.thumbnail_png();
         let bytes = {
             let graph = self.graph.lock().unwrap();
             let assets = self.assets.lock().unwrap();
-            write_project_to_bytes(&graph, &assets)
+            write_project_to_bytes_with_thumbnail(&graph, &assets, thumbnail.as_deref())
         };
         match bytes {
             Ok(bytes) => self.submit_write(uri, bytes, "Exporting"),

@@ -38,8 +38,15 @@
 //!
 //! ```text
 //! foo.atmr (zip)
-//! └─ graph.json   ← serialized GraphFile (see graph_json.rs)
+//! ├─ graph.json              ← serialized GraphFile (see graph_json.rs)
+//! └─ Metadata/thumbnail.png  ← optional preview (see thumbnail.rs)
 //! ```
+//!
+//! The thumbnail follows the OPC / 3MF convention so other tools that
+//! sniff that path get our previews for free. It is written only when a
+//! caller supplies one ([`write_project_to_bytes_with_thumbnail`]) and
+//! is ignored on read — [`super::thumbnail::read_thumbnail_from_bytes`]
+//! is the cheap way to pull it back out without decoding the graph.
 //!
 //! Future additions (manifest, baked meshes, embedded textures) will
 //! get their own top-level entries; readers must therefore tolerate
@@ -56,6 +63,7 @@ use crate::serialization::asset_store::AssetStore;
 use crate::serialization::graph_json::{
     graph_from_json_str, graph_to_json_string, LoadResult,
 };
+use crate::serialization::thumbnail::THUMBNAIL_ENTRY_NAME;
 
 /// Conventional file extension for an AtomArtist project file. Lowercase
 /// — callers that need to match user-typed extensions should compare
@@ -120,8 +128,28 @@ pub fn write_project_to_bytes(
     graph: &Graph,
     assets: &AssetStore,
 ) -> Result<Vec<u8>, AtmrError> {
+    write_project_to_bytes_with_thumbnail(graph, assets, None)
+}
+
+/// [`write_project_to_bytes`] plus an optional preview image, stored at
+/// [`THUMBNAIL_ENTRY_NAME`].
+///
+/// A sibling rather than a signature change so the many callers that
+/// have no viewport to capture (tests, importers, headless shells) stay
+/// as they are: the entry is optional forever, and `None` produces
+/// bytes identical to the no-thumbnail encoder.
+pub fn write_project_to_bytes_with_thumbnail(
+    graph: &Graph,
+    assets: &AssetStore,
+    thumbnail_png: Option<&[u8]>,
+) -> Result<Vec<u8>, AtmrError> {
     let json = graph_to_json_string(graph);
-    let cursor = write_atmr_into(Cursor::new(Vec::new()), &json, assets)?;
+    let cursor = write_atmr_into_with_thumbnail(
+        Cursor::new(Vec::new()),
+        &json,
+        assets,
+        thumbnail_png,
+    )?;
     Ok(cursor.into_inner())
 }
 
@@ -151,6 +179,19 @@ pub fn write_atmr_into<W: Write + Seek>(
     graph_json: &str,
     assets: &AssetStore,
 ) -> Result<W, AtmrError> {
+    write_atmr_into_with_thumbnail(writer, graph_json, assets, None)
+}
+
+/// [`write_atmr_into`] with an optional preview image written directly
+/// after the graph. Stored (not deflated): a PNG is already compressed,
+/// so deflating it costs CPU on every save for no size win — and
+/// leaving it stored keeps the browser-side preview read a plain copy.
+pub fn write_atmr_into_with_thumbnail<W: Write + Seek>(
+    writer: W,
+    graph_json: &str,
+    assets: &AssetStore,
+    thumbnail_png: Option<&[u8]>,
+) -> Result<W, AtmrError> {
     let mut zw = ZipWriter::new(writer);
     let opts = SimpleFileOptions::default()
         .compression_method(CompressionMethod::Deflated)
@@ -160,6 +201,14 @@ pub fn write_atmr_into<W: Write + Seek>(
         .compression_level(Some(6));
     zw.start_file(GRAPH_ENTRY_NAME, opts)?;
     zw.write_all(graph_json.as_bytes())?;
+    if let Some(png) = thumbnail_png {
+        if !png.is_empty() {
+            let stored =
+                SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+            zw.start_file(THUMBNAIL_ENTRY_NAME, stored)?;
+            zw.write_all(png)?;
+        }
+    }
     assets.write_into_zip(&mut zw)?;
     let writer = zw.finish()?;
     Ok(writer)
@@ -289,6 +338,33 @@ mod tests {
             "expected a warning naming the skipped node type, got {:?}",
             load.warnings
         );
+    }
+
+    #[test]
+    fn thumbnail_round_trips_and_leaves_the_graph_readable() {
+        use crate::serialization::thumbnail::read_thumbnail_from_bytes;
+        let png = b"\x89PNG\r\n\x1a\n<pretend preview>".to_vec();
+        let bytes =
+            write_project_to_bytes_with_thumbnail(&Graph::new(), &AssetStore::new(), Some(&png))
+                .expect("write with thumbnail");
+
+        assert_eq!(read_thumbnail_from_bytes(&bytes), Some(png));
+        // The graph decoder is untouched by the extra entry.
+        let reg = empty_registry();
+        let _ = read_project_from_bytes(&bytes, &reg).expect("graph still decodes");
+    }
+
+    #[test]
+    fn no_thumbnail_means_no_entry() {
+        use crate::serialization::thumbnail::read_thumbnail_from_bytes;
+        let with_none =
+            write_project_to_bytes_with_thumbnail(&Graph::new(), &AssetStore::new(), None)
+                .expect("write without thumbnail");
+        assert!(read_thumbnail_from_bytes(&with_none).is_none());
+        // …and it is byte-identical to the plain encoder, so existing
+        // files and hashes don't move.
+        let plain = write_project_to_bytes(&Graph::new(), &AssetStore::new()).expect("write");
+        assert_eq!(with_none, plain);
     }
 
     #[test]

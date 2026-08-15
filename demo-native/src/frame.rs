@@ -7,9 +7,10 @@
 //! used to attribute frame cost across pipeline stages.
 
 use agg_gui::{App, DrawCtx, Size};
-use atomartist_ui::DebugWindowHandles;
+use atomartist_ui::{AppState, DebugWindowHandles};
 use demo_wgpu::{begin_frame, WgpuGfxCtx};
 
+use crate::thumbnail_capture::ThumbnailCapture;
 use crate::Gpu;
 
 // Per-frame inspector epoch tracker. Mirrors agg-gui's
@@ -73,6 +74,8 @@ pub fn paint_frame(
     w: u32,
     h: u32,
     capture_after: bool,
+    thumbs: &mut ThumbnailCapture,
+    state: &AppState,
 ) {
     let t_total = web_time::Instant::now();
     let mut t = FrameTimings::default();
@@ -165,11 +168,22 @@ pub fn paint_frame(
         // (surface texture destroyed). The captured pixels live inside
         // ctx.capture_texture and survive present.
         ctx.capture_screenshot();
+    } else {
+        // Project-preview snapshot — same window (post-end_frame,
+        // pre-present), but rate-limited and GPU-only. Skipped entirely
+        // during a `--screenshot` run, which owns the capture texture.
+        // The viewport rectangle is read from the tree we *just* laid
+        // out, so the crop matches this exact frame.
+        thumbs.before_present(ctx, app, w, h);
     }
 
     let t_present = web_time::Instant::now();
     frame.present();
     t.present_ms = elapsed_ms(t_present);
+
+    // Start / harvest the preview readback once the frame is on screen,
+    // so neither ever sits in front of present.
+    thumbs.after_present(ctx, state);
 
     t.total_ms = elapsed_ms(t_total);
 

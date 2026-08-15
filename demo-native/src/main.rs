@@ -31,6 +31,7 @@ mod dialogs;
 mod frame;
 mod gpu;
 mod shell_settings;
+mod thumbnail_capture;
 
 use close_gate::{deferred_close_decision, DeferredClose};
 use dialogs::NativeDialogs;
@@ -339,6 +340,10 @@ fn main() {
     // owned by the pump.
     let close_when_idle = Arc::new(AtomicBool::new(false));
     let screenshot_path = cli.screenshot_to.clone();
+    // Opportunistic project-preview capture (see `thumbnail_capture`).
+    // Disabled in `--screenshot` mode: that run owns the capture texture
+    // and exits after a handful of frames.
+    let mut thumbs = thumbnail_capture::ThumbnailCapture::new(screenshot_path.is_none());
     let warmup_frames: u32 = std::env::var("ATOMARTIST_WARMUP_FRAMES")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -549,7 +554,10 @@ fn main() {
                     next_scheduled_redraw = None;
                     let capture_now = screenshot_path.is_some()
                         && frames_painted + 1 == warmup_frames;
-                    paint_frame(&gpu, &mut wgpu_ctx, &mut app, &debug, win_w, win_h, capture_now);
+                    paint_frame(
+                        &gpu, &mut wgpu_ctx, &mut app, &debug, win_w, win_h, capture_now,
+                        &mut thumbs, &state_for_save,
+                    );
                     frames_painted = frames_painted.saturating_add(1);
 
                     // Persist HUD button states to disk if anything

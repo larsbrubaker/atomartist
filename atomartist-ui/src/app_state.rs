@@ -139,6 +139,17 @@ pub struct AppState {
     /// without locking the main app, but writes go through the
     /// `Mutex` to keep insert-and-spawn-node atomic.
     pub assets: Arc<Mutex<atomartist_lib::serialization::AssetStore>>,
+    /// Most recent viewport preview, already encoded as a 256×192 PNG
+    /// (see [`crate::thumbnail`]). Refreshed opportunistically by the
+    /// platform shell — reading pixels back off the GPU is the shell's
+    /// business, and it cannot happen synchronously inside a save — and
+    /// embedded as `Metadata/thumbnail.png` by the next project write.
+    ///
+    /// A shell that never fills this (the test harness, WASM today)
+    /// simply writes projects without a preview; the entry is optional
+    /// forever. The preview may therefore be a few seconds older than
+    /// the graph it ships with, which is the trade the design accepts.
+    pub latest_thumbnail: Arc<Mutex<Option<Vec<u8>>>>,
     /// User-selected theme + accent color. The View menu's Color and
     /// Theme submenus mutate these; `set_visuals` is re-applied from
     /// the combination whenever either changes. Mirrors the demo-ui
@@ -228,6 +239,7 @@ impl AppState {
             assets: Arc::new(Mutex::new(
                 atomartist_lib::serialization::AssetStore::new(),
             )),
+            latest_thumbnail: Arc::new(Mutex::new(None)),
             theme: Arc::new(Mutex::new(agg_gui::theme::ThemePreference::Light)),
             accent_color: Arc::new(Mutex::new(agg_gui::theme::AccentColor::default())),
             change_tracker: Arc::new(Mutex::new(change_tracker)),
@@ -307,6 +319,27 @@ impl AppState {
         // hover, key-press), so a pure click in the 3-D viewport
         // would visibly fail to "select" the matching node.
         agg_gui::animation::request_draw();
+    }
+
+    /// Publish a freshly captured viewport preview (PNG bytes). Called
+    /// by the platform shell once its asynchronous frame readback
+    /// completes; the next project write embeds it.
+    pub fn set_thumbnail_png(&self, png: Vec<u8>) {
+        *self.latest_thumbnail.lock().unwrap() = Some(png);
+    }
+
+    /// Drop the parked preview because the model it shows is no longer
+    /// the open document (File → New, File → Open). Without this a save
+    /// issued before the shell's next capture would embed the *previous*
+    /// project's picture — a mislabel that then lives in the file.
+    pub fn clear_thumbnail_png(&self) {
+        *self.latest_thumbnail.lock().unwrap() = None;
+    }
+
+    /// The preview to embed in the project being written right now, if
+    /// the shell has produced one yet.
+    pub fn thumbnail_png(&self) -> Option<Vec<u8>> {
+        self.latest_thumbnail.lock().unwrap().clone()
     }
 
     /// Set the dirty flag so the viewport repaints next frame.
@@ -596,6 +629,7 @@ impl Clone for AppState {
             camera_animation: self.camera_animation.clone(),
             projection_animation: self.projection_animation.clone(),
             assets: self.assets.clone(),
+            latest_thumbnail: self.latest_thumbnail.clone(),
             theme: self.theme.clone(),
             accent_color: self.accent_color.clone(),
             change_tracker: self.change_tracker.clone(),

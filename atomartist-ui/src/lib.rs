@@ -26,6 +26,7 @@ pub mod settings;
 pub mod shell_init;
 pub mod status_bar;
 pub mod storage_ops;
+pub mod thumbnail;
 pub mod top_level;
 pub mod top_menu_bar;
 pub mod viewport_overlay;
@@ -43,6 +44,10 @@ pub use settings::{
 };
 pub use shell_init::install_theme_and_fonts;
 pub use storage_ops::{JobOp, Notice, NoticeLevel, PendingOp};
+pub use thumbnail::{
+    framebuffer_crop_from_widget_rect, thumbnail_png_from_rgba, thumbnail_png_from_rgba_region,
+    CropRect, THUMBNAIL_HEIGHT, THUMBNAIL_WIDTH,
+};
 pub use top_level::{
     build_app, fresh_state_with_builtins, fresh_state_with_builtins_and_storage,
     fresh_state_with_starter_graph, fresh_state_with_starter_graph_and_storage,
