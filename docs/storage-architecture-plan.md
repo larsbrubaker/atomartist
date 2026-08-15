@@ -475,6 +475,25 @@ natively. Web settings persistence followed: the wasm shell stores
 a `visibilitychange`/`pagehide` flush standing in for native's
 close-time write.
 
+**Phase 6 outcome (complete, 2026-08-15).** Delivered as 6a–6e per
+`file-browser-design.md`: thumbnail substrate (`Metadata/thumbnail.png`
+in `.atmr`, background viewport capture), the widget-free
+`BrowserModel` + `ThumbnailCache` (generation-guarded listings,
+visibility-gated previews), the shared `FileBrowser` widget, the
+Open/Save modal (`FileDialogProvider`'s pickers now return
+`Job<Option<StorageUri>>`; `WebDialogs` deleted — the web has real
+Open/Save/Import/Export; native keeps rfd via `Job::ready`), the left
+favorites bar (seeded primitive palette persisted in `UiSettings`,
+embedded browser face), and drag-drop insert (single-undo commit,
+ghost via the floating overlay). Two notions this phase added to the
+§3 design: **quiet ops** (thumbnail reads and browser listings are
+invisible to the status bar, the busy gate, and the shutdown drain —
+the listing pane paints its own states) and
+`JobCompleter::is_settled()` (a UI owning user-visible state must
+notice its job was settled externally). agg-gui gained
+`find_widget_screen_rect` and `NodeGraphModel::on_canvas_pan_changed`
+along the way.
+
 **Ordering note:** phases 1–6 deliver real user value with *no* account and
 *no* network — web file support alone justifies them. Cloud is strictly
 additive on top, and phases 7–8 can slip past the first deployment without
