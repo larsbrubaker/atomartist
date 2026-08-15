@@ -52,7 +52,7 @@ use agg_gui::theme::{AccentColor, ThemePreference};
 use atomartist_renderer::RenderStyle;
 use atomartist_storage::StorageUri;
 
-use crate::file_browser::favorites::{Favorite, Favorites};
+use crate::file_browser::favorites::{escape_field, unescape_field, Favorite, Favorites};
 
 /// Persisted geometry + maximized flag for the host OS window the
 /// app paints into. Coordinates are **physical pixels** in the OS's
@@ -384,7 +384,19 @@ impl UiSettings {
             // exactly through `StorageUri::from_str`. The auto-reopen
             // path asks the provider whether the project still exists
             // before loading, so a stale entry can't break startup.
-            out.push_str(&format!("last_project_path={}\n", uri));
+            //
+            // Both project-location keys (here and `recent_project_*`
+            // below) write through the favorites [`escape_field`]
+            // encoding: a `StorageUri` may hold a newline or edge
+            // whitespace (the type validates the scheme and rejects
+            // traversal, not file-name characters), which raw would
+            // split one entry across two physical lines — injecting a
+            // forged `key=value` — or lose its edge spaces to the
+            // `trim` in `from_text`.
+            out.push_str(&format!(
+                "last_project_path={}\n",
+                escape_field(&uri.to_string())
+            ));
         }
         for (i, uri) in self
             .recent_projects
@@ -394,17 +406,13 @@ impl UiSettings {
         {
             // Indexed keys keep the format line-per-value; the parser
             // sorts by index so a hand-shuffled file still round-trips
-            // in a deterministic order.
-            //
-            // TODO(unescaped): a `StorageUri` may contain a newline or
-            // edge whitespace (the type validates the scheme and
-            // rejects traversal, not file-name characters), so this
-            // write can split one entry across two physical lines —
-            // the same hole the favorites encoding closes with
-            // [`crate::file_browser::favorites::escape_field`] /
-            // `unescape_field`. Fixing it here is a separate change
-            // (it needs a format migration for existing files).
-            out.push_str(&format!("recent_project_{}={}\n", i, uri));
+            // in a deterministic order. Escaped via [`escape_field`] for
+            // the reasons noted at the `last_project_path` write above.
+            out.push_str(&format!(
+                "recent_project_{}={}\n",
+                i,
+                escape_field(&uri.to_string())
+            ));
         }
         // Favorites bar geometry. Both are plain scalars; the parser
         // clamps the width, so an out-of-range value costs the user their
@@ -493,7 +501,11 @@ impl UiSettings {
                     // style form to migrate, so a stale settings file
                     // simply loses the entry (plan §3.1). The shell
                     // rechecks existence on startup before opening.
-                    out.last_project_path = StorageUri::from_str(value).ok();
+                    // A malformed escape drops the entry by the same
+                    // rule; a legacy value without backslashes
+                    // unescapes to itself, so old files keep loading.
+                    out.last_project_path =
+                        unescape_field(value).and_then(|raw| StorageUri::from_str(&raw).ok());
                 }
                 "favorites_seeded" => {
                     if let Some(b) = parse_bool(value) {
@@ -517,9 +529,12 @@ impl UiSettings {
                 _ => {
                     if let Some(idx) = key.strip_prefix("recent_project_") {
                         if let Ok(i) = idx.parse::<usize>() {
-                            // Same rule: unparseable entries vanish
-                            // rather than poisoning the recent list.
-                            if let Ok(uri) = StorageUri::from_str(value) {
+                            // Same rule: entries that fail to unescape
+                            // or to parse vanish rather than poisoning
+                            // the recent list.
+                            if let Some(uri) = unescape_field(value)
+                                .and_then(|raw| StorageUri::from_str(&raw).ok())
+                            {
                                 recent.push((i, uri));
                             }
                         }

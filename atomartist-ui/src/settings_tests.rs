@@ -92,11 +92,13 @@ fn last_project_path_round_trips_when_present_and_absent() {
 /// `StorageUri`s are *discarded*, not migrated. A developer's stale
 /// settings file holds path-style values; rather than guessing a scheme
 /// for them we let them vanish — the user loses a menu entry, and never
-/// opens the wrong file.
+/// opens the wrong file. The path-style values here are deliberately
+/// backslash-free so they reach (and are rejected by) `StorageUri::from_str`
+/// rather than tripping the `escape_field` decoder first.
 #[test]
 fn unparseable_project_locations_are_silently_discarded() {
     let parsed = UiSettings::from_text(
-        "last_project_path=C:\\users\\bob\\widget.atmr\n\
+        "last_project_path=/home/bob/widget.atmr\n\
          recent_project_0=/home/bob/older.atmr\n\
          recent_project_1=:::not a uri:::\n\
          recent_project_2=mem:///kept.atmr\n",
@@ -116,6 +118,67 @@ fn unparseable_project_locations_are_silently_discarded() {
     let parsed = UiSettings::from_text("last_project_path=nonsense\nturntable=false\n");
     assert_eq!(parsed.last_project_path, None);
     assert!(!parsed.turntable);
+}
+
+/// A `StorageUri` may legally hold a newline in its path — the type
+/// validates the scheme and refuses traversal segments, not file-name
+/// characters. Written raw, such a value ends its settings line early
+/// and the remainder becomes a *forged* `key=value` line, letting a
+/// project name rewrite unrelated settings. Escaping closes that.
+#[test]
+fn a_newline_in_a_project_uri_cannot_inject_a_settings_key() {
+    // `theme=dark` is the payload: the default is `Light`, so a theme
+    // that comes back `Dark` proves the injected line took effect.
+    let injecting = uri("mem:///p.atmr\ntheme=dark");
+    assert!(injecting.to_string().contains('\n'));
+
+    // Via `last_project_path`.
+    let s = UiSettings {
+        last_project_path: Some(injecting.clone()),
+        ..UiSettings::default()
+    };
+    let parsed = UiSettings::from_text(&s.to_text());
+    assert_eq!(
+        parsed.theme,
+        ThemePreference::Light,
+        "a newline inside last_project_path must not inject a `theme=` line"
+    );
+    assert_eq!(
+        parsed.last_project_path,
+        Some(injecting.clone()),
+        "the URI must survive the round trip with its newline intact"
+    );
+
+    // Via a recent entry.
+    let s = UiSettings {
+        recent_projects: vec![injecting.clone()],
+        ..UiSettings::default()
+    };
+    let parsed = UiSettings::from_text(&s.to_text());
+    assert_eq!(
+        parsed.theme,
+        ThemePreference::Light,
+        "a newline inside a recent project must not inject a `theme=` line"
+    );
+    assert_eq!(parsed.recent_projects, vec![injecting]);
+}
+
+/// `from_text` trims every value, so an unescaped leading / trailing
+/// space in a project URI is silently dropped and the app reopens a
+/// *different* file than the one the user saved.
+#[test]
+fn edge_whitespace_in_a_project_uri_round_trips() {
+    let spaced = uri("mem:///  padded name .atmr ");
+    assert!(spaced.to_string().ends_with(' '));
+
+    let s = UiSettings {
+        last_project_path: Some(spaced.clone()),
+        recent_projects: vec![spaced.clone()],
+        ..UiSettings::default()
+    };
+    let parsed = UiSettings::from_text(&s.to_text());
+    assert_eq!(parsed.last_project_path, Some(spaced.clone()));
+    assert_eq!(parsed.recent_projects, vec![spaced]);
 }
 
 /// The recent list is capped on read as well as on write, so a hand-
