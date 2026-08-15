@@ -78,6 +78,11 @@ pub fn build_app(
     let canvas: Box<dyn Widget> = Box::new(
         NodeEditor::new(shared_model_for(state.clone()))
             .with_id("node-canvas")
+            // Edit-menu seam: the menu bar's callback has no handle on
+            // the widget tree, so Delete Selected / Select All queue a
+            // command on this shared handle (owned by `AppState`) and
+            // the editor applies it on its next layout pass.
+            .with_command_handle(state.node_editor.clone())
             .with_overlay_sink(move |dialog, close_flag| {
                 sink_handle.set(dialog, close_flag);
             })

@@ -50,6 +50,7 @@
 use std::sync::Arc;
 
 use agg_gui::theme::{AccentColor, ThemePreference};
+use agg_gui_node_editor::NodeEditorCommand;
 use atomartist_lib::graph::undo_commands::AddNodeCmd;
 use atomartist_storage::{Job, StorageError, StorageUri};
 
@@ -439,6 +440,18 @@ pub fn handle_action(
         "edit.redo" => {
             state.active_undo().lock().unwrap().redo();
             state.schedule_evaluate_after_edit();
+        }
+        // Selection-scoped edits. The canvas widget owns the multi-
+        // selection (this state mirrors only the primary one), and this
+        // callback cannot reach the widget tree, so both actions are
+        // queued on the shared `NodeEditorHandle` and applied by the
+        // editor's next layout pass. Deletion runs through the model,
+        // which pushes an undo command and schedules re-evaluation.
+        "edit.delete" => {
+            state.node_editor.push(NodeEditorCommand::DeleteSelection);
+        }
+        "edit.select_all" => {
+            state.node_editor.push(NodeEditorCommand::SelectAll);
         }
         "file.new" => {
             if storage_busy(state) {
