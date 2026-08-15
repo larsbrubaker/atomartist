@@ -337,6 +337,12 @@ impl AppState {
             theme: *self.theme.lock().unwrap(),
             accent_color: *self.accent_color.lock().unwrap(),
             recent_projects: self.recent_projects.lock().unwrap().clone(),
+            // Same "not owned by AppState" caveat as `main_window` /
+            // `debug_windows`: the favorites row lives with the
+            // favorites bar (step 6d-2), so whoever owns it must
+            // splice the live value in before writing the blob —
+            // otherwise a save clears the user's row.
+            favorites: crate::file_browser::Favorites::default(),
         }
     }
 

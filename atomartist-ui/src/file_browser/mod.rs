@@ -39,9 +39,15 @@
 //!   shell's only picker; a native shell uses it for anything `rfd`
 //!   cannot address.
 //!
+//! - [`favorites`] — [`Favorites`]: the ordered `{kind, stable_key,
+//!   display_name}` row behind the left rail (step 6d-1), persisted in
+//!   [`UiSettings`](crate::settings::UiSettings) with a seed-once flag.
+//!   Widget-free like the rest of the core.
+//!
 //! The favorites bar (6d) embeds the widget the same way.
 
 pub mod dialogs;
+pub mod favorites;
 pub mod modal;
 pub mod modal_panel;
 pub mod model;
@@ -51,6 +57,9 @@ pub mod widget_geom;
 mod widget_paint;
 
 pub use dialogs::ModalFileDialogs;
+pub use favorites::{
+    Favorite, FavoriteKind, FavoriteResolution, Favorites, MAX_FAVORITES, SEED_NODE_TYPES,
+};
 pub use modal::{
     resolve_pick, FileBrowserModalHandle, FileBrowserModalHost, PANEL_SIZE, PROJECT_EXTENSION,
 };

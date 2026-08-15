@@ -58,6 +58,10 @@ fn non_default_values_round_trip() {
             uri("file:///C:/users/bob/projects/widget.atmr"),
             uri("mem:///projects/older.atmr"),
         ],
+        favorites: Favorites::from_parts(
+            vec![crate::file_browser::Favorite::node_type("Box", "Box")],
+            true,
+        ),
     };
     let parsed = UiSettings::from_text(&s.to_text());
     assert_eq!(s, parsed);

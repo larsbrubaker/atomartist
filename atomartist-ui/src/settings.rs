@@ -52,6 +52,8 @@ use agg_gui::theme::{AccentColor, ThemePreference};
 use atomartist_renderer::RenderStyle;
 use atomartist_storage::StorageUri;
 
+use crate::file_browser::favorites::{Favorite, Favorites};
+
 /// Persisted geometry + maximized flag for the host OS window the
 /// app paints into. Coordinates are **physical pixels** in the OS's
 /// virtual-desktop space (positive Y down, top-left origin) so that
@@ -313,6 +315,12 @@ pub struct UiSettings {
     /// [`MAX_RECENT_PROJECTS`] on both write and read so a hand-
     /// edited file can't grow the menu unboundedly.
     pub recent_projects: Vec<StorageUri>,
+    /// Pinned entries for the left favorites rail, plus the
+    /// "have we ever seeded?" flag. See
+    /// [`crate::file_browser::favorites`] — an empty list with the
+    /// flag set is a row the user deliberately cleared, and stays
+    /// empty across launches.
+    pub favorites: Favorites,
 }
 
 /// Upper bound on the persisted / displayed recent-projects list.
@@ -335,6 +343,9 @@ impl Default for UiSettings {
             theme: ThemePreference::Light,
             accent_color: AccentColor::default(),
             recent_projects: Vec::new(),
+            // Empty and *not* seeded: the first run that has a node
+            // registry in hand calls `seed_defaults_once`.
+            favorites: Favorites::default(),
         }
     }
 }
@@ -375,7 +386,23 @@ impl UiSettings {
             // Indexed keys keep the format line-per-value; the parser
             // sorts by index so a hand-shuffled file still round-trips
             // in a deterministic order.
+            //
+            // TODO(unescaped): a `StorageUri` may contain a newline or
+            // edge whitespace (the type validates the scheme and
+            // rejects traversal, not file-name characters), so this
+            // write can split one entry across two physical lines —
+            // the same hole the favorites encoding closes with
+            // [`crate::file_browser::favorites::escape_field`] /
+            // `unescape_field`. Fixing it here is a separate change
+            // (it needs a format migration for existing files).
             out.push_str(&format!("recent_project_{}={}\n", i, uri));
+        }
+        // Written unconditionally (even when false / empty): the flag
+        // is what tells the next launch whether an empty row means
+        // "user cleared it" or "never seeded".
+        out.push_str(&format!("favorites_seeded={}\n", self.favorites.seeded()));
+        for (i, fav) in self.favorites.list().iter().enumerate() {
+            out.push_str(&format!("favorite_{}={}\n", i, fav.to_field()));
         }
         out
     }
@@ -387,6 +414,10 @@ impl UiSettings {
         // Collected out-of-line so shuffled / duplicated indices in a
         // hand-edited file still produce a stable, capped list.
         let mut recent: Vec<(usize, StorageUri)> = Vec::new();
+        // Same treatment for the favorites row: collected by index so
+        // a hand-shuffled file still loads in a deterministic order.
+        let mut favorites: Vec<(usize, Favorite)> = Vec::new();
+        let mut favorites_seeded = false;
         for line in text.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -444,6 +475,11 @@ impl UiSettings {
                     // rechecks existence on startup before opening.
                     out.last_project_path = StorageUri::from_str(value).ok();
                 }
+                "favorites_seeded" => {
+                    if let Some(b) = parse_bool(value) {
+                        favorites_seeded = b;
+                    }
+                }
                 _ => {
                     if let Some(idx) = key.strip_prefix("recent_project_") {
                         if let Ok(i) = idx.parse::<usize>() {
@@ -451,6 +487,16 @@ impl UiSettings {
                             // rather than poisoning the recent list.
                             if let Ok(uri) = StorageUri::from_str(value) {
                                 recent.push((i, uri));
+                            }
+                        }
+                        continue;
+                    }
+                    if let Some(idx) = key.strip_prefix("favorite_") {
+                        if let Ok(i) = idx.parse::<usize>() {
+                            // Malformed / unknown-kind entries vanish
+                            // rather than loading half-formed.
+                            if let Some(fav) = Favorite::from_field(value) {
+                                favorites.push((i, fav));
                             }
                         }
                         continue;
@@ -466,6 +512,13 @@ impl UiSettings {
         out.recent_projects = recent.into_iter().map(|(_, uri)| uri).collect();
         out.recent_projects.dedup();
         out.recent_projects.truncate(MAX_RECENT_PROJECTS);
+        favorites.sort_by_key(|(i, _)| *i);
+        // `from_parts` re-applies the dedupe + cap rules, so a hand-
+        // edited file can't produce a row `add` would have refused.
+        out.favorites = Favorites::from_parts(
+            favorites.into_iter().map(|(_, f)| f).collect(),
+            favorites_seeded,
+        );
         out
     }
 
