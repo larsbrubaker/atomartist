@@ -55,6 +55,19 @@ pub(crate) fn write_job(
     }
 }
 
+/// Job listing the entries directly inside the directory `uri` — the
+/// in-app file browser's only way into a provider
+/// ([`crate::file_browser`]). A provider that cannot list, or a
+/// directory that does not exist, fails the job; the browser paints that
+/// as [`Listing::Error`](crate::file_browser::Listing::Error) rather than
+/// an empty pane.
+pub(crate) fn list_job(registry: &StorageRegistry, uri: &StorageUri) -> Job<Vec<Entry>> {
+    match registry.resolve(uri) {
+        Some(provider) => provider.list(uri),
+        None => no_provider(uri),
+    }
+}
+
 /// Job answering "is anything stored at `uri`?". `Ok(None)` and any
 /// failure both mean "you cannot open this" — callers (the recent list,
 /// auto-reopen) recover the same way either way.
@@ -160,6 +173,21 @@ mod tests {
         settled(write_job(&registry, &uri, b"hello".to_vec())).unwrap();
         assert!(settled(stat_job(&registry, &uri)).unwrap().is_some());
         assert_eq!(settled(read_job(&registry, &uri)).unwrap(), b"hello");
+
+        let dir: StorageUri = "mem:///projects".parse().unwrap();
+        let entries = settled(list_job(&registry, &dir)).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "a.atmr");
+    }
+
+    /// A listing of an unregistered scheme has to fail the same way a read
+    /// does — the browser turns that into a visible error state.
+    #[test]
+    fn listing_an_unregistered_scheme_fails_naming_it() {
+        let registry = registry_with_memory();
+        let uri: StorageUri = "nope:///".parse().unwrap();
+        let err = settled(list_job(&registry, &uri)).unwrap_err().to_string();
+        assert!(err.contains("nope"), "error should name the scheme: {err}");
     }
 
     /// The error a user sees when the URI's scheme belongs to a provider

@@ -16,6 +16,7 @@ pub mod circular_dropdown;
 pub mod circular_icon_button;
 pub mod debug_windows;
 pub mod fa;
+pub mod file_browser;
 pub mod first_paint;
 pub mod floating_overlay;
 pub mod icons;
