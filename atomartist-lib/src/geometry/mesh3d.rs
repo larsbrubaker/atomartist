@@ -64,10 +64,53 @@ pub fn get_normal(mesh: &MeshGL, i: usize) -> [f32; 3] {
     ]
 }
 
+/// Give every triangle corner its own vertex, so per-face normals can be
+/// stored without neighbouring faces overwriting each other.
+///
+/// [`compute_flat_normals`] writes a face's normal into its three vertex
+/// slots; where a vertex is shared between faces — which is how every solid
+/// modeller, `manifold-rust` included, hands back a boolean result — only
+/// the last face visited keeps its normal and the rest shade wrong. Splitting
+/// first is the general fix: it costs vertices (3 per triangle) and buys
+/// correct flat shading. Callers that want smooth shading should not use
+/// either function.
+///
+/// Non-position properties are copied from the source vertex; positions and
+/// winding are untouched, so the result is geometrically identical.
+pub fn split_for_flat_normals(mesh: &MeshGL) -> MeshGL {
+    let stride = mesh.num_prop as usize;
+    if stride < 3 {
+        return mesh.clone();
+    }
+    let n_verts = mesh.vert_properties.len() / stride;
+    let mut verts: Vec<f32> = Vec::with_capacity(mesh.tri_verts.len() * stride);
+    let mut tris: Vec<u32> = Vec::with_capacity(mesh.tri_verts.len());
+    for &i in &mesh.tri_verts {
+        let src = i as usize;
+        if src >= n_verts {
+            // Defensive: an out-of-range index would otherwise panic here.
+            // Drop the corner's triangle rather than fabricate a vertex.
+            continue;
+        }
+        tris.push((verts.len() / stride) as u32);
+        verts.extend_from_slice(&mesh.vert_properties[src * stride..src * stride + stride]);
+    }
+    // A partially dropped triangle would leave a dangling corner count.
+    let keep = tris.len() - tris.len() % 3;
+    tris.truncate(keep);
+    verts.truncate(keep * stride);
+    MeshGL {
+        num_prop: mesh.num_prop,
+        vert_properties: verts,
+        tri_verts: tris,
+        ..Default::default()
+    }
+}
+
 /// Compute flat per-triangle face normals and write them into the
 /// num_prop=6 layout. Each triangle's three vertices share the same normal,
-/// so the input mesh should already have one vertex per triangle-corner
-/// (no sharing across faces with different orientations).
+/// so the input mesh must already have one vertex per triangle-corner —
+/// run [`split_for_flat_normals`] first if it might not.
 pub fn compute_flat_normals(mesh: &mut MeshGL) {
     if mesh.num_prop != NUM_PROP {
         return;
@@ -262,6 +305,58 @@ mod tests {
             assert!((n[0] - 0.0).abs() < 1e-6);
             assert!((n[1] - 0.0).abs() < 1e-6);
             assert!((n[2] - 1.0).abs() < 1e-6, "expected +Z, got {:?}", n);
+        }
+    }
+
+    /// Two triangles sharing an edge but facing different ways: with shared
+    /// vertices, `compute_flat_normals` can only satisfy one of them.
+    fn folded_pair() -> MeshGL {
+        let verts = vec![
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, // 0
+            1.0, 0.0, 0.0, 0.0, 0.0, 0.0, // 1
+            0.0, 1.0, 0.0, 0.0, 0.0, 0.0, // 2
+            0.0, 0.0, 1.0, 0.0, 0.0, 0.0, // 3
+        ];
+        // (0,1,2) lies in the XY plane; (0,2,3) lies in the YZ plane.
+        make_mesh(verts, vec![0, 1, 2, 0, 2, 3])
+    }
+
+    #[test]
+    fn split_for_flat_normals_gives_each_corner_its_own_vertex() {
+        let m = folded_pair();
+        let split = split_for_flat_normals(&m);
+        assert_eq!(num_tris(&split), 2);
+        assert_eq!(num_verts(&split), 6, "one vertex per triangle corner");
+        assert_eq!(split.tri_verts, vec![0, 1, 2, 3, 4, 5]);
+        // Positions are preserved corner for corner.
+        for (new_i, &old_i) in m.tri_verts.iter().enumerate() {
+            assert_eq!(get_pos(&split, new_i), get_pos(&m, old_i as usize));
+        }
+    }
+
+    #[test]
+    fn split_then_flat_normals_satisfies_every_triangle() {
+        let mut shared = folded_pair();
+        compute_flat_normals(&mut shared);
+        // The shared-vertex mesh cannot satisfy both faces: vertices 0 and 2
+        // belong to both, and the second triangle wrote last.
+        let n0 = get_normal(&shared, 0);
+        assert!(
+            (n0[2] - 1.0).abs() > 1e-6,
+            "fixture no longer demonstrates the shared-vertex clash: {:?}",
+            n0
+        );
+
+        let mut split = split_for_flat_normals(&folded_pair());
+        compute_flat_normals(&mut split);
+        // Triangle 0 faces +Z, triangle 1 (0->2->3) faces +X.
+        for i in 0..3 {
+            let n = get_normal(&split, i);
+            assert!((n[2] - 1.0).abs() < 1e-6, "tri 0 corner {}: {:?}", i, n);
+        }
+        for i in 3..6 {
+            let n = get_normal(&split, i);
+            assert!((n[0] - 1.0).abs() < 1e-6, "tri 1 corner {}: {:?}", i, n);
         }
     }
 

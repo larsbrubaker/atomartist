@@ -2,6 +2,7 @@
 //! Boolean and mesh-repair operations land in this module in later phases.
 
 pub mod align_node;
+pub mod boolean_import;
 pub mod boolean_node;
 pub mod combine_node;
 pub mod extrude_node;
