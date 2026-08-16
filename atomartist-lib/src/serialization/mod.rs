@@ -19,6 +19,7 @@ pub mod mesh_io;
 pub mod mesh_mcx;
 pub mod mesh_obj;
 pub mod nodedesigner_import;
+pub mod prop_migration;
 pub mod thumbnail;
 pub mod view_state;
 
@@ -38,5 +39,6 @@ pub use mesh_mcx::{import_mcx, McxError, McxPart};
 pub use mesh_io::{export_stl, import_stl, StlError};
 pub use mesh_obj::{export_obj, import_obj, ObjError};
 pub use nodedesigner_import::import_nodedesigner_scene_str;
+pub use prop_migration::migrate_value;
 pub use thumbnail::{read_thumbnail_from_bytes, THUMBNAIL_ENTRY_NAME};
 pub use view_state::{clamp_divider, CameraState, CanvasView, ProjectView};

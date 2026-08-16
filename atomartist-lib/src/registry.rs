@@ -43,7 +43,7 @@ pub use editor::{EditorKind, NodeFieldAttrs, NumberAttrs, PropDef, VisibleWhen};
 
 #[path = "registry/params.rs"]
 mod params;
-pub use params::{ParamReader, ParamSet};
+pub use params::{enum_variant_for_index, ParamReader, ParamSet};
 
 
 /// Initial socket + property layout for a new node instance — what

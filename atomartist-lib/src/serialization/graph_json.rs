@@ -16,7 +16,10 @@
 //!
 //! Backward compatibility: version 1 is the first shipped schema, so
 //! there is no older format to read. Files carrying a different version
-//! number load with a warning rather than a hard error.
+//! number load with a warning rather than a hard error. Within v1, a
+//! stored value whose variant no longer matches the node type's schema
+//! is coerced by [`crate::serialization::prop_migration`] — today that
+//! is the numeric-index → enum-variant-name upgrade.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -267,11 +270,24 @@ pub fn load_graph(file: GraphFile, registry: &NodeRegistry) -> LoadResult {
         if let Some(def) = registry.get(&nf.type_id) {
             for prop_def in def.properties() {
                 let key = prop_def.name.clone();
-                let value = nf
-                    .properties
-                    .get(prop_def.name.as_ref())
-                    .map(|j| j.clone().into_port_value())
-                    .unwrap_or_else(|| prop_def.default.clone());
+                // Values the file carried run through the schema-shape
+                // migration (an enum stored as its old numeric index
+                // becomes the variant name); see `prop_migration`. A
+                // stored choice the current schema can't honour comes
+                // back with a warning rather than vanishing into the
+                // default.
+                let value = match nf.properties.get(prop_def.name.as_ref()) {
+                    Some(j) => {
+                        let v = j.clone().into_port_value();
+                        let (value, warning) =
+                            super::prop_migration::migrate_value(&prop_def, v);
+                        if let Some(w) = warning {
+                            warnings.push(format!("node {} ({}): {}", nf.id, nf.type_id, w));
+                        }
+                        value
+                    }
+                    None => prop_def.default.clone(),
+                };
                 node.properties.insert(key, value);
             }
         }
@@ -432,6 +448,122 @@ mod tests {
         match restored.properties.get("matrix").unwrap() {
             PortValue::Matrix4x4(mm) => assert_eq!(*mm, m),
             _ => panic!("matrix did not round-trip as Matrix4x4"),
+        }
+    }
+
+    /// A Boolean node saved before the operation became an enum stored
+    /// `{"kind":"Number","value":1}` (1 = difference). Loading must
+    /// upgrade it to the variant name so the node evaluates — and the
+    /// canvas renders — as Subtract.
+    #[test]
+    fn legacy_number_operation_loads_as_the_named_enum_variant() {
+        let reg = registry();
+        let json = r#"{
+            "version": 1,
+            "next_socket_uid": 0,
+            "nodes": [
+                {"id": 3, "type_id": "Boolean", "position": [4,5], "inputs": [], "outputs": [],
+                 "properties": {"operation": {"kind": "Number", "value": 1}}}
+            ],
+            "noodles": []
+        }"#;
+        let result = graph_from_json_str(json, &reg).unwrap();
+        let node = result
+            .graph
+            .nodes()
+            .find(|n| n.type_id.as_ref() == "Boolean")
+            .expect("Boolean not present after load");
+        match node.properties.get("operation").unwrap() {
+            PortValue::StringVal(s) => assert_eq!(s.as_str(), "Subtract"),
+            other => panic!("operation loaded as {:?}, expected StringVal", other),
+        }
+    }
+
+    /// A choice the current schema cannot honour is reset to the default
+    /// *and* reported — the same channel unknown node types use. Silence
+    /// would be indistinguishable from "the file always said Combine".
+    #[test]
+    fn a_lost_enum_choice_is_reported_as_a_warning() {
+        let reg = registry();
+        let json = r#"{
+            "version": 1,
+            "next_socket_uid": 0,
+            "nodes": [
+                {"id": 3, "type_id": "Boolean", "position": [0,0], "inputs": [], "outputs": [],
+                 "properties": {"operation": {"kind": "Number", "value": 42}}},
+                {"id": 4, "type_id": "Boolean", "position": [0,0], "inputs": [], "outputs": [],
+                 "properties": {"operation": {"kind": "StringVal", "value": "Frobnicate"}}}
+            ],
+            "noodles": []
+        }"#;
+        let result = graph_from_json_str(json, &reg).unwrap();
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("operation") && w.contains("42") && w.contains("Combine")),
+            "no warning for the out-of-range index: {:?}",
+            result.warnings
+        );
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("Frobnicate") && w.contains("Combine")),
+            "no warning for the unknown variant name: {:?}",
+            result.warnings
+        );
+        for n in result.graph.nodes() {
+            match n.properties.get("operation").unwrap() {
+                PortValue::StringVal(s) => assert_eq!(s.as_str(), "Combine"),
+                other => panic!("operation loaded as {:?}", other),
+            }
+        }
+    }
+
+    /// A choice the schema *can* honour loads silently — the warning
+    /// channel stays quiet on the common path.
+    #[test]
+    fn a_legal_enum_choice_loads_without_warnings() {
+        let reg = registry();
+        let json = r#"{
+            "version": 1,
+            "next_socket_uid": 0,
+            "nodes": [
+                {"id": 3, "type_id": "Boolean", "position": [0,0], "inputs": [], "outputs": [],
+                 "properties": {"operation": {"kind": "Number", "value": 2}}}
+            ],
+            "noodles": []
+        }"#;
+        let result = graph_from_json_str(json, &reg).unwrap();
+        assert!(result.warnings.is_empty(), "warnings: {:?}", result.warnings);
+    }
+
+    /// And the migrated value survives a save/load round trip by name —
+    /// the point of serializing the enum as its spelling.
+    #[test]
+    fn enum_operation_round_trips_by_name() {
+        let reg = registry();
+        let mut g = Graph::new();
+        let id = g.add_new_node("Boolean", [0.0, 0.0], &reg).unwrap();
+        g.set_property(
+            id,
+            "operation",
+            PortValue::StringVal(Arc::new("Subtract & Replace".to_string())),
+        )
+        .unwrap();
+
+        let json = graph_to_json_string(&g);
+        assert!(
+            json.contains("Subtract & Replace"),
+            "operation was not serialized by name: {}",
+            json
+        );
+        let LoadResult { graph: g2, .. } = graph_from_json_str(&json, &reg).unwrap();
+        let node = g2.nodes().find(|n| n.type_id.as_ref() == "Boolean").unwrap();
+        match node.properties.get("operation").unwrap() {
+            PortValue::StringVal(s) => assert_eq!(s.as_str(), "Subtract & Replace"),
+            other => panic!("operation round-tripped as {:?}", other),
         }
     }
 

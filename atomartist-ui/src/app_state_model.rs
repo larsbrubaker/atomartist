@@ -98,17 +98,23 @@ impl AppStateModel {
         }
     }
 
-    /// A string maps to the canvas's inline-editable `Text` variant
-    /// only when its schema editor is *explicitly* the single-line
-    /// string editor. This is an allowlist, not a denylist: enum-backed
-    /// strings (`EnumDropdown` / `EnumButtons` / `EnumTabs`) also carry
-    /// a `PortValue::StringVal`, and surfacing those as free-text would
-    /// let the user type a value outside the enum's variant set. Read-
-    /// only, multi-line, and the default `Display` editor likewise stay
-    /// display-only (`Other`). Node authors opt a string into inline
-    /// editing by declaring `EditorKind::StringSingleLine`.
+    /// A string maps to the canvas's `Text` variant when the canvas has
+    /// an editor that can *safely* change it:
+    ///
+    ///   * `StringSingleLine` — free text, edited in the inline overlay;
+    ///   * the enum presentations (`EnumDropdown` / `EnumButtons` /
+    ///     `EnumTabs`) — the canvas paints a segmented strip and commits
+    ///     one of the declared variants. The strip's click handler runs
+    ///     *before* the free-text branch in the canvas dispatcher, so an
+    ///     enum row can never be typed into; the value stays inside the
+    ///     variant set.
+    ///
+    /// This stays an allowlist: read-only, multi-line, and the default
+    /// `Display` editor remain display-only (`Other`), because forwarding
+    /// them as `Text` would open the free-text editor on a value the
+    /// schema says is not free text.
     fn string_is_inline_editable(editor: &EditorKind) -> bool {
-        matches!(editor, EditorKind::StringSingleLine)
+        matches!(editor, EditorKind::StringSingleLine) || editor.enum_variants().is_some()
     }
 
     fn property_value_to_ne(v: &PortValue, editor: &EditorKind) -> ne::PropertyValue {
@@ -601,7 +607,17 @@ impl ne::NodeGraphModel for AppStateModel {
         // matching node-drag case. Pixel-rate property writes merge
         // into the top-of-stack ChangePropertyCmd as long as the
         // (id, name) tuple matches.
-        let coalesced = {
+        //
+        // Numbers only. The merge has no gesture bound to close it (the
+        // canvas gives us writes, not press/release), so it keys on
+        // (node, property) alone — fine for a drag, wrong for discrete
+        // commits: three clicks through an enum strip, or three toggle
+        // flips, would collapse into one entry and a single undo would
+        // jump past every intermediate choice the user deliberately
+        // made. A scrub is one *gesture* worth of writes; a click is a
+        // decision.
+        let coalescible = matches!(port_value, PortValue::Number(_));
+        let coalesced = coalescible && {
             let name_for_pred = name_arc.clone();
             let value_for_pred = port_value.clone();
             undo.lock().unwrap().try_coalesce_last(|top| {

@@ -28,9 +28,23 @@ fn wrap(m: MeshGL) -> PortValue {
     PortValue::Geometry3d(Arc::new(Geometry3d::from_mesh(Arc::new(m))))
 }
 
-/// Run the Boolean node once over two operand meshes with `operation`
-/// (0 = union, 1 = difference, 2 = intersection).
-fn run_boolean(a: MeshGL, b: MeshGL, operation: f64) -> Result<MeshGL, NodeError> {
+/// Run the Boolean node once over two operand meshes, returning the
+/// **first** body's mesh. `operation` is the stored property value, so
+/// tests can hand in either a variant name or a legacy `Number`.
+fn run_boolean(a: MeshGL, b: MeshGL, operation: PortValue) -> Result<MeshGL, NodeError> {
+    Ok(match run_boolean_bodies(a, b, operation)?.first() {
+        Some(body) => (*body.mesh).clone(),
+        None => MeshGL { num_prop: 6, ..Default::default() },
+    })
+}
+
+/// Run the Boolean node once and return the whole output geometry —
+/// Subtract & Replace produces two bodies, so its tests need the group.
+fn run_boolean_bodies(
+    a: MeshGL,
+    b: MeshGL,
+    operation: PortValue,
+) -> Result<Geometry3d, NodeError> {
     let n = BooleanNode;
     let mut alloc = SocketUidAlloc::new();
     let tpl = n.instantiate(&mut alloc);
@@ -49,16 +63,18 @@ fn run_boolean(a: MeshGL, b: MeshGL, operation: f64) -> Result<MeshGL, NodeError
     inputs.insert(uid_a, wrap(a));
     inputs.insert(uid_b, wrap(b));
     let mut props = NodeProperties::default();
-    props.insert("operation", PortValue::Number(operation));
+    props.insert("operation", operation);
     let ctx = EvalCtx { instance: &inst, properties: &props, inputs: &inputs };
     let outs = n.evaluate(&ctx)?;
     match outs.by_name.get("out") {
-        Some(PortValue::Geometry3d(g)) => match g.first() {
-            Some(body) => Ok((*body.mesh).clone()),
-            None => Ok(MeshGL { num_prop: 6, ..Default::default() }),
-        },
-        _ => Ok(MeshGL { num_prop: 6, ..Default::default() }),
+        Some(PortValue::Geometry3d(g)) => Ok((**g).clone()),
+        _ => Ok(Geometry3d::empty()),
     }
+}
+
+/// The stored property value for a named operation.
+fn op(name: &str) -> PortValue {
+    PortValue::StringVal(Arc::new(name.to_string()))
 }
 
 /// Translate every vertex position of a `num_prop = 6` mesh.
@@ -169,7 +185,8 @@ fn self_intersecting_pair() -> MeshGL {
 
 #[test]
 fn union_of_overlapping_boxes_yields_single_solid() {
-    let out = match run_boolean(generate_box(2.0, 2.0, 2.0), generate_box(2.0, 2.0, 2.0), 0.0) {
+    let boxes = (generate_box(2.0, 2.0, 2.0), generate_box(2.0, 2.0, 2.0));
+    let out = match run_boolean(boxes.0, boxes.1, op("Combine")) {
         Ok(m) => m,
         Err(e) => panic!("union of two identical boxes failed: {}", e),
     };
@@ -189,7 +206,8 @@ fn union_of_overlapping_boxes_yields_single_solid() {
 /// visual half of the dark-blob report).
 #[test]
 fn union_result_has_per_triangle_flat_normals() {
-    let out = match run_boolean(generate_box(2.0, 2.0, 2.0), generate_box(1.0, 3.0, 1.0), 0.0) {
+    let boxes = (generate_box(2.0, 2.0, 2.0), generate_box(1.0, 3.0, 1.0));
+    let out = match run_boolean(boxes.0, boxes.1, op("Combine")) {
         Ok(m) => m,
         Err(e) => panic!("union failed: {}", e),
     };
@@ -247,7 +265,8 @@ fn union_result_has_per_triangle_flat_normals() {
 /// not-closed cases below.
 #[test]
 fn union_with_closed_non_manifold_operand_keeps_the_geometry() {
-    let out = match run_boolean(two_boxes_sharing_an_edge(), generate_box(1.0, 1.0, 1.0), 0.0) {
+    let operands = (two_boxes_sharing_an_edge(), generate_box(1.0, 1.0, 1.0));
+    let out = match run_boolean(operands.0, operands.1, op("Combine")) {
         Ok(m) => m,
         Err(e) => panic!("non-manifold operand rejected: {}", e),
     };
@@ -266,7 +285,7 @@ fn union_with_closed_non_manifold_operand_keeps_the_geometry() {
 /// never silent emptiness.
 #[test]
 fn not_closed_operand_reports_a_named_error() {
-    let err = match run_boolean(generate_box(2.0, 2.0, 2.0), open_box(), 0.0) {
+    let err = match run_boolean(generate_box(2.0, 2.0, 2.0), open_box(), op("Combine")) {
         Ok(m) => panic!("open box accepted, produced {} tris", m.tri_verts.len() / 3),
         Err(e) => e.to_string(),
     };
@@ -286,7 +305,7 @@ fn out_of_bounds_index_reports_a_named_error() {
     let mut mesh = generate_box(2.0, 2.0, 2.0);
     let n = (mesh.vert_properties.len() / STRIDE) as u32;
     mesh.tri_verts[0] = n + 7;
-    let err = match run_boolean(generate_box(2.0, 2.0, 2.0), mesh, 0.0) {
+    let err = match run_boolean(generate_box(2.0, 2.0, 2.0), mesh, op("Combine")) {
         Ok(m) => panic!("out-of-bounds operand accepted, produced {} tris", m.tri_verts.len() / 3),
         Err(e) => e.to_string(),
     };
@@ -309,7 +328,7 @@ fn degenerate_operand_reports_a_named_error() {
         v[1] = 0.0;
         v[2] = 0.0;
     }
-    let err = match run_boolean(generate_box(2.0, 2.0, 2.0), mesh, 0.0) {
+    let err = match run_boolean(generate_box(2.0, 2.0, 2.0), mesh, op("Combine")) {
         Ok(m) => panic!("degenerate operand accepted, produced {} tris", m.tri_verts.len() / 3),
         Err(e) => e.to_string(),
     };
@@ -343,7 +362,7 @@ fn seam_split_operand_imports_after_the_weld_retry() {
 /// union then quietly returned only the *other* operand).
 #[test]
 fn union_with_seam_split_operand_keeps_the_geometry() {
-    let out = match run_boolean(seam_split_box(), generate_box(2.0, 2.0, 2.0), 0.0) {
+    let out = match run_boolean(seam_split_box(), generate_box(2.0, 2.0, 2.0), op("Combine")) {
         Ok(m) => m,
         Err(e) => panic!("seam-split operand rejected: {}", e),
     };
@@ -364,7 +383,8 @@ fn union_with_seam_split_operand_keeps_the_geometry() {
 fn union_with_self_intersecting_operand_has_the_right_volume() {
     // [-1,1]^3 (8) ∪ [0,2]^3 (8) overlap [0,1]^3 (1) = 15; operand 'b' sits
     // wholly inside the first box, so it adds nothing.
-    let out = match run_boolean(self_intersecting_pair(), generate_box(1.0, 1.0, 1.0), 0.0) {
+    let operands = (self_intersecting_pair(), generate_box(1.0, 1.0, 1.0));
+    let out = match run_boolean(operands.0, operands.1, op("Combine")) {
         Ok(m) => m,
         Err(e) => panic!("self-intersecting operand rejected: {}", e),
     };
@@ -380,8 +400,132 @@ fn union_with_self_intersecting_operand_has_the_right_volume() {
 /// route to the robust engine while clean ones keep the exact pipeline.
 #[test]
 fn evaluating_sets_the_auto_engine_default() {
-    let _ = run_boolean(generate_box(2.0, 2.0, 2.0), generate_box(2.0, 2.0, 2.0), 0.0);
+    let _ = run_boolean(generate_box(2.0, 2.0, 2.0), generate_box(2.0, 2.0, 2.0), op("Combine"));
     assert_eq!(BooleanConfig::default_engine(), BooleanEngine::Auto);
+}
+
+// ------------------------------------------- the four operations (B-2)
+
+/// The overlapping-box fixture the operation tests share: `a` is
+/// `[-1,1]^3` (volume 8) and `b` is `[0,2]^3` (volume 8), overlapping in
+/// `[0,1]^3` (volume 1). Combine = 15, Subtract = 7, Intersect = 1, and
+/// Subtract & Replace = 7 + 1 as two bodies.
+fn overlapping_pair() -> (MeshGL, MeshGL) {
+    (
+        generate_box(2.0, 2.0, 2.0),
+        translated(&generate_box(2.0, 2.0, 2.0), 1.0, 1.0, 1.0),
+    )
+}
+
+#[test]
+fn combine_keeps_the_union_volume() {
+    let (a, b) = overlapping_pair();
+    let out = match run_boolean(a, b, op("Combine")) {
+        Ok(m) => m,
+        Err(e) => panic!("Combine failed: {}", e),
+    };
+    let v = volume(&out);
+    assert!((v - 15.0).abs() < 1e-3, "Combine volume {}, expected 15", v);
+}
+
+#[test]
+fn subtract_removes_b_from_a() {
+    let (a, b) = overlapping_pair();
+    let out = match run_boolean(a, b, op("Subtract")) {
+        Ok(m) => m,
+        Err(e) => panic!("Subtract failed: {}", e),
+    };
+    let v = volume(&out);
+    assert!((v - 7.0).abs() < 1e-3, "Subtract volume {}, expected 7", v);
+}
+
+#[test]
+fn intersect_keeps_only_the_shared_volume() {
+    let (a, b) = overlapping_pair();
+    let out = match run_boolean(a, b, op("Intersect")) {
+        Ok(m) => m,
+        Err(e) => panic!("Intersect failed: {}", e),
+    };
+    let v = volume(&out);
+    assert!((v - 1.0).abs() < 1e-3, "Intersect volume {}, expected 1", v);
+}
+
+/// Subtract & Replace keeps the cut result AND the volume it removed, as
+/// two separate bodies — together they are exactly operand 'a'.
+#[test]
+fn subtract_and_replace_yields_two_bodies_summing_to_a() {
+    let (a, b) = overlapping_pair();
+    let geom = match run_boolean_bodies(a, b, op("Subtract & Replace")) {
+        Ok(g) => g,
+        Err(e) => panic!("Subtract & Replace failed: {}", e),
+    };
+    assert_eq!(geom.len(), 2, "expected a kept body and a replaced body");
+    let kept = volume(&geom.bodies[0].mesh);
+    let removed = volume(&geom.bodies[1].mesh);
+    assert!((kept - 7.0).abs() < 1e-3, "kept body volume {}, expected 7", kept);
+    assert!(
+        (removed - 1.0).abs() < 1e-3,
+        "replaced body volume {}, expected 1",
+        removed
+    );
+    assert!(
+        (kept + removed - 8.0).abs() < 1e-3,
+        "the two bodies sum to {}, expected operand 'a' (8)",
+        kept + removed
+    );
+}
+
+/// Operands that do not touch have nothing to replace, so the result is
+/// the keep alone. An empty second body would still be a *body* — part
+/// counts, exports, and the viewport's per-body iteration would all see
+/// a phantom part with no triangles.
+#[test]
+fn subtract_and_replace_omits_an_empty_intersection() {
+    let a = generate_box(2.0, 2.0, 2.0); // [-1,1]^3
+    let b = translated(&generate_box(2.0, 2.0, 2.0), 10.0, 0.0, 0.0); // far away
+    let geom = match run_boolean_bodies(a, b, op("Subtract & Replace")) {
+        Ok(g) => g,
+        Err(e) => panic!("Subtract & Replace on disjoint operands failed: {}", e),
+    };
+    assert_eq!(
+        geom.len(),
+        1,
+        "disjoint operands must yield the keep alone, not a phantom empty body"
+    );
+    let kept = volume(&geom.bodies[0].mesh);
+    assert!((kept - 8.0).abs() < 1e-3, "kept volume {}, expected 8", kept);
+}
+
+/// An unknown variant name is not a crash and not a silent nothing — the
+/// reader falls back to the declared default (Combine).
+#[test]
+fn unknown_operation_name_falls_back_to_combine() {
+    let (a, b) = overlapping_pair();
+    let out = match run_boolean(a, b, op("Frobnicate")) {
+        Ok(m) => m,
+        Err(e) => panic!("unknown operation errored: {}", e),
+    };
+    let v = volume(&out);
+    assert!((v - 15.0).abs() < 1e-3, "fallback volume {}, expected 15", v);
+}
+
+/// A graph built before the enum landed stores `operation` as a number.
+/// Loading migrates it (see `serialization::prop_migration`), but a value
+/// that never went through a load — a NodeDesigner import, a test — must
+/// still evaluate as the operation the index meant.
+#[test]
+fn legacy_numeric_operation_still_evaluates_as_subtract() {
+    let (a, b) = overlapping_pair();
+    let out = match run_boolean(a, b, PortValue::Number(1.0)) {
+        Ok(m) => m,
+        Err(e) => panic!("legacy numeric operation failed: {}", e),
+    };
+    let v = volume(&out);
+    assert!(
+        (v - 7.0).abs() < 1e-3,
+        "legacy operation 1 gave volume {}, expected Subtract's 7",
+        v
+    );
 }
 
 // A test for "the boolean RESULT carries a bad status" is deliberately

@@ -242,13 +242,22 @@ fn extrude_view_pairs_inputs_with_bound_properties() {
 }
 
 #[test]
-fn enum_editor_string_property_stays_display_only_not_editable_text() {
+fn enum_editor_string_property_forwards_its_variant_as_text() {
     // A StringVal property whose schema editor is an enum
-    // (EnumDropdown / EnumButtons / EnumTabs) must NOT surface as an
-    // inline-editable `Text` value — free-text entry would let the
-    // user type a value outside the enum's variant set. It must
-    // round-trip as a display-only `Other` instead. Mirrors the
-    // AlignAxis fixture in atomartist-lib/src/registry.rs.
+    // (EnumDropdown / EnumButtons / EnumTabs) forwards its current
+    // variant as `Text`, together with the `editor_kind` that carries
+    // the variant list: that is what lets the canvas paint the
+    // segmented strip and commit a click as one of the declared
+    // variants.
+    //
+    // `Text` does NOT mean free-text here — the canvas dispatcher
+    // handles enum rows before its text-editor branch (see
+    // agg-gui-node-editor's `tests_enum`), so an enum value can still
+    // only ever become one of the variants. This test previously
+    // pinned the opposite (display-only `Other`), which was the right
+    // answer only while the canvas had no enum editor at all: it left
+    // the operation unchangeable.
+    // Mirrors the AlignAxis fixture in atomartist-lib/src/registry.rs.
     use atomartist_lib::graph::socket::SocketUidAlloc;
     use atomartist_lib::registry::{
         EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs, PropDef,
@@ -292,16 +301,20 @@ fn enum_editor_string_property_stays_display_only_not_editable_text() {
     let n = nodes.iter().find(|n| n.id.0 == id.0).unwrap();
     let mode = n.properties.iter().find(|p| p.name == "mode").unwrap();
     match &mode.current {
-        ne::PropertyValue::Other { display } => assert_eq!(display, "A"),
+        ne::PropertyValue::Text(s) => assert_eq!(s, "A"),
         other => panic!(
-            "enum-backed string must stay display-only Other, got {:?}",
+            "enum-backed string must forward its variant as Text, got {:?}",
             other
         ),
     }
-    assert!(
-        !mode.current.is_editable_inline(),
-        "enum-backed string must NOT be inline-editable on the canvas",
-    );
+    match &mode.editor_kind {
+        Some(k) => assert_eq!(
+            k.enum_variants().map(|v| v.len()),
+            Some(3),
+            "the canvas needs the variant list to paint the strip"
+        ),
+        None => panic!("enum row forwarded no editor_kind"),
+    }
 }
 
 #[test]
@@ -512,5 +525,123 @@ fn number_const_value_slider_range_follows_min_max_props() {
         value.max,
         Some(12.0),
         "value slider max must follow the instance's max prop",
+    );
+}
+
+/// End to end across the bridge for the Boolean node's real enum: the
+/// canvas commits a variant as `Text`, the graph stores it as a
+/// `StringVal`, and the next snapshot shows the new variant with the
+/// variant list still attached. This is the whole reason the enum row
+/// forwards as `Text` — without it the operation cannot be changed.
+#[test]
+fn boolean_operation_enum_commits_through_the_bridge() {
+    let state = fixture();
+    let id = {
+        let mut g = state.graph.lock().unwrap();
+        g.add_new_node("Boolean", [0.0, 0.0], &state.registry).unwrap()
+    };
+    let mut model = AppStateModel::new(state.clone());
+    ne::NodeGraphModel::set_property(
+        &mut model,
+        ne::NodeId(id.0),
+        "operation",
+        ne::PropertyValue::Text("Subtract & Replace".to_string()),
+    );
+
+    match state.graph.lock().unwrap().get(id).unwrap().properties.get("operation") {
+        Some(PortValue::StringVal(s)) => assert_eq!(s.as_str(), "Subtract & Replace"),
+        other => panic!("operation stored as {:?}", other),
+    }
+
+    let nodes = ne::NodeGraphModel::nodes(&model);
+    let n = nodes.iter().find(|n| n.id.0 == id.0).unwrap();
+    let op = n.properties.iter().find(|p| p.name == "operation").unwrap();
+    match &op.current {
+        ne::PropertyValue::Text(s) => assert_eq!(s, "Subtract & Replace"),
+        other => panic!("operation snapshot is {:?}", other),
+    }
+    assert_eq!(
+        op.editor_kind.as_ref().and_then(|k| k.enum_variants()).map(|v| v.len()),
+        Some(4),
+        "the row must carry all four operations"
+    );
+}
+
+/// Discrete property commits are one undo step each.
+///
+/// The coalescing path exists for slider scrubs — dozens of writes per
+/// second that must collapse into one step. It has no gesture bound
+/// (no press/release), so it merges on `(node, property)` alone: three
+/// clicks through the operation strip would otherwise fold into a single
+/// entry and one undo would jump straight back to the original value,
+/// throwing away the intermediate choices the user actually made.
+#[test]
+fn enum_clicks_are_separate_undo_steps() {
+    let state = fixture();
+    let id = {
+        let mut g = state.graph.lock().unwrap();
+        g.add_new_node("Boolean", [0.0, 0.0], &state.registry).unwrap()
+    };
+    let mut model = AppStateModel::new(state.clone());
+    for variant in ["Subtract", "Intersect"] {
+        ne::NodeGraphModel::set_property(
+            &mut model,
+            ne::NodeId(id.0),
+            "operation",
+            ne::PropertyValue::Text(variant.to_string()),
+        );
+    }
+
+    let undo = state.active_undo();
+    undo.lock().unwrap().undo();
+    let after_one_undo = state
+        .graph
+        .lock()
+        .unwrap()
+        .get(id)
+        .unwrap()
+        .properties
+        .get("operation")
+        .cloned();
+    match after_one_undo {
+        Some(PortValue::StringVal(s)) => assert_eq!(
+            s.as_str(),
+            "Subtract",
+            "one undo must step back to the previous choice, not past it"
+        ),
+        other => panic!("operation after one undo: {:?}", other),
+    }
+    assert!(
+        undo.lock().unwrap().can_undo(),
+        "the first click must still be on the undo stack"
+    );
+}
+
+/// Slider scrubs keep their coalescing: a numeric row writes on every
+/// pixel of the drag, and one undo must take the whole drag back.
+#[test]
+fn numeric_property_writes_still_coalesce_into_one_undo_step() {
+    let state = fixture();
+    let id = {
+        let mut g = state.graph.lock().unwrap();
+        g.add_new_node("Box", [0.0, 0.0], &state.registry).unwrap()
+    };
+    let before = state.graph.lock().unwrap().get(id).unwrap().properties.get("width").cloned();
+    let mut model = AppStateModel::new(state.clone());
+    for w in [11.0, 12.0, 13.0] {
+        ne::NodeGraphModel::set_property(
+            &mut model,
+            ne::NodeId(id.0),
+            "width",
+            ne::PropertyValue::Number(w),
+        );
+    }
+
+    state.active_undo().lock().unwrap().undo();
+    let after = state.graph.lock().unwrap().get(id).unwrap().properties.get("width").cloned();
+    assert_eq!(
+        format!("{:?}", after),
+        format!("{:?}", before),
+        "one undo must take the whole scrub back to where it started"
     );
 }

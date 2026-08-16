@@ -494,6 +494,22 @@ impl ParamSet {
     }
 }
 
+/// Resolve a legacy numeric enum encoding against a variant list:
+/// `n` is the index of the variant in declaration order. Out-of-range,
+/// negative, and non-finite values yield `None` so the caller can fall
+/// back to the declared default rather than picking an arbitrary variant.
+///
+/// Shared with [`crate::serialization::prop_migration`] so a graph that is
+/// migrated on load and one that is read straight out of memory agree on
+/// what an old `Number` meant.
+pub fn enum_variant_for_index(variants: &[Arc<str>], n: f64) -> Option<&str> {
+    if !n.is_finite() || n < -0.5 {
+        return None;
+    }
+    let idx = n.round() as usize;
+    variants.get(idx).map(|v| v.as_ref())
+}
+
 /// Typed value accessors over a [`ParamSet`] and an [`EvalCtx`],
 /// implementing the resolution chain every node evaluate used to
 /// hand-write: a connected input socket carrying the matching
@@ -580,6 +596,15 @@ impl<'a> ParamReader<'a> {
     /// resolves to the declared default variant (never panics). Enum
     /// params carry no socket, so only the property store and default
     /// participate in resolution.
+    ///
+    /// One stored value is *not* treated as illegal: a `Number`. Every
+    /// choice-valued property in this codebase started life as a numeric
+    /// index (Boolean's `operation` was 0/1/2), so a numeric value resolves
+    /// to `variants[n]` — the same rule
+    /// [`crate::serialization::prop_migration`] applies when loading an
+    /// older graph. Loading migrates the stored property once; this arm
+    /// covers the values that never went through a load (a NodeDesigner
+    /// import, a test, a graph built in memory).
     pub fn enum_(&self, name: &str) -> &'a str {
         let p = self.params.param(name);
         let variants: &'a [Arc<str>] = match &p.editor {
@@ -594,6 +619,10 @@ impl<'a> ParamReader<'a> {
         };
         let stored: &'a str = match self.ctx.properties.get(name) {
             PortValue::StringVal(s) => s.as_str(),
+            PortValue::Number(n) => match enum_variant_for_index(variants, *n) {
+                Some(v) => return v,
+                None => default,
+            },
             _ => default,
         };
         // A legal stored value wins; borrow the matching variant so the
