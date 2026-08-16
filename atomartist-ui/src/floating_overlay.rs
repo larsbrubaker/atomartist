@@ -261,22 +261,30 @@ impl Widget for FloatingOverlayHost {
         self.sync_from_handle();
     }
 
-    /// Only claim hits that land inside the dialog's own bounds. When
-    /// the host has no dialog, returns `false` so events fall through
-    /// to the rest of the `Stack` siblings (the menu bar, viewport,
-    /// canvas, etc.). When a dialog is active, the framework will
-    /// then ask the child (`Window`) whether it claims the position
-    /// — the child's own hit_test makes the precise call.
+    /// Only claim hits that land inside the dialog's own bounds *and*
+    /// that the dialog itself accepts. When the host has no dialog,
+    /// returns `false` so events fall through to the rest of the
+    /// `Stack` siblings (the menu bar, viewport, canvas, etc.).
+    ///
+    /// The child's own `hit_test` has the final say (asked in
+    /// child-local coordinates, the way agg-gui's `hit_test_subtree`
+    /// walks into children) because agg-gui stops at the *deepest*
+    /// widget that answers `true`: a host that claimed the position on
+    /// bounds alone would swallow the event even when its child
+    /// refuses it. That is exactly the drag ghost's case since 6g-3 —
+    /// it is centred *on* the cursor, so its rectangle covers every
+    /// press made while it is up, and it deliberately takes no input
+    /// (the gesture that spawned it holds the capture).
     fn hit_test(&self, local_pos: Point) -> bool {
-        if let Some(child) = self.children.first() {
-            let b = child.bounds();
-            local_pos.x >= b.x
-                && local_pos.x <= b.x + b.width
-                && local_pos.y >= b.y
-                && local_pos.y <= b.y + b.height
-        } else {
-            false
-        }
+        let Some(child) = self.children.first() else {
+            return false;
+        };
+        let b = child.bounds();
+        let inside = local_pos.x >= b.x
+            && local_pos.x <= b.x + b.width
+            && local_pos.y >= b.y
+            && local_pos.y <= b.y + b.height;
+        inside && child.hit_test(Point::new(local_pos.x - b.x, local_pos.y - b.y))
     }
 
     fn on_event(&mut self, _event: &Event) -> EventResult {
@@ -300,6 +308,14 @@ mod tests {
     struct DummyDialog {
         bounds: Rect,
         children: Vec<Box<dyn Widget>>,
+        /// `false` models a decoration-only overlay (the drag ghost),
+        /// which must let presses through to whatever is underneath.
+        claims_hits: bool,
+        /// When set, only this rectangle **in the dialog's own local
+        /// space** claims hits — the shape a real `Window` has (chrome
+        /// yes, transparent margin no), and what pins the host's
+        /// parent→child coordinate conversion.
+        claim_local: Option<Rect>,
     }
     impl Widget for DummyDialog {
         fn type_name(&self) -> &'static str {
@@ -321,6 +337,12 @@ mod tests {
             Size::new(200.0, 150.0)
         }
         fn paint(&mut self, _ctx: &mut dyn DrawCtx) {}
+        fn hit_test(&self, local_pos: Point) -> bool {
+            match self.claim_local {
+                Some(r) => r.contains(local_pos),
+                None => self.claims_hits,
+            }
+        }
         fn on_event(&mut self, _event: &Event) -> EventResult {
             EventResult::Ignored
         }
@@ -330,6 +352,29 @@ mod tests {
         Box::new(DummyDialog {
             bounds: b,
             children: Vec::new(),
+            claims_hits: true,
+            claim_local: None,
+        })
+    }
+
+    /// A dialog that takes no input — the drag ghost's shape.
+    fn decoration_at(b: Rect) -> Box<dyn Widget> {
+        Box::new(DummyDialog {
+            bounds: b,
+            children: Vec::new(),
+            claims_hits: false,
+            claim_local: None,
+        })
+    }
+
+    /// A dialog at `b` that only claims `claim` **in its own local
+    /// space** (i.e. `claim` offset by `b`'s origin, in host space).
+    fn partly_claiming_dialog(b: Rect, claim: Rect) -> Box<dyn Widget> {
+        Box::new(DummyDialog {
+            bounds: b,
+            children: Vec::new(),
+            claims_hits: true,
+            claim_local: Some(claim),
         })
     }
 
@@ -442,5 +487,59 @@ mod tests {
         assert!(!host.hit_test(Point::new(50.0, 150.0)));
         assert!(!host.hit_test(Point::new(150.0, 50.0)));
         assert!(!host.hit_test(Point::new(400.0, 150.0)));
+    }
+
+    /// A child that refuses hits makes the host refuse them too, even
+    /// dead centre of its bounds: agg-gui stops at the deepest widget
+    /// that answers `true`, so a host claiming on bounds alone would
+    /// swallow the press. The drag ghost — centred *on* the cursor
+    /// since 6g-3 — depends on this to stay pure decoration.
+    #[test]
+    fn a_decoration_child_never_swallows_the_pointer() {
+        let handle = FloatingOverlayHandle::new();
+        let mut host = FloatingOverlayHost::new(handle.clone());
+        let close_flag = Rc::new(Cell::new(false));
+        let ghost = Rect::new(100.0, 100.0, 48.0, 48.0);
+        handle.set(decoration_at(ghost), close_flag);
+
+        let _ = host.layout(Size::new(800.0, 600.0));
+
+        assert!(
+            !host.hit_test(Point::new(124.0, 124.0)),
+            "centre of the ghost"
+        );
+        assert!(!host.hit_test(Point::new(101.0, 101.0)));
+        assert!(!host.hit_test(Point::new(400.0, 400.0)));
+    }
+
+    /// The child is asked in **its own** coordinate space, not the
+    /// host's: this dialog sits at (100, 100) and claims only the first
+    /// 20 × 20 of its local space, so the host must claim host-space
+    /// (110, 110) and refuse host-space (250, 200). Drop the
+    /// `- bounds.x / - bounds.y` conversion and the first assertion
+    /// fails — the raw (110, 110) misses the local 0..20 box.
+    #[test]
+    fn the_child_is_hit_tested_in_child_local_coordinates() {
+        let handle = FloatingOverlayHandle::new();
+        let mut host = FloatingOverlayHost::new(handle.clone());
+        let close_flag = Rc::new(Cell::new(false));
+        handle.set(
+            partly_claiming_dialog(
+                Rect::new(100.0, 100.0, 200.0, 150.0),
+                Rect::new(0.0, 0.0, 20.0, 20.0),
+            ),
+            close_flag,
+        );
+
+        let _ = host.layout(Size::new(800.0, 600.0));
+
+        assert!(
+            host.hit_test(Point::new(110.0, 110.0)),
+            "host-space (110, 110) is child-local (10, 10) — inside the claim"
+        );
+        assert!(
+            !host.hit_test(Point::new(250.0, 200.0)),
+            "inside the dialog's bounds, but the dialog itself refuses it"
+        );
     }
 }

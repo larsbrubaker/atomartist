@@ -51,33 +51,16 @@ const SLOT_ICON_INSET: f64 = 2.0;
 /// Side of the rendered icon in logical pixels.
 const SLOT_ICON_SIDE: f64 = geom::ICON_SLOT - SLOT_ICON_INSET * 2.0;
 
-/// Ceiling on the rasterized icon, in device pixels — a sanity bound on
-/// a nonsense scale factor, matching
-/// [`crate::mesh_raster::MAX_ICON_SIZE`].
-const MAX_ICON_PX: u32 = 512;
-
-/// Edge length, in **device** pixels, to rasterize an icon at.
+/// Edge length, in **device** pixels, to rasterize a slot's icon at.
 ///
 /// Deviation from the ancestor, and the reason this is not simply ND's
 /// 96 px: NodeDesigner hands its 96 px PNG to the browser, which scales
-/// it down to the slot with a linear filter. Both of our backends blit
-/// with *nearest* sampling, so a 96 → 40 px downscale would point-sample
-/// away exactly the supersampled edges the rasterizer just paid for.
-/// Rendering at the slot's own device-pixel size keeps the 2×
-/// supersample meaningful and makes the blit 1:1.
-///
-/// The scale is agg-gui's `device_scale · ux_scale`, the same factor
-/// `App::layout` divides the viewport by. A changed scale simply asks
-/// for a different size, which is a different cache key — no
-/// invalidation needed.
+/// it down to the slot with a linear filter. Ours renders at the slot's
+/// own device-pixel size instead — see
+/// [`crate::mesh_raster::device_pixel_size`], the one place that rule
+/// lives now that the drag ghost wants it too.
 pub(crate) fn icon_pixel_size() -> u32 {
-    let scale = agg_gui::ux_scale::effective_scale();
-    let scale = if scale.is_finite() && scale > 0.0 {
-        scale
-    } else {
-        1.0
-    };
-    ((SLOT_ICON_SIDE * scale).round() as i64).clamp(1, MAX_ICON_PX as i64) as u32
+    crate::mesh_raster::device_pixel_size(SLOT_ICON_SIDE)
 }
 
 /// One favourite as the strip needs it for a frame: resolved label,

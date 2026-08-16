@@ -646,6 +646,58 @@ fn an_unwirable_canvas_drop_is_still_one_undo_step() {
     assert!(!undo.lock().unwrap().can_undo());
 }
 
+/// The ghost has to stay glued to the cursor for the *whole* gesture,
+/// including over the bed. Its rectangle is recomputed from the cursor
+/// at layout time, so "attached" means "every move asks for a frame" —
+/// and since 6g-1 the loop parks when nothing does. Nothing else on the
+/// over-the-viewport path requests one (no live carry there), so this is
+/// the assertion that keeps the item on the mouse.
+#[test]
+fn every_move_over_the_viewport_asks_for_a_frame() {
+    let (_state, handle) = controller_with_viewport();
+    handle.press(box_payload(), Point::new(20.0, 200.0));
+    handle.pointer_move(Point::new(20.0, 180.0));
+    assert!(handle.ghost_active(), "the ghost is up before the bed");
+
+    for (x, y) in [(400.0, 150.0), (420.0, 150.0), (440.0, 152.0)] {
+        agg_gui::animation::clear_draw_request();
+        handle.pointer_move(Point::new(x, y));
+        assert!(
+            agg_gui::animation::wants_draw(),
+            "a move to ({x}, {y}) over the bed must repaint the ghost"
+        );
+        assert!(handle.ghost_active(), "and the ghost stays up");
+    }
+}
+
+/// The ghost a node-type drag raises carries the type's *rendered icon*
+/// (ND: `payload.iconUrl`), because the drag start asked for the render.
+/// A file payload has no generator, so it keeps the label pill.
+#[test]
+fn a_node_type_drag_ghosts_with_the_rendered_icon() {
+    let (_state, handle) = controller();
+    let size = crate::drag_insert_ghost::icon_pixel_size();
+    handle.press(box_payload(), Point::new(20.0, 200.0));
+    handle.pointer_move(Point::new(20.0, 180.0));
+    assert!(handle.ghost_active());
+    assert!(
+        crate::node_icons::icon("Box", size).is_some(),
+        "the drag start renders the payload's icon at the ghost's size"
+    );
+
+    let (_state, handle) = controller();
+    handle.press(
+        DragPayload::File {
+            uri: StorageUri::new("mem", "/models/part.stl"),
+            label: "part.stl".to_string(),
+            glyph: 'F',
+        },
+        Point::new(20.0, 200.0),
+    );
+    handle.pointer_move(Point::new(20.0, 180.0));
+    assert!(handle.ghost_active(), "a file payload still ghosts");
+}
+
 /// `.mcx` is importable, so it is draggable — the two lists are one.
 #[test]
 fn every_importable_extension_is_draggable() {

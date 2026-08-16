@@ -28,6 +28,34 @@
 //! has, which for us just means "compute the normal from the triangle and
 //! never interpolate it".
 //!
+//! # Colour space: light linearly, write sRGB
+//!
+//! NodeDesigner's icon renderer is a plain `THREE.WebGLRenderer`, and the
+//! app sets `THREE.ColorManagement.enabled = false`
+//! (`rendering/three-viewer.js`) — so a `THREE.Color("#fe8d86")` keeps its
+//! raw sRGB components, the Lambert term multiplies *those*, and the
+//! renderer's default `outputColorSpace = SRGBColorSpace` then encodes the
+//! result linear→sRGB on the way to the framebuffer (`getTransfer` ignores
+//! the `enabled` flag, so the output encode still runs). The net pipeline
+//! is therefore `srgb_encode(tint · lambert)`, not `tint · lambert`.
+//!
+//! We used to write `tint · lambert` straight out, which is the same
+//! picture only where `lambert ≈ 1`; everywhere else it read darker and
+//! far more saturated. Measured on a Box (MatterCAD's `Cube` tint,
+//! `#FE8D86`), old → new:
+//!
+//! ```text
+//! face            lambert   tint·lambert    srgb_encode(tint·lambert)
+//! ambient only      0.55    (140,  78,  74)   (195, 150, 146)
+//! -X (key light)    1.14    (255, 161, 153)   (255, 208, 203)
+//! -Y (front)        1.59    (255, 225, 213)   (255, 241, 236)
+//! ```
+//!
+//! Average saturation over the covered pixels of the 96 px Box icon
+//! halves, 0.15 → 0.07. The encode happens where the supersampled
+//! buffer resolves into bytes (`SampleBuffer::resolve`), and it is what
+//! makes an AtomArtist icon read as softly as its ancestor's.
+//!
 //! # Two-sided shading instead of back-face culling
 //!
 //! The ancestor renders `FrontSide` and relies on every generator winding
@@ -52,7 +80,7 @@ use glam::{Mat4, Vec3, Vec4Swizzles};
 /// The ancestor's icon edge length in pixels (`parts-bar-icons.js`'s
 /// `ICON_SIZE`). Kept as the reference size the tests render at;
 /// on-screen icons are rasterized at their slot's *device*-pixel size
-/// instead — see [`crate::favorites_strip::icon_pixel_size`] for why.
+/// instead — see [`device_pixel_size`] for why.
 pub const ICON_SIZE: u32 = 96;
 
 /// Largest size [`render_mesh_icon`] is meant to be asked for. This is
@@ -61,6 +89,28 @@ pub const ICON_SIZE: u32 = 96;
 /// expensive mistake. Debug builds assert; release clamps nothing, since
 /// every caller derives its size from a widget slot.
 pub const MAX_ICON_SIZE: u32 = 512;
+
+/// Edge length, in **device** pixels, to rasterize an icon that occupies
+/// `logical_side` logical pixels on screen.
+///
+/// One rule for every icon caller (the favourites strip's slots, the
+/// drag ghost): both backends blit with *nearest* sampling, so a render
+/// at some other size would point-sample away exactly the supersampled
+/// edges this rasterizer just paid for — the render wants to be 1:1 with
+/// the pixels it lands on. The scale is agg-gui's `device_scale ·
+/// ux_scale`, the same factor `App::layout` divides the viewport by; a
+/// changed scale simply asks for a different size, which is a different
+/// cache key, so no invalidation hook is needed. Clamped to
+/// [`MAX_ICON_SIZE`] as a sanity bound on a nonsense scale factor.
+pub fn device_pixel_size(logical_side: f64) -> u32 {
+    let scale = agg_gui::ux_scale::effective_scale();
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    ((logical_side * scale).round() as i64).clamp(1, MAX_ICON_SIZE as i64) as u32
+}
 
 /// Supersampling factor: the scene is rasterized at `SUPERSAMPLE ×` the
 /// requested size and box-filtered down. The ancestor asks WebGL for
@@ -138,8 +188,14 @@ impl IconImage {
     }
 }
 
-/// Render `triangles` tinted `color` (linear RGBA in `0..=1`) into a
+/// Render `triangles` tinted `color` (RGBA in `0..=1`) into a
 /// `size × size` icon.
+///
+/// `color` is the node's own colour property **as authored** — sRGB
+/// components used directly as the lighting term's base, which is what
+/// the ancestor does with `ColorManagement` off (see the module docs'
+/// colour-space section). It is deliberately *not* converted to linear
+/// first; only the lit result is encoded on the way out.
 ///
 /// Returns `None` when there is nothing renderable: no triangles, a
 /// zero-extent or non-finite bounding box, or a zero size. Callers treat
@@ -148,7 +204,7 @@ impl IconImage {
 ///
 /// The result is **opaque** wherever the mesh covers a pixel (edges get
 /// fractional coverage alpha); `color`'s alpha is ignored, so a
-/// translucent tint is not supported here — see [`shade`].
+/// translucent tint is not supported here — see `shade`.
 ///
 /// `size` must be at most [`MAX_ICON_SIZE`]: this rasterizer is for
 /// icons, and a debug build asserts as much rather than quietly
@@ -379,9 +435,11 @@ impl SampleBuffer {
                     continue;
                 }
                 let inv = 1.0 / hits as f32;
-                rgba[o] = to_u8(sum[0] * inv);
-                rgba[o + 1] = to_u8(sum[1] * inv);
-                rgba[o + 2] = to_u8(sum[2] * inv);
+                // Colour channels are encoded on the way out (see the
+                // module docs); alpha is coverage, never gamma-encoded.
+                rgba[o] = to_srgb_u8(sum[0] * inv);
+                rgba[o + 1] = to_srgb_u8(sum[1] * inv);
+                rgba[o + 2] = to_srgb_u8(sum[2] * inv);
                 rgba[o + 3] = to_u8(hits as f32 / total as f32);
             }
         }
@@ -395,6 +453,24 @@ impl SampleBuffer {
 
 fn to_u8(v: f32) -> u8 {
     (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+}
+
+/// The sRGB transfer function (IEC 61966-2-1), i.e. exactly what a WebGL
+/// renderer with `outputColorSpace = SRGBColorSpace` applies in its
+/// output fragment — see the module docs for why the ancestor's icons go
+/// through it and ours must too.
+pub fn linear_to_srgb(v: f32) -> f32 {
+    let v = v.clamp(0.0, 1.0);
+    if v <= 0.003_130_8 {
+        v * 12.92
+    } else {
+        1.055 * v.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+/// One lit colour channel as a stored byte: encode, then quantize.
+fn to_srgb_u8(v: f32) -> u8 {
+    to_u8(linear_to_srgb(v))
 }
 
 #[cfg(test)]

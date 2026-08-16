@@ -13,7 +13,12 @@
 //!    click, so bar rows keep opening projects and browser entries keep
 //!    selecting.
 //! 2. **Ghost** — while the pointer is outside the canvas a floating
-//!    [`DragGhost`](crate::drag_insert_ghost) follows it.
+//!    [`DragGhost`](crate::drag_insert_ghost) follows it, showing the
+//!    item's *rendered icon* when there is one (step 6g-3; the render is
+//!    requested the moment the drag starts) and a glyph-and-label pill
+//!    otherwise. Every move of a started gesture requests a frame, which
+//!    is what keeps the ghost on the cursor over the 3-D bed, where
+//!    nothing else on the path would.
 //! 3. **Insert on canvas-enter** — crossing into the canvas turns a
 //!    node-type payload into a *real* node at the cursor (ghost off);
 //!    further motion moves it from a **base-position snapshot**, so the
@@ -49,7 +54,7 @@
 //! file-drop handler calls* — whose own `AddNodeCmd` is the gesture's
 //! single undo entry. The state machine below already has the
 //! insert/remove hooks the live carry would use (see
-//! [`DragInsert::update`]), so the placeholder can slot in later without
+//! `DragInsert::update`), so the placeholder can slot in later without
 //! reshaping the controller.
 //!
 //! # Coordinates
@@ -63,7 +68,7 @@
 //! rectangle in its own coordinate space through
 //! [`DragInsertHandle::set_canvas_rect`] (derived from the two
 //! [`PaneRect`](crate::favorites_bar_host::PaneRect) probes), and that
-//! rectangle is all the geometry [`DragInsert::in_canvas`] needs.
+//! rectangle is all the geometry `DragInsert::in_canvas` needs.
 //! Canvas-space then follows from the editor's live pan / zoom, mirrored
 //! onto [`AppState::canvas_pan`] / [`AppState::canvas_zoom`].
 
@@ -77,7 +82,7 @@ use atomartist_lib::graph::undo_commands::{AddNodeCmd, BatchCmd, ConnectToFreeIn
 use atomartist_storage::StorageUri;
 
 use crate::app_state::AppState;
-use crate::drag_insert_ghost::DragGhost;
+use crate::drag_insert_ghost::{self, DragGhost};
 use crate::floating_overlay::FloatingOverlayHandle;
 use crate::node_insertion;
 use crate::storage_ops::NoticeLevel;
@@ -346,11 +351,33 @@ impl DragInsert {
                 return true;
             }
             gesture.started = true;
-            agg_gui::animation::request_draw();
+            self.prepare_ghost_icon(&gesture);
         }
         self.update(&mut gesture, pos);
         self.gesture = Some(gesture);
+        // Every move of a started gesture repaints: since 6g-1 the frame
+        // loop parks when nothing asks for a frame, and the ghost's
+        // position comes from the cursor at *layout* time — so without
+        // this the ghost freezes wherever it was last drawn (visible as
+        // "the item detaches from the mouse" over the 3-D bed, where
+        // nothing else on the path requests a draw).
+        agg_gui::animation::request_draw();
         true
+    }
+
+    /// Render the payload's icon, if it has one and it is not cached
+    /// yet, so the ghost about to be raised can carry the real thing
+    /// (ND's `payload.iconUrl`). One synchronous render at drag start,
+    /// keyed by size like every other icon request.
+    fn prepare_ghost_icon(&self, gesture: &Gesture) {
+        let DragPayload::NodeType { type_id, .. } = &gesture.payload else {
+            return;
+        };
+        crate::node_icons::render_next(
+            &self.state.registry,
+            &[type_id.as_str()],
+            drag_insert_ghost::icon_pixel_size(),
+        );
     }
 
     /// One step of the state machine for a started gesture: insert on
@@ -451,11 +478,22 @@ impl DragInsert {
             return;
         }
         let flag = Rc::new(Cell::new(false));
+        // The ghost *is* the item's rendered icon when one exists
+        // (`prepare_ghost_icon` asked for it when the drag started); a
+        // file payload, or a type with nothing renderable, keeps the
+        // glyph-and-label pill.
+        let icon = match &gesture.payload {
+            DragPayload::NodeType { type_id, .. } => {
+                crate::node_icons::icon(type_id, drag_insert_ghost::icon_pixel_size())
+            }
+            DragPayload::File { .. } => None,
+        };
         let ghost = DragGhost::new(
             gesture.payload.glyph(),
             gesture.payload.label().to_string(),
             flag.clone(),
-        );
+        )
+        .with_icon(icon);
         self.overlay.set(Box::new(ghost), flag.clone());
         gesture.ghost = Some(flag);
     }

@@ -1,7 +1,7 @@
 //! Rendered palette icons for node types (`docs/file-browser-design.md`
 //! §5b, step 6f-2).
 //!
-//! The favourites strip ([`crate::favorites_strip`]) shows one 44 × 44
+//! The favourites strip (`crate::favorites_strip`) shows one 44 × 44
 //! slot per favourite. NodeDesigner fills that slot with an offscreen
 //! render of the *real* primitive built from the node's own default
 //! properties (`parts-bar-icons.js`), so what the palette shows is
@@ -60,11 +60,23 @@ const FALLBACK_COLOR: [f32; 4] = [0.8, 0.8, 0.8, 1.0];
 /// meshes that large.
 const MAX_TRIANGLES: usize = 50_000;
 
-/// Cache key: the type id *and* the pixel size it was rasterized at.
-/// The size is part of the key because the strip asks for whatever the
-/// current device scale makes a slot — a scale change simply misses and
-/// renders once more rather than needing an invalidation hook.
-type CacheKey = (String, u32);
+/// Bumped whenever [`crate::mesh_raster`]'s output changes, so no icon
+/// produced by an older rendering rule can be served. 2 = the sRGB
+/// output encode (step 6g-3).
+///
+/// The cache below is in-memory and process-scoped, so today this can
+/// never actually differ within a run — it is in the key so the
+/// invalidation contract is already there if these renders ever gain a
+/// persistent tier, the way the browser's thumbnails did
+/// (`file_browser::thumbs::CACHE_VERSION`).
+pub const RENDER_VERSION: u32 = 2;
+
+/// Cache key: the type id, the pixel size it was rasterized at, and the
+/// [`RENDER_VERSION`] that produced it. The size is part of the key
+/// because the strip asks for whatever the current device scale makes a
+/// slot — a scale change simply misses and renders once more rather than
+/// needing an invalidation hook.
+type CacheKey = (String, u32, u32);
 type Cache = Mutex<HashMap<CacheKey, Option<IconImage>>>;
 
 fn cache() -> &'static Cache {
@@ -90,7 +102,7 @@ fn lock_cache() -> MutexGuard<'static, HashMap<CacheKey, Option<IconImage>>> {
 /// miss simply means "keep the glyph for now".
 pub fn icon(type_id: &str, size: u32) -> Option<IconImage> {
     lock_cache()
-        .get(&(type_id.to_string(), size))
+        .get(&(type_id.to_string(), size, RENDER_VERSION))
         .cloned()
         .flatten()
 }
@@ -98,7 +110,7 @@ pub fn icon(type_id: &str, size: u32) -> Option<IconImage> {
 /// True once `type_id` has been attempted at `size`, whatever the
 /// outcome.
 pub fn is_resolved(type_id: &str, size: u32) -> bool {
-    lock_cache().contains_key(&(type_id.to_string(), size))
+    lock_cache().contains_key(&(type_id.to_string(), size, RENDER_VERSION))
 }
 
 /// Render the first of `type_ids` that has not been attempted yet at
@@ -110,7 +122,7 @@ pub fn render_next(registry: &NodeRegistry, type_ids: &[&str], size: u32) -> boo
         return false;
     };
     let rendered = render_icon(registry, next, size);
-    lock_cache().insert(((*next).to_string(), size), rendered);
+    lock_cache().insert(((*next).to_string(), size, RENDER_VERSION), rendered);
     true
 }
 

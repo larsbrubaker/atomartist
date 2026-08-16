@@ -583,6 +583,90 @@ fn dropping_a_node_type_on_the_bed_places_and_wires_it() {
     );
 }
 
+// ── Step 6g-3: the ghost is the item's icon, and it stays on the cursor ─
+
+/// The deliverable of step 6g-3: dragging a palette favourite carries
+/// the *rendered icon* (ND's `payload.iconUrl`) as a 48 × 48 ghost
+/// centred on the pointer, and it is still there — still following —
+/// out over the 3-D bed.
+#[test]
+fn the_drag_ghost_is_the_items_icon_all_the_way_over_the_bed() {
+    let mut h = TestHarness::with_starter_graph();
+    let row = item_center(&h, 0);
+    let bed = viewport_point(&h);
+
+    press_and_move(&mut h, row, &[nudged(row), bed]);
+    h.frame();
+    // Actually rasterize it: the ghost's blit is the whole point of the
+    // step, and `paint_once` turns an out-of-range image draw into a
+    // test failure instead of a user's frame.
+    h.paint_once();
+    assert!(
+        h.find_by_id(DRAG_GHOST_ID).is_some(),
+        "the ghost must be up over the bed"
+    );
+    assert_eq!(
+        prop(&h, DRAG_GHOST_ID, "icon"),
+        "true",
+        "a node-type drag ghosts with its rendered icon, not the label pill"
+    );
+
+    // Attached to the cursor: ND's 48 px square, centred on the pointer.
+    let ghost = rect_of(&h, DRAG_GHOST_ID);
+    assert_eq!((ghost.width, ghost.height), (48.0, 48.0));
+    assert!(
+        (ghost.x + ghost.width * 0.5 - bed.x).abs() < 1.0
+            && (ghost.y + ghost.height * 0.5 - bed.y).abs() < 1.0,
+        "ghost {ghost:?} should be centred on the cursor at {bed:?}"
+    );
+
+    // …and it follows a further move across the bed rather than sticking.
+    let further = Point::new(bed.x + 60.0, bed.y - 40.0);
+    let (fx, fy) = h.to_screen(further);
+    h.mouse_move(fx, fy);
+    h.frame();
+    h.paint_once();
+    let moved = rect_of(&h, DRAG_GHOST_ID);
+    assert!(
+        (moved.x + moved.width * 0.5 - further.x).abs() < 1.0
+            && (moved.y + moved.height * 0.5 - further.y).abs() < 1.0,
+        "ghost {moved:?} should have followed to {further:?}"
+    );
+    release_at(&mut h, further);
+}
+
+/// A file payload has no generator to render, so its ghost stays the
+/// glyph-and-label pill — the ancestor's `textContent` fallback.
+#[test]
+fn a_file_drag_keeps_the_label_ghost() {
+    let storage = memory_registry();
+    seed_project(&storage, &uri("/bracket.atmr"));
+    let state = fresh_state_with_starter_graph_and_storage(storage);
+    let mut h = TestHarness::with_app_state(state);
+
+    *h.state().favorites_bar_width.lock().unwrap() = 420.0;
+    let handle = handle_center(&h);
+    h.click_local(handle, MouseButton::Left);
+    h.pump_until_idle(8);
+    h.frame();
+    assert_eq!(prop(&h, EMBEDDED_BROWSER_ID, "entries"), "1");
+
+    let cell = embedded_cell(&h, 0);
+    let bed = viewport_point(&h);
+    press_and_move(&mut h, cell, &[nudged(cell), bed]);
+    h.frame();
+    assert!(
+        h.find_by_id(DRAG_GHOST_ID).is_some(),
+        "the file drag ghosts"
+    );
+    assert_eq!(
+        prop(&h, DRAG_GHOST_ID, "icon"),
+        "false",
+        "a file payload has no rendered icon, so it keeps the label pill"
+    );
+    release_at(&mut h, bed);
+}
+
 /// The bar and its handle share the viewport's pane but are not the bed:
 /// releasing over them cancels, as it always has.
 #[test]

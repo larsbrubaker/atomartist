@@ -215,11 +215,61 @@ fn nearer_geometry_wins_the_depth_test() {
     assert_eq!(
         [center[0], center[1], center[2]],
         [
-            to_u8(near_shade[0]),
-            to_u8(near_shade[1]),
-            to_u8(near_shade[2])
+            to_srgb_u8(near_shade[0]),
+            to_srgb_u8(near_shade[1]),
+            to_srgb_u8(near_shade[2])
         ],
         "the centre must wear the NEAR quad's shade, not the far one's"
+    );
+}
+
+/// The transfer function itself: the IEC 61966-2-1 curve a WebGL
+/// renderer with `outputColorSpace = SRGBColorSpace` applies, endpoints
+/// and the linear-segment knee included.
+#[test]
+fn srgb_encode_matches_the_transfer_function() {
+    assert!((linear_to_srgb(0.0)).abs() < 1e-6);
+    assert!((linear_to_srgb(1.0) - 1.0).abs() < 1e-6);
+    // Below the knee the curve is a straight ×12.92.
+    assert!((linear_to_srgb(0.002) - 0.025_84).abs() < 1e-6);
+    // Mid-grey: linear 0.5 encodes to the familiar ~0.7354 (188/255).
+    assert!(
+        (linear_to_srgb(0.5) - 0.735_36).abs() < 1e-4,
+        "got {}",
+        linear_to_srgb(0.5)
+    );
+    // Monotone, so distinct flat shades stay distinct after encoding.
+    assert!(linear_to_srgb(0.4) < linear_to_srgb(0.41));
+}
+
+/// Lit pixels are written **through** the encode, the way the ancestor's
+/// framebuffer does — not as the raw linear product, which reads darker
+/// and more saturated (see the module docs' measured numbers).
+#[test]
+fn lit_pixels_are_srgb_encoded_not_raw() {
+    let dir = Vec3::from_array(VIEW_DIR).normalize();
+    // A quad square-on to the camera: its face normal is exactly `dir`,
+    // so the expected shade is `shade(DIM, dir)` with no guessing.
+    let img = render_mesh_icon(&quad_facing(Vec3::ZERO, dir, 5.0), DIM, ICON_SIZE)
+        .expect("the quad renders");
+    let mid = ICON_SIZE / 2;
+    let p = img.pixel(mid, mid).expect("centre pixel");
+    let lit = shade(DIM, dir);
+    assert!(
+        lit[0] < 1.0,
+        "this pin needs an unclamped shade, got {lit:?}"
+    );
+    assert_eq!(
+        [p[0], p[1], p[2]],
+        [to_srgb_u8(lit[0]), to_srgb_u8(lit[1]), to_srgb_u8(lit[2])],
+        "the written pixel must be the encoded shade"
+    );
+    // And that is a *visibly* different pixel from the old raw write.
+    let raw = to_u8(lit[0]);
+    assert!(
+        p[0] as i32 - raw as i32 > 30,
+        "encoding must lift the midtone: encoded {} vs raw {raw}",
+        p[0]
     );
 }
 
