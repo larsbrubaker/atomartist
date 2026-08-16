@@ -537,9 +537,19 @@ fn main() {
                 Event::WindowEvent {
                     event: WindowEvent::MouseWheel { delta, .. }, ..
                 } => {
+                    // agg-gui's wheel delta is in **notches**, not pixels:
+                    // every consumer scales it itself (`ScrollView` by
+                    // 40 px, the favorites strip by `SCROLL_STEP`, the
+                    // browser grid by `GRID_SCROLL_STEP`), and agg-gui's
+                    // own shell passes `LineDelta` straight through and
+                    // divides `PixelDelta` by 40. Handing them a pixel
+                    // delta instead multiplied every scroll by ~60 — the
+                    // "scroll steps are far too large" report (design
+                    // §5c, step 6g-2). Zoom consumers read only the sign
+                    // and are unaffected.
                     let dy = match delta {
-                        MouseScrollDelta::LineDelta(_, y) => (y as f64) * 60.0,
-                        MouseScrollDelta::PixelDelta(p) => p.y,
+                        MouseScrollDelta::LineDelta(_, y) => y as f64,
+                        MouseScrollDelta::PixelDelta(p) => p.y / 40.0,
                     };
                     // `_xy_mods` rather than the 2-arg `on_mouse_wheel`:
                     // that wrapper hardcodes `Modifiers::default()`, so

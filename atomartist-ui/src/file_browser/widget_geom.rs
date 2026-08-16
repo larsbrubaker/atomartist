@@ -37,7 +37,8 @@ use agg_gui::{font_settings, text::measure_text_metrics, Point, Rect, Size};
 use super::model::Crumb;
 use super::widget::BrowserMode;
 
-/// Width of the provider sidebar.
+/// Width of the provider sidebar, in the faces that have one — see
+/// [`BrowserMode::shows_sidebar`].
 pub const SIDEBAR_W: f64 = 150.0;
 /// Height of one provider row in the sidebar.
 pub const SIDEBAR_ROW_H: f64 = 24.0;
@@ -84,6 +85,17 @@ pub const DATE_LINE_H: f64 = 12.0;
 /// Height of one card. Fixed: the width is what `1fr` stretches.
 pub const CARD_H: f64 =
     CARD_PAD_Y * 2.0 + THUMB_H + THUMB_NAME_GAP + NAME_LINE_H * NAME_LINES as f64 + DATE_LINE_H;
+/// Pixels one wheel notch scrolls the grid (step 6g-2).
+///
+/// A browser-normal notch is 50–100 px — ND's grid is a plain
+/// `overflow-y: auto` block and gets whatever the OS sends. Ours used
+/// `card_h * 0.5`, which reads as half a card and would have been fine,
+/// except the shells were handing the widget *pixel* deltas where every
+/// agg-gui consumer (its `ScrollView` multiplies by 40, the favorites
+/// strip by [`SCROLL_STEP`](crate::favorites_bar::SCROLL_STEP)) expects
+/// **notches**. A flat constant here keeps the distance honest whatever
+/// the card height grows to.
+pub const GRID_SCROLL_STEP: f64 = 60.0;
 /// Body font size for sidebar / crumb text.
 pub const FONT_SIZE: f64 = 12.0;
 /// Horizontal padding inside the breadcrumb strip and the sidebar rows.
@@ -120,7 +132,15 @@ impl BrowserLayout {
     pub fn compute(available: Size, mode: BrowserMode) -> BrowserLayout {
         let w = available.width.max(0.0);
         let h = available.height.max(0.0);
-        let sidebar = Rect::new(0.0, 0.0, SIDEBAR_W.min(w), h);
+        // The embedded face has no provider sidebar (step 6g-2): a
+        // zero-width one means `content_x` is just the padding and the
+        // grid gets the entire pane, with no branch anywhere downstream.
+        let sidebar_w = if mode.shows_sidebar() {
+            SIDEBAR_W.min(w)
+        } else {
+            0.0
+        };
+        let sidebar = Rect::new(0.0, 0.0, sidebar_w, h);
         let content_x = sidebar.width + PAD;
         let content_w = (w - content_x - PAD).max(0.0);
 

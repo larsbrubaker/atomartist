@@ -98,7 +98,9 @@ fn item_rect(h: &TestHarness, index: usize) -> Rect {
 /// down the palette).
 fn wheel_over_strip(h: &mut TestHarness, notches: f64) {
     let bar = rect_of(h, BAR_ID);
-    let over = Point::new(bar.x + 20.0, bar.y + bar.height * 0.5);
+    // The strip is at the bar's *right* edge since 6g-2 (the panel, when
+    // open, is what sits against the window edge).
+    let over = Point::new(bar.x + bar.width - 20.0, bar.y + bar.height * 0.5);
     let (x, y) = h.to_screen(over);
     h.mouse_move(x, y);
     h.scroll(notches);

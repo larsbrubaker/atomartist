@@ -381,6 +381,46 @@ fn the_expanded_panel_hosts_the_embedded_browser() {
     );
 }
 
+/// The panel is *only* the grid's chrome: no provider sidebar, and the
+/// card grid gets the whole 380 px pane — two auto-fill columns, where the
+/// sidebar left room for one narrow one (step 6g-2).
+#[test]
+fn the_panel_gives_the_card_grid_the_whole_pane() {
+    let mut h = harness_with(
+        Arc::new(ScriptedDialogs::new(UnsavedChoice::Discard)),
+        memory_registry(),
+    );
+    let handle = handle_center(&h);
+    h.click_local(handle, MouseButton::Left);
+    h.pump_until_idle(8);
+    h.frame();
+
+    assert_eq!(panel_width(&h), DEFAULT_EXPANDED_W as f64);
+    let browser = rect_of(&h, EMBEDDED_BROWSER_ID);
+    assert!(
+        (browser.width - DEFAULT_EXPANDED_W as f64).abs() < 0.5,
+        "the browser fills the panel, got {browser:?}"
+    );
+    assert_eq!(
+        prop(&h, EMBEDDED_BROWSER_ID, "sidebar"),
+        "0",
+        "no provider list inside the favorites panel"
+    );
+    let cols: usize = prop(&h, EMBEDDED_BROWSER_ID, "grid_cols").parse().unwrap();
+    assert!(
+        cols >= 2,
+        "the grid must span the pane: {cols} column(s) at {DEFAULT_EXPANDED_W} px"
+    );
+    // Same arithmetic the widget used, as a cross-check on the width the
+    // cards were actually given.
+    let layout = BrowserLayout::compute(
+        Size::new(browser.width, browser.height),
+        BrowserMode::Embedded,
+    );
+    assert_eq!(layout.sidebar.width, 0.0);
+    assert_eq!(geom::grid_geometry(layout.grid, 6).cols, cols);
+}
+
 /// Listings are **quiet** storage operations, so a directory still coming
 /// in over a slow provider does not make `menu_actions`' busy gate refuse
 /// File actions — or the bar's own project opens. Before that change, an

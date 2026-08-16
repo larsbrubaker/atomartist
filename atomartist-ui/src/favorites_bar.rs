@@ -8,32 +8,40 @@
 //! on the **3-D viewport pane** — the favourites insert *parts*, which
 //! belong to the model, and the node canvas keeps its full width.
 //!
-//! # The strip never collapses
+//! # The strip never collapses, and never leaves the viewport's side
 //!
-//! Two pieces, mirroring the ancestor's DOM order:
+//! Two pieces, mirroring the ancestor's order (ND docks right, with the
+//! strip nearest the viewport and the panel growing outward):
 //!
 //! ```text
-//!   | strip (72) | panel (browser) | handle (16) |
+//!   | panel (browser) | strip (72) |
+//!                          ^ 16 × 56 grip floats on this edge
 //! ```
 //!
 //! The 72 px icon strip is *always* on screen: it is the primitive
 //! palette. Collapsing hides only the browser panel, which is why the
-//! persisted width is the **panel's** width, not the bar's.
+//! persisted width is the **panel's** width, not the bar's — and why the
+//! strip stays put against the 3-D viewport in both states (6g-2).
 //!
-//! * **Collapsed** — strip + handle. Each strip item is a 44 × 44 icon
+//! * **Collapsed** — the strip alone. Each strip item is a 44 × 44 icon
 //!   slot with a 9 px label under it. NodeType favourites get a render
 //!   of the real primitive once [`crate::node_icons`] has produced one
 //!   (6f-2) and their palette category's glyph until then, Project
 //!   favourites a file glyph, and anything that
 //!   no longer [`resolve`](crate::file_browser::Favorite::resolve)s is
 //!   greyed rather than pruned (design §2: the provider may come back).
-//! * **Expanded** — strip + the shared [`FileBrowser`] in its *embedded*
-//!   face + handle. The panel is *only* the browser; the favourites live
-//!   in the strip, exactly as in the ancestor.
+//! * **Expanded** — the shared [`FileBrowser`] in its *embedded* face,
+//!   outboard of the strip. The panel is *only* the browser; the
+//!   favourites live in the strip, exactly as in the ancestor. The
+//!   embedded face drops the provider sidebar (see
+//!   [`BrowserMode::shows_sidebar`]), so the card grid gets the panel's
+//!   whole width.
 //!
 //! # The handle is a toggle and a resize grip
 //!
-//! One 16 × 56 grip on the bar's right edge does both, with the
+//! One 16 × 56 grip *floating on* the bar's right edge does both — since
+//! 6g-2 it reserves no width of its own, so a press above or below it
+//! reaches the strip item underneath. With the
 //! ancestor's constants: a press released within [`DRAG_THRESHOLD`]
 //! pixels toggles, and anything further drags the panel's width. Because
 //! the bar is docked left, dragging **right** widens it. Pulling right
@@ -268,7 +276,7 @@ impl FavoritesBar {
         if pane <= 0.0 {
             return MAX_STORED_W as f64;
         }
-        // The strip and the handle are never squeezed out, and neither is
+        // The strip is never squeezed out, and neither is
         // a usable 3-D viewport, so the cap is whichever is smaller: the
         // ancestor's fraction of the pane, or what is left beside them
         // once [`MIN_VIEWPORT_W`] is reserved.
@@ -290,7 +298,8 @@ impl FavoritesBar {
         }
     }
 
-    /// Total width the bar occupies: strip + panel + handle.
+    /// Total width the bar occupies: panel + strip (the grip floats over
+    /// the strip and costs nothing).
     pub fn visible_width(&self) -> f64 {
         COLLAPSED_W + self.panel_width()
     }

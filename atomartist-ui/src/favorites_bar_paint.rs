@@ -21,6 +21,8 @@ use crate::favorites_bar_geom as geom;
 
 /// Chevron size in the handle grip.
 const CHEVRON_SIZE: f64 = 10.0;
+/// Corner radius of the floating grip (ND's `border-radius: 6px`).
+const GRIP_RADIUS: f64 = 6.0;
 
 pub(crate) fn paint_bar(bar: &mut FavoritesBar, ctx: &mut dyn DrawCtx) {
     let bounds = bar.bounds();
@@ -60,29 +62,34 @@ pub(crate) fn paint_bar(bar: &mut FavoritesBar, ctx: &mut dyn DrawCtx) {
         layout.pin,
     );
 
-    // Separator between the strip and whatever is to its right.
     ctx.set_stroke_color(visuals.separator);
     ctx.set_line_width(1.0);
+    // Separator between the browser panel and the strip, when the panel
+    // is showing (6g-2: the panel is *outboard* of the strip).
+    if layout.panel.is_some() {
+        ctx.begin_path();
+        ctx.move_to(layout.strip.x + 0.5, layout.strip.y);
+        ctx.line_to(layout.strip.x + 0.5, layout.strip.y + layout.strip.height);
+        ctx.stroke();
+    }
+
+    // The bar's outer edge, against the 3-D viewport.
     ctx.begin_path();
-    ctx.move_to(layout.strip.x + layout.strip.width - 0.5, layout.strip.y);
-    ctx.line_to(
-        layout.strip.x + layout.strip.width - 0.5,
-        layout.strip.y + layout.strip.height,
-    );
+    ctx.move_to(bounds.width - 0.5, 0.0);
+    ctx.line_to(bounds.width - 0.5, bounds.height);
     ctx.stroke();
 
-    // Handle: a separator line plus the centred grip, so the strip reads
-    // as grabbable without a hover state.
-    let handle = layout.handle;
-    ctx.begin_path();
-    ctx.move_to(handle.x + handle.width - 0.5, handle.y);
-    ctx.line_to(handle.x + handle.width - 0.5, handle.y + handle.height);
-    ctx.stroke();
-
-    let grip = geom::handle_grip(handle);
+    // The grip: a floating 16 × 56 affordance drawn *over* the strip's
+    // right edge, so the strip reads as grabbable without a hover state
+    // and without a full-height lane of dead width.
+    let grip = layout.handle;
     ctx.set_fill_color(visuals.text_color.with_alpha(0.10));
     ctx.begin_path();
-    ctx.rect(grip.x, grip.y, grip.width, grip.height);
+    // ND rounds only the two corners facing away from the edge
+    // (`border-radius: 6px 0 0 6px`); `DrawCtx` has no per-corner radii,
+    // so all four are rounded and the two against the viewport edge are
+    // hidden by the bar's own boundary.
+    ctx.rounded_rect(grip.x, grip.y, grip.width, grip.height, GRIP_RADIUS);
     ctx.fill();
 
     let chevron = if bar.expanded() {

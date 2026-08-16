@@ -11,7 +11,8 @@
 //!
 //! - **Provider sidebar** — one row per [`BrowserModel::roots`], in
 //!   registration order; clicking one navigates to that provider's root
-//!   and the row for the current provider is highlighted.
+//!   and the row for the current provider is highlighted. Modal faces
+//!   only: see [`BrowserMode::shows_sidebar`].
 //! - **Breadcrumb strip** — [`BrowserModel::breadcrumbs`], each crumb
 //!   clickable. (`crate::breadcrumb_bar` is the *node-graph* drill trail,
 //!   bound to `AppState`'s drill stack; the crumbs here are storage URIs,
@@ -92,9 +93,10 @@ pub enum BrowserMode {
     /// selection.
     Save,
     /// Live inside another panel (the favorites bar, step 6d-2). Same
-    /// sidebar / breadcrumbs / grid as [`BrowserMode::Open`], but none of
-    /// the modal-only affordances: no OK / Cancel footer and no name
-    /// field, because there is nothing to confirm — a pick is delivered
+    /// breadcrumbs / grid as [`BrowserMode::Open`], but none of
+    /// the modal-only affordances: no OK / Cancel footer, no name
+    /// field, and — since 6g-2 — no provider sidebar, because there is
+    /// nothing to confirm and no room to spend: a pick is delivered
     /// straight to the host through [`FileBrowser::on_activate`]. This is
     /// NodeDesigner's `mountEmbedded()` split.
     Embedded,
@@ -103,6 +105,18 @@ pub enum BrowserMode {
 impl BrowserMode {
     pub fn shows_name_field(self) -> bool {
         matches!(self, BrowserMode::Save)
+    }
+
+    /// Whether this face shows the provider sidebar.
+    ///
+    /// The modal faces do; the embedded one does not (step 6g-2).
+    /// NodeDesigner's embedded parts browser is filter tabs + search +
+    /// nav + grid — there is no provider list in it — and in a 380 px
+    /// panel a 150 px sidebar leaves 218 px of content, i.e. a *single*
+    /// `minmax(120px, 1fr)` column. Dropping it is what gives the grid
+    /// the whole pane and two columns at the default width.
+    pub fn shows_sidebar(self) -> bool {
+        !matches!(self, BrowserMode::Embedded)
     }
 
     pub fn as_str(self) -> &'static str {
@@ -395,7 +409,13 @@ impl FileBrowser {
     fn rebuild(&mut self, available: Size) {
         let layout = BrowserLayout::compute(available, self.mode);
         let roots = self.model.roots();
-        let sidebar_rows = geom::sidebar_rows(layout.sidebar, roots.len());
+        // No sidebar, no rows — the embedded face must not carry
+        // zero-width hit targets around (step 6g-2).
+        let sidebar_rows = if layout.sidebar.width > 0.0 {
+            geom::sidebar_rows(layout.sidebar, roots.len())
+        } else {
+            Vec::new()
+        };
         let crumbs = self.model.breadcrumbs();
         let crumb_rects = geom::crumb_rects(layout.crumbs, &crumbs);
         let listing = self.model.listing();
@@ -594,8 +614,10 @@ impl Widget for FileBrowser {
             },
             Event::MouseWheel { pos, delta_y, .. } if self.frame.layout.grid.contains(*pos) => {
                 // Y-up: a positive wheel delta scrolls the content up,
-                // i.e. *decreases* how far down we are.
-                let next = self.scroll - delta_y * self.frame.grid.card_h * 0.5;
+                // i.e. *decreases* how far down we are. One notch is
+                // `GRID_SCROLL_STEP` px — see its docs for why that is a
+                // constant rather than a fraction of a card.
+                let next = self.scroll - delta_y * geom::GRID_SCROLL_STEP;
                 self.scroll = next.clamp(0.0, self.frame.grid.max_scroll);
                 EventResult::Consumed
             }
@@ -647,6 +669,12 @@ impl Widget for FileBrowser {
             ("name", self.name_text()),
             ("back_enabled", self.model.can_go_back().to_string()),
             ("takes_keys", self.takes_keys().to_string()),
+            ("sidebar", self.frame.sidebar_rows.len().to_string()),
+            // Grid scroll, in pixels down from the top of the content —
+            // what pins the per-notch wheel distance (step 6g-2).
+            ("scroll", format!("{:.1}", self.scroll)),
+            ("max_scroll", format!("{:.1}", self.frame.grid.max_scroll)),
+            ("grid_cols", self.frame.grid.cols.to_string()),
             (
                 "visible",
                 format!("{}..{}", self.frame.visible.start, self.frame.visible.end),

@@ -67,6 +67,10 @@ fn paint_sidebar(browser: &FileBrowser, ctx: &mut dyn DrawCtx) {
     let visuals = current_visuals();
     let frame = &browser.frame;
     let sidebar = frame.layout.sidebar;
+    // The embedded face has none (step 6g-2).
+    if sidebar.width <= 0.0 {
+        return;
+    }
 
     ctx.set_fill_color(visuals.panel_fill);
     ctx.begin_path();

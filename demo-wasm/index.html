@@ -93,12 +93,50 @@ async function main() {
     const [x, y] = evtCoords(e);
     on_mouse_up(x, y, e.button, ...mods(e));
   });
+  // Wheel-delta normalisation. A port of `agg_gui::wheel`
+  // (agg-gui/src/wheel.rs), which is the source of truth and carries the
+  // unit tests — this glue calls the wasm export directly instead of
+  // going through agg-gui's own `web_shell`, so the small pure function
+  // is duplicated here. Keep the two in step.
+  //
+  // agg-gui's delta is in *notches*, not pixels: every consumer scales it
+  // itself (ScrollView 40 px, favorites strip 40 px, browser grid
+  // GRID_SCROLL_STEP), and zoom consumers read only the sign. Browsers
+  // report CSS pixels (deltaMode 0), lines (1) or pages (2). Passing raw
+  // pixels made every scroll ~100x too far (design §5c, step 6g-2).
+  const PIXELS_PER_NOTCH = 40, NOTCHES_PER_PAGE = 8, NOTCH_EPSILON = 1e-9;
+  const wheelAcc = { x: 0, y: 0 };
+  function toNotches(delta, deltaMode) {
+    if (!Number.isFinite(delta)) return 0;
+    if (deltaMode === 1) return delta;                 // lines: 1 = 1 notch
+    if (deltaMode === 2) return delta * NOTCHES_PER_PAGE;
+    return delta / PIXELS_PER_NOTCH;                   // pixels
+  }
+  // Bank sub-notch travel (a trackpad sends 1-10 px per event) and emit
+  // only whole notches, keeping the remainder: nothing is lost — 40 px of
+  // finger is always exactly one notch — and no consumer ever sees a
+  // fraction, which is what would make a sign-reading zoom jump per event.
+  // A direction change drops the partial notch so a reversal answers at
+  // once.
+  function bank(axis, notches) {
+    if (notches === 0) return 0;
+    if (wheelAcc[axis] !== 0 && Math.sign(wheelAcc[axis]) !== Math.sign(notches)) {
+      wheelAcc[axis] = 0;
+    }
+    wheelAcc[axis] += notches;
+    const whole = Math.sign(wheelAcc[axis]) *
+      Math.trunc(Math.abs(wheelAcc[axis]) + NOTCH_EPSILON);
+    wheelAcc[axis] -= whole;
+    return whole;
+  }
   canvas.addEventListener('wheel', e => {
     const [x, y] = evtCoords(e);
+    e.preventDefault();
     // -deltaY because browsers send positive deltaY when scrolling down
     // but agg-gui expects positive when scrolling up (zoom in).
-    on_mouse_wheel(x, y, -e.deltaY, ...mods(e));
-    e.preventDefault();
+    const dy = bank('y', toNotches(-e.deltaY, e.deltaMode));
+    if (dy === 0) return;  // not yet a whole notch
+    on_mouse_wheel(x, y, dy, ...mods(e));
   }, { passive: false });
   // Disable the right-click context menu so the canvas's own menu wins.
   canvas.addEventListener('contextmenu', e => e.preventDefault());

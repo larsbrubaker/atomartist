@@ -167,6 +167,55 @@ fn nav_row_reserves_back_and_the_search_box_sits_top_right() {
     assert!(layout.search.contains(layout.search_clear.center()));
 }
 
+/// The embedded face has no provider sidebar (step 6g-2), so its grid
+/// gets the whole pane — which is what turns the favorites panel's single
+/// narrow column into a real grid.
+#[test]
+fn the_embedded_face_gives_its_grid_the_whole_pane() {
+    // The panel width the bar opens at: `DEFAULT_EXPANDED_W`.
+    let size = Size::new(380.0, 600.0);
+    let embedded = BrowserLayout::compute(size, BrowserMode::Embedded);
+    let modal = BrowserLayout::compute(size, BrowserMode::Open);
+
+    assert_eq!(
+        embedded.sidebar.width, 0.0,
+        "no provider list when embedded"
+    );
+    assert_eq!(modal.sidebar.width, SIDEBAR_W, "the modal keeps it");
+    assert_eq!(embedded.grid.x, PAD, "the grid starts at the padding");
+    assert!((embedded.grid.width - (380.0 - PAD * 2.0)).abs() < 1e-9);
+    assert!(
+        embedded.grid.width > modal.grid.width + SIDEBAR_W - 1e-9,
+        "the sidebar's width goes to the grid, not to more padding"
+    );
+
+    // The point of the change: two auto-fill columns at the default
+    // panel width (368 px holds 120 + 12 + 120 with 116 to share out),
+    // where the sidebar left room for exactly one.
+    assert_eq!(grid_geometry(embedded.grid, 6).cols, 2);
+    assert_eq!(
+        grid_geometry(modal.grid, 6).cols,
+        1,
+        "…which a 380 px panel with a sidebar could never have shown"
+    );
+}
+
+/// One wheel notch scrolls the grid a browser-normal distance — pinned,
+/// because the number the shells feed in is a *notch* count and a
+/// per-notch step of a whole row reads as a page jump (step 6g-2).
+#[test]
+fn the_grid_scroll_step_is_a_browser_normal_notch() {
+    assert!(
+        (50.0..=100.0).contains(&GRID_SCROLL_STEP),
+        "a wheel notch is 50-100 px in every browser we mirror, got {GRID_SCROLL_STEP}"
+    );
+    let pitch = grid_geometry(grid_for(3, 2.0), 9).row_pitch();
+    assert!(
+        GRID_SCROLL_STEP < pitch,
+        "one notch must be less than a whole row ({pitch} px)"
+    );
+}
+
 /// The hit-test arithmetic and the paint rectangles must name the same
 /// cell — including after a scroll, which is the case a stale visible
 /// range gets wrong.

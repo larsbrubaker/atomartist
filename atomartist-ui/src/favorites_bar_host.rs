@@ -110,13 +110,17 @@ pub fn canvas_rect_local(pane: Rect, canvas: Rect) -> Option<Rect> {
 }
 
 /// The 3-D viewport's rectangle in **bar-local** coordinates: whatever
-/// is left of the bar's own pane once the bar (strip + panel + handle,
-/// i.e. `bar_width`) has taken its share. `None` before the pane probe
-/// has published, or when nothing is left beside the bar.
+/// is left of the bar's own pane once the bar (the browser panel, when
+/// open, plus the always-there strip — i.e. `bar_width`) has taken its
+/// share. `None` before the pane probe has published, or when nothing is
+/// left beside the bar.
 ///
 /// Starting the rectangle at the bar's right edge is what makes a
 /// release over the bar's own chrome a *cancel* rather than a bed drop
-/// (design §5b, step 6f-4).
+/// (design §5b, step 6f-4). Since 6g-2 that edge is the *strip's* right
+/// edge — the strip is the piece against the viewport, and the 16 × 56
+/// grip floats over it rather than reserving a lane of its own, so the
+/// bar's width is exactly panel + strip.
 ///
 /// **Accepted v1 limitation:** the rectangle is the whole viewport,
 /// *including* the overlay chrome drawn on top of it (the HUD bay's
@@ -258,10 +262,13 @@ mod tests {
     }
 
     /// The viewport rectangle starts where the bar ends, so the bar's own
-    /// strip / panel / handle are never inside it — that is what keeps a
-    /// release over the chrome a cancel rather than a bed drop.
+    /// panel and strip — and the grip floating on the strip's right edge
+    /// — are never inside it. That is what keeps a release over the
+    /// chrome a cancel rather than a bed drop.
     #[test]
     fn viewport_rect_excludes_the_bar() {
+        // A collapsed 6g-2 bar is the 72 px strip; 88 keeps the case
+        // general (any bar width, panel open or not).
         let pane = Rect::new(0.0, 286.0, 1280.0, 400.0);
         let rect = viewport_rect_local(pane, 88.0).expect("room beside the bar");
         assert_eq!(rect, Rect::new(88.0, 0.0, 1192.0, 400.0));
@@ -271,7 +278,7 @@ mod tests {
         );
         assert!(
             !rect.contains(agg_gui::Point::new(87.0, 200.0)),
-            "the handle"
+            "the grip on the strip's outer edge"
         );
         assert!(rect.contains(agg_gui::Point::new(600.0, 200.0)), "the bed");
         // Unknown pane, or a bar that fills it: no drop target at all.

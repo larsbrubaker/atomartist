@@ -68,9 +68,13 @@ fn max_scroll(h: &TestHarness) -> f64 {
 
 /// Wheel `notches` over the middle of the strip. Negative = scroll down
 /// = reveal favourites further down the palette (agg-gui's sign rule).
+///
+/// The strip is at the bar's **right** edge since 6g-2, so the point is
+/// measured back from there rather than forward from the bar's left —
+/// which is the panel while the bar is expanded.
 fn wheel_over_strip(h: &mut TestHarness, notches: f64) {
     let bar = rect_of(h, BAR_ID);
-    let over = Point::new(bar.x + STRIP_W * 0.5, bar.y + bar.height * 0.5);
+    let over = Point::new(bar.x + bar.width - STRIP_W * 0.5, bar.y + bar.height * 0.5);
     let (x, y) = h.to_screen(over);
     h.mouse_move(x, y);
     h.scroll(notches);
@@ -142,7 +146,7 @@ fn strip_renders_the_seeded_favorites() {
     assert_eq!(
         bar_width(&h),
         COLLAPSED_W,
-        "collapsed = the persistent strip plus the handle"
+        "collapsed = the persistent strip alone (6g-2: the grip floats over it)"
     );
     assert_eq!(panel_width(&h), 0.0);
     assert!(
@@ -195,17 +199,89 @@ fn the_strip_survives_the_toggle() {
         "expanding grows the panel, not the strip"
     );
     let bar = rect_of(&h, BAR_ID);
-    assert_eq!(bar.x, strip.x, "the strip stays put on the left edge");
+    assert_eq!(bar.x, strip.x, "the bar still starts at the window edge");
     let browser = rect_of(&h, EMBEDDED_BROWSER_ID);
     assert!(
-        browser.x >= bar.x + STRIP_W - 0.5,
-        "the browser panel opens *beside* the strip, not over it: \
+        (browser.x - bar.x).abs() < 0.5,
+        "the panel opens *outboard* of the strip, against the window edge: \
          browser {browser:?}, bar {bar:?}"
     );
     assert!(
-        browser.x + browser.width <= bar.x + bar.width - HANDLE_W + 0.5,
-        "and stops at the handle"
+        (browser.x + browser.width - (bar.x + bar.width - STRIP_W)).abs() < 0.5,
+        "and stops where the strip begins"
     );
+}
+
+/// 6g-2's invariant, measured against the thing it is about: the strip
+/// stays flush with the 3-D viewport's left edge whether the panel is
+/// open or shut. Expanding pushes the *viewport* right, not the strip
+/// left.
+#[test]
+fn the_strip_stays_against_the_viewport_in_both_states() {
+    let mut h = TestHarness::with_starter_graph();
+    let gap = |h: &TestHarness| {
+        let bar = rect_of(h, BAR_ID);
+        let viewport = rect_of(h, "viewport-3d");
+        // Right edge of the strip == right edge of the bar == the
+        // viewport's left edge.
+        let (_, layout) = bar_layout(h);
+        assert!(
+            (layout.strip.x + layout.strip.width - bar.width).abs() < 0.5,
+            "the strip must end at the bar's right edge, {layout:?} in {bar:?}"
+        );
+        viewport.x - (bar.x + bar.width)
+    };
+    let collapsed_gap = gap(&h);
+    assert!(
+        collapsed_gap.abs() < 0.5,
+        "collapsed: the strip abuts the viewport, gap {collapsed_gap}"
+    );
+
+    let handle = handle_center(&h);
+    h.click_local(handle, MouseButton::Left);
+    h.pump_until_idle(8);
+    h.frame();
+    assert!(expanded(&h));
+    let expanded_gap = gap(&h);
+    assert!(
+        expanded_gap.abs() < 0.5,
+        "expanded: the strip still abuts the viewport, gap {expanded_gap}"
+    );
+}
+
+/// The handle reserves no width of its own (6g-2): a press on the bar's
+/// right edge *above* the 56 px grip must reach the strip item under it,
+/// not the toggle.
+#[test]
+fn a_press_beside_the_grip_misses_the_handle() {
+    let mut h = TestHarness::with_starter_graph();
+    let bar = rect_of(&h, BAR_ID);
+    let (_, layout) = bar_layout(&h);
+    let grip = layout.handle;
+    assert_eq!(grip.height, 56.0, "the grip is ND's 16 x 56");
+
+    // Same column as the grip, 40 px above its top edge — inside the
+    // strip, outside the grip.
+    let above = Point::new(
+        bar.x + grip.x + grip.width * 0.5,
+        bar.y + grip.y + grip.height + 40.0,
+    );
+    assert!(
+        layout
+            .strip
+            .contains(agg_gui::Point::new(above.x - bar.x, above.y - bar.y)),
+        "the probe point is over the strip"
+    );
+    h.click_local(above, MouseButton::Left);
+    assert!(
+        !expanded(&h),
+        "a click 40 px above the grip must not toggle the panel"
+    );
+
+    // …and the grip itself still does.
+    let center = handle_center(&h);
+    h.click_local(center, MouseButton::Left);
+    assert!(expanded(&h), "the grip is still the toggle");
 }
 
 // ── Scrolling ───────────────────────────────────────────────────────────
