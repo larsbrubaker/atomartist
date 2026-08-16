@@ -38,17 +38,22 @@
 //! fix, and one that leaves the import seeing exactly the solid the user
 //! sees.
 //!
-//! That is only the transform-induced case. An operand whose *source*
-//! geometry is inside out (a badly authored or imported mesh) still
-//! computes against its complement; that is what plan step B-4's
-//! "Repair Winding Order" / "Keep Inside Out Geometry" rows are for
-//! (`repair_orientation()`, `WindingRule::Nonzero`), and it is not
-//! detectable from the matrix.
+//! That is only the transform-induced case, and it is deterministic: the
+//! sign of the determinant says exactly how many times the winding was
+//! flipped on the way here, so the rewind is always right and always
+//! applied. An operand whose *source* geometry is inside out (a badly
+//! authored or imported mesh) is a different problem — nothing in the
+//! matrix reveals it, and the fix has to look at the geometry. That is
+//! what [`BooleanOptions`] carries: **Repair Winding Order**
+//! (`repair_orientation()` on the imported handle, fixing the data) and
+//! **Keep Inside Out Geometry** ([`WindingRule::Nonzero`], redefining
+//! what counts as material). The two are independent of the mirror
+//! rewind and of each other, and all three can apply to the same operand.
 
 use std::sync::Arc;
 
 use manifold_rust::manifold::Manifold;
-use manifold_rust::types::{Error, MeshGL, OpType};
+use manifold_rust::types::{BooleanEngine, Error, MeshGL, OpType, WindingRule};
 
 use super::boolean_import::{import_operand, refusal_message};
 use crate::geometry::mesh3d::{
@@ -57,8 +62,51 @@ use crate::geometry::mesh3d::{
 use crate::geometry::{num_tris, num_verts, Body, Geometry3d};
 use crate::graph::node::PortValue;
 use crate::graph::socket::SocketUid;
-use crate::registry::{wrap_mesh, EvalCtx, NodeError};
+use crate::registry::{compose_with_upstream, wrap_mesh, EvalCtx, NodeError};
 use crate::socket_types::SocketType;
+
+/// The two kernel toggles from the Boolean node's property panel
+/// (`BooleanObject3D.cs:163-170`), resolved once per evaluation and passed
+/// to every import and every boolean call so a single operation cannot run
+/// half under one policy and half under the other.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BooleanOptions {
+    /// "Keep Inside Out Geometry" — [`WindingRule::Nonzero`] instead of
+    /// the default [`WindingRule::Positive`], so a region wound the wrong
+    /// way counts as material (`w != 0`) rather than cancelling the volume
+    /// around it. A winding rule is a robust-engine semantic, so asking
+    /// for it also forces the slower robust pipeline — manifold-rust's
+    /// `Auto` resolves `Nonzero` to `Robust` for us
+    /// (`boolean3::boolean_dispatch_full`), which is why this stays on
+    /// `Auto` rather than pinning the engine here.
+    pub keep_inside_out: bool,
+    /// "Repair Winding Order" — `repair_orientation()` on each imported
+    /// operand, before any boolean runs. Fixes the data once instead of
+    /// redefining "solid" for the whole operation; MatterCAD calls it the
+    /// better answer of the two.
+    pub repair_winding: bool,
+}
+
+impl BooleanOptions {
+    /// Which winding numbers the kernel counts as solid
+    /// (`BooleanMeshBuilder.WindingRule`, L71-73).
+    pub fn winding_rule(&self) -> WindingRule {
+        if self.keep_inside_out {
+            WindingRule::Nonzero
+        } else {
+            WindingRule::Positive
+        }
+    }
+}
+
+/// One boolean step under `opts`.
+///
+/// Every boolean in this module goes through here: the engine stays
+/// `Auto` (see [`BooleanOptions::keep_inside_out`]) and the rule is the
+/// node's, so no call site can forget the toggle.
+pub fn boolean_op(a: &Manifold, b: &Manifold, op: OpType, opts: BooleanOptions) -> Manifold {
+    a.boolean_with_engine_and_rule(b, op, BooleanEngine::Auto, opts.winding_rule())
+}
 
 /// One connected input slot and the bodies it carries.
 pub struct InputGroup {
@@ -67,6 +115,29 @@ pub struct InputGroup {
     /// names so they know which part of the graph to fix.
     pub name: Arc<str>,
     pub bodies: Vec<Body>,
+    /// The 1-based part number each body had **in the user's input**,
+    /// parallel to `bodies`. Carried explicitly because [`split_roles`]
+    /// hands out subsets: a refusal that renumbered "part 3" to "part 1"
+    /// after the hole/solid split would send the user counting parts that
+    /// only exist inside this node.
+    pub parts: Vec<usize>,
+    /// How many parts the input carried in total — what decides whether a
+    /// refusal names a part at all. Also a split survivor: a one-body
+    /// subset of a three-body input still says "part 2".
+    pub total_parts: usize,
+}
+
+impl InputGroup {
+    /// A sub-group of `self` holding only the listed body/part pairs.
+    fn subset(&self, bodies: Vec<Body>, parts: Vec<usize>) -> Self {
+        Self {
+            socket: self.socket,
+            name: self.name.clone(),
+            bodies,
+            parts,
+            total_parts: self.total_parts,
+        }
+    }
 }
 
 /// The uids of the slots that *can* carry an operand, in display order:
@@ -116,11 +187,14 @@ pub fn gather_inputs(ctx: &EvalCtx) -> Result<Vec<InputGroup>, NodeError> {
                 )))
             }
         };
-        let bodies: Vec<Body> = geom
+        // Part numbers count every body the input *carried*, including the
+        // empty ones dropped here — the user counts what they wired up.
+        let (bodies, parts): (Vec<Body>, Vec<usize>) = geom
             .iter()
-            .filter(|b| num_verts(&b.mesh) > 0 && num_tris(&b.mesh) > 0)
-            .cloned()
-            .collect();
+            .enumerate()
+            .filter(|(_, b)| num_verts(&b.mesh) > 0 && num_tris(&b.mesh) > 0)
+            .map(|(i, b)| (b.clone(), i + 1))
+            .unzip();
         if bodies.is_empty() {
             continue;
         }
@@ -128,6 +202,8 @@ pub fn gather_inputs(ctx: &EvalCtx) -> Result<Vec<InputGroup>, NodeError> {
             socket: slot.uid,
             name: slot.name.clone(),
             bodies,
+            parts,
+            total_parts: geom.len(),
         });
     }
     Ok(groups)
@@ -136,8 +212,13 @@ pub fn gather_inputs(ctx: &EvalCtx) -> Result<Vec<InputGroup>, NodeError> {
 /// Import every body of `group` as a boolean operand, with its matrix
 /// baked in. A refusal becomes a [`NodeError`] naming the input (and the
 /// part within it, when the input carries more than one body).
-pub fn import_group(group: &InputGroup) -> Result<Vec<Manifold>, NodeError> {
-    let multi = group.bodies.len() > 1;
+///
+/// With [`BooleanOptions::repair_winding`] set, each imported handle is
+/// rewound before it is handed back — MatterCAD repairs the operand right
+/// after import too, so every consumer of the handle sees the repaired
+/// geometry and no boolean can run against a half-repaired operand list.
+pub fn import_group(group: &InputGroup, opts: BooleanOptions) -> Result<Vec<Manifold>, NodeError> {
+    let multi = group.total_parts > 1;
     let mut solids = Vec::with_capacity(group.bodies.len());
     for (i, body) in group.bodies.iter().enumerate() {
         let mut baked = apply_transform(&body.mesh, &body.matrix);
@@ -145,22 +226,29 @@ pub fn import_group(group: &InputGroup) -> Result<Vec<Manifold>, NodeError> {
             reverse_winding(&mut baked);
         }
         let label = if multi {
-            format!("{} (part {})", group.name, i + 1)
+            format!("{} (part {})", group.name, group.parts[i])
         } else {
             group.name.to_string()
         };
         let solid =
             import_operand(&baked).map_err(|f| NodeError::msg(refusal_message(&label, f)))?;
-        solids.push(solid);
+        solids.push(if opts.repair_winding {
+            solid.repair_orientation()
+        } else {
+            solid
+        });
     }
     Ok(solids)
 }
 
 /// Import several groups' bodies into one flat operand list.
-pub fn import_groups(groups: &[&InputGroup]) -> Result<Vec<Manifold>, NodeError> {
+pub fn import_groups(
+    groups: &[&InputGroup],
+    opts: BooleanOptions,
+) -> Result<Vec<Manifold>, NodeError> {
     let mut all = Vec::new();
     for g in groups {
-        all.extend(import_group(g)?);
+        all.extend(import_group(g, opts)?);
     }
     Ok(all)
 }
@@ -171,10 +259,10 @@ pub fn import_groups(groups: &[&InputGroup]) -> Result<Vec<Manifold>, NodeError>
 /// through every later one, and [`finish`] reports it once with the same
 /// message it would have carried here. Plan step B-5 replaces this fold
 /// with touching-set batching and per-operand triage.
-pub fn fold(solids: Vec<Manifold>, op: OpType) -> Option<Manifold> {
+pub fn fold(solids: Vec<Manifold>, op: OpType, opts: BooleanOptions) -> Option<Manifold> {
     let mut it = solids.into_iter();
     let first = it.next()?;
-    Some(it.fold(first, |acc, next| acc.boolean(&next, op)))
+    Some(it.fold(first, |acc, next| boolean_op(&acc, &next, op, opts)))
 }
 
 /// Turn a boolean result into a render-ready `num_prop = 6` mesh, or a
@@ -219,12 +307,63 @@ pub fn result_body(ctx: &EvalCtx, mesh: MeshGL) -> Option<Body> {
     wrap_mesh(ctx, mesh).bodies.into_iter().next()
 }
 
-/// The bodies of every group, passed through untouched. Used when an
-/// operation has nothing to do (Subtract with no removers): the parts keep
-/// their own meshes, matrices, colours and origin claims rather than being
-/// re-imported and re-emitted as this node's own geometry.
-pub fn pass_through(groups: &[InputGroup]) -> Geometry3d {
-    Geometry3d::from_bodies(groups.iter().flat_map(|g| g.bodies.iter().cloned()).collect())
+/// The bodies of every group, handed back as they arrived — same meshes,
+/// same colours (unless this node sets one), same solid/hole roles — but
+/// **in this node's frame**. Used when an operation has nothing to do
+/// (Subtract with no removers) and by Keep Subtracted Parts.
+///
+/// The frame is the whole subtlety. A body that comes out of the boolean
+/// itself is baked and carries the node's matrix ([`result_body`]), so a
+/// part passed through with only its upstream matrix would sit in a
+/// different place the moment the user dragged the node's gizmo: the
+/// result would move and its untouched neighbours would stay behind.
+/// [`compose_with_upstream`] is the shared rule for exactly this —
+/// `node_matrix · upstream_matrix`, upstream colour unless the node
+/// overrides it, role preserved. The origin claim moves to this node, as
+/// it does for every body the boolean emits ([`result_body`]) — the parts
+/// are this node's output now, whatever it did or did not do to them.
+pub fn pass_through(ctx: &EvalCtx, groups: &[InputGroup]) -> Geometry3d {
+    Geometry3d::from_bodies(composed_bodies(ctx, &groups.iter().collect::<Vec<_>>()))
+}
+
+/// [`pass_through`]'s body list, for callers that already hold references
+/// and want to append rather than build a group.
+pub fn composed_bodies(ctx: &EvalCtx, groups: &[&InputGroup]) -> Vec<Body> {
+    groups
+        .iter()
+        .flat_map(|g| g.bodies.iter())
+        .map(|b| compose_with_upstream(ctx, b))
+        .collect()
+}
+
+/// Split every group's bodies by [`crate::geometry::BodyRole`], keeping the
+/// group identity (socket + name) on both sides so a refusal message still
+/// names the input the part came from. Groups that end up with no bodies on
+/// a side are dropped from that side.
+///
+/// Holes are per-*body*, unlike the keep/remove selection, which is per
+/// input socket: the role travels with a body from whatever node marked it,
+/// and one input may well carry both a solid and a hole.
+pub fn split_roles(groups: &[InputGroup]) -> (Vec<InputGroup>, Vec<InputGroup>) {
+    let mut solids = Vec::new();
+    let mut holes = Vec::new();
+    for g in groups {
+        let (h, s): (Vec<(Body, usize)>, Vec<(Body, usize)>) = g
+            .bodies
+            .iter()
+            .cloned()
+            .zip(g.parts.iter().copied())
+            .partition(|(b, _)| b.is_hole());
+        if !s.is_empty() {
+            let (bodies, parts) = s.into_iter().unzip();
+            solids.push(g.subset(bodies, parts));
+        }
+        if !h.is_empty() {
+            let (bodies, parts) = h.into_iter().unzip();
+            holes.push(g.subset(bodies, parts));
+        }
+    }
+    (solids, holes)
 }
 
 /// True when a column-major transform flips handedness — its upper-3×3

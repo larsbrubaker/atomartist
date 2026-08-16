@@ -583,6 +583,7 @@ mod tests {
             color: [1.0, 1.0, 1.0, 1.0],
             vertex_colors: None,
             origin,
+            role: Default::default(),
         }
     }
 

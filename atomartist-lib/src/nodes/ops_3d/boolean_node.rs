@@ -38,7 +38,7 @@
 //!
 //! | Operation | Result |
 //! |---|---|
-//! | Combine | union of every operand — one body. Hole/solid participation is plan step B-4 |
+//! | Combine | union of every operand — one body; parts marked as holes are unioned separately and subtracted from that (see below) |
 //! | Intersect | intersection of every operand — one body |
 //! | Subtract | union of the removers, subtracted from **each** keep; keeps stay separate bodies (`Object3DBooleanOperations.DoSubtract`: union the removers first, then one subtract per keep) |
 //! | Subtract & Replace | as Subtract, plus each keep ∩ remover-union kept beside its keep as its own body; empty results are omitted |
@@ -47,18 +47,40 @@
 //! [`NodeError`] naming the operand: a boolean that swallowed a bad operand
 //! as empty geometry would still report success, and the part would silently
 //! vanish from the output.
+//!
+//! ## Holes
+//!
+//! A body carrying [`BodyRole::Hole`] (stamped by the Mark Hole node —
+//! MatterCAD's per-object `OutputType`, which every scene item has and we
+//! give one node) is negative space. **Combine** honours that the way
+//! `BooleanMeshBuilder.CombineMeshes` (L104-192) does: union the solids,
+//! union the holes, subtract the second from the first. A Combine with
+//! *only* holes wired in returns the hole union, still marked as a hole —
+//! MatterCAD adds it to the scene as a `PrintOutputTypes.Hole` child, so
+//! it can still cut something further downstream instead of vanishing.
+//! The other three operations treat a hole as an ordinary participant,
+//! also as MatterCAD does.
+//!
+//! ## Toggles (plan step B-4)
+//!
+//! `keep_inside_out` and `repair_winding` resolve into
+//! [`BooleanOptions`] and reach every import and every boolean call;
+//! `keep_subtracted` is bookkeeping on the Subtract result. See
+//! [`super::boolean_ops::BooleanOptions`] for how the two kernel toggles
+//! differ from the mirror rewind that always runs.
 
 use std::sync::Arc;
 
+use manifold_rust::manifold::Manifold;
 use manifold_rust::types::OpType;
 
 use super::boolean_ops::{
-    finish_non_empty, fold, gather_inputs, import_group, import_groups, operand_sockets,
-    pass_through, result_body, InputGroup,
+    boolean_op, composed_bodies, finish_non_empty, fold, gather_inputs, import_group, import_groups,
+    operand_sockets, pass_through, result_body, split_roles, BooleanOptions, InputGroup,
 };
 use super::boolean_selection::{self, SUBTRACT_PARTS};
 use super::dynamic_inputs;
-use crate::geometry::{Body, Geometry3d};
+use crate::geometry::{Body, BodyRole, Geometry3d};
 use crate::graph::node::PortValue;
 use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
@@ -114,6 +136,44 @@ fn own_params() -> ParamSet {
             "Which inputs are cut out of the others. Empty means the last connected \
              input is the remover.",
         )
+        // The three toggles, in MatterCAD's declaration order
+        // (`BooleanObject3D.cs:163-173`). All three are property-only:
+        // a param-minted socket after the placeholder would break the
+        // trailing-empty invariant (see the doc on this function).
+        .bool_(KEEP_INSIDE_OUT, "Keep Inside Out Geometry", false)
+        .no_socket()
+        .description(
+            "Treat an inside-out shell as solid material instead of letting it cancel \
+             out the volume around it. Turn this on when a model that should be solid \
+             comes back with parts missing. It forces the slower, robust boolean engine.",
+        )
+        .bool_(REPAIR_WINDING, "Repair Winding Order", false)
+        .no_socket()
+        .description(
+            "Rewind each part's inside-out shells before the boolean runs. This fixes \
+             the geometry once rather than changing what every later operation counts \
+             as solid, and is usually the better answer of the two.",
+        )
+        .bool_(KEEP_SUBTRACTED, "Keep Subtracted Parts", false)
+        .no_socket()
+        .description(
+            "Leave the parts that were cut away in the result rather than discarding them.",
+        )
+}
+
+/// "Keep Inside Out Geometry" — [`BooleanOptions::keep_inside_out`].
+pub const KEEP_INSIDE_OUT: &str = "keep_inside_out";
+/// "Repair Winding Order" — [`BooleanOptions::repair_winding`].
+pub const REPAIR_WINDING: &str = "repair_winding";
+/// "Keep Subtracted Parts" — Subtract-only bookkeeping.
+pub const KEEP_SUBTRACTED: &str = "keep_subtracted";
+
+/// The kernel toggles as the geometry code wants them.
+fn options_of(props: &NodeProperties) -> BooleanOptions {
+    BooleanOptions {
+        keep_inside_out: props.bool_(KEEP_INSIDE_OUT, false),
+        repair_winding: props.bool_(REPAIR_WINDING, false),
+    }
 }
 
 /// The full property list: the shared (socket-free) `color` + `matrix`
@@ -152,6 +212,13 @@ pub fn operation_of(props: &NodeProperties) -> &'static str {
 /// `UpdateControls`, L397-408).
 pub fn selection_row_available(props: &NodeProperties) -> bool {
     matches!(operation_of(props), "Subtract" | "Subtract & Replace")
+}
+
+/// True when "Keep Subtracted Parts" means anything — plain Subtract only
+/// (`KeepSubtractObjectsAvailable`, consumed by `UpdateControls` L397-408).
+/// Subtract & Replace already keeps the removed volume, by definition.
+pub fn keep_subtracted_row_available(props: &NodeProperties) -> bool {
+    operation_of(props) == "Subtract"
 }
 
 impl NodeDef for BooleanNode {
@@ -214,6 +281,13 @@ impl NodeDef for BooleanNode {
             SUBTRACT_PARTS => {
                 selection_row_available(props) && self.default_row_visible(name, props)
             }
+            KEEP_SUBTRACTED => {
+                keep_subtracted_row_available(props) && self.default_row_visible(name, props)
+            }
+            // Keep Inside Out / Repair Winding are MatterCAD's
+            // `KernelOptionsAvailable` rows — true whenever the operands
+            // are meshes, which for this node is always (the operand
+            // sockets are typed Geometry3d; there is no path content).
             _ => self.default_row_visible(name, props),
         }
     }
@@ -224,13 +298,14 @@ impl NodeDef for BooleanNode {
             return Ok(NodeOutputs::default());
         }
         let operation = operation_of(ctx.properties);
+        let opts = options_of(ctx.properties);
 
         let geometry = match operation {
-            "Subtract" => subtract(ctx, &groups, false)?,
-            "Subtract & Replace" => subtract(ctx, &groups, true)?,
-            "Intersect" => single_result(ctx, &groups, OpType::Intersect)?,
+            "Subtract" => subtract(ctx, &groups, false, opts)?,
+            "Subtract & Replace" => subtract(ctx, &groups, true, opts)?,
+            "Intersect" => single_result(ctx, &groups, OpType::Intersect, opts)?,
             // Combine, and anything unrecognised (see `operation_of`).
-            _ => single_result(ctx, &groups, OpType::Add)?,
+            _ => combine(ctx, &groups, opts)?,
         };
 
         let mut out = NodeOutputs::default();
@@ -239,22 +314,60 @@ impl NodeDef for BooleanNode {
     }
 }
 
-/// Combine / Intersect: fold one operation over every operand and emit the
-/// single resulting body.
+/// Intersect: fold one operation over every operand and emit the single
+/// resulting body.
 fn single_result(
     ctx: &EvalCtx,
     groups: &[InputGroup],
     op: OpType,
+    opts: BooleanOptions,
 ) -> Result<Geometry3d, NodeError> {
     let refs: Vec<&InputGroup> = groups.iter().collect();
-    let solids = import_groups(&refs)?;
-    let result = match fold(solids, op) {
+    let solids = import_groups(&refs, opts)?;
+    let result = match fold(solids, op, opts) {
         Some(r) => r,
         None => return Ok(Geometry3d::empty()),
     };
-    Ok(match finish_non_empty(&result)? {
+    one_body(ctx, &result, BodyRole::Solid)
+}
+
+/// Combine: union the solids, union the holes, subtract the hole union
+/// from the solid union (`BooleanMeshBuilder.CombineMeshes`, L104-192).
+///
+/// With no holes wired in this is exactly the plain n-ary union. With
+/// *only* holes it is the hole union, still marked as a hole — see the
+/// module docs.
+fn combine(
+    ctx: &EvalCtx,
+    groups: &[InputGroup],
+    opts: BooleanOptions,
+) -> Result<Geometry3d, NodeError> {
+    let (solid_groups, hole_groups) = split_roles(groups);
+    let solid_refs: Vec<&InputGroup> = solid_groups.iter().collect();
+    let hole_refs: Vec<&InputGroup> = hole_groups.iter().collect();
+
+    let solids = fold(import_groups(&solid_refs, opts)?, OpType::Add, opts);
+    let holes = fold(import_groups(&hole_refs, opts)?, OpType::Add, opts);
+
+    match (solids, holes) {
+        (None, None) => Ok(Geometry3d::empty()),
+        (Some(s), None) => one_body(ctx, &s, BodyRole::Solid),
+        // Nothing to cut: the holes are the whole answer, and they stay
+        // holes so a downstream Combine can still use them.
+        (None, Some(h)) => one_body(ctx, &h, BodyRole::Hole),
+        (Some(s), Some(h)) => {
+            let cut = boolean_op(&s, &h, OpType::Subtract, opts);
+            one_body(ctx, &cut, BodyRole::Solid)
+        }
+    }
+}
+
+/// Finish one boolean result into a single-body group with `role`, or the
+/// empty group when the result bounds no volume.
+fn one_body(ctx: &EvalCtx, result: &Manifold, role: BodyRole) -> Result<Geometry3d, NodeError> {
+    Ok(match finish_non_empty(result)? {
         Some(mesh) => match result_body(ctx, mesh) {
-            Some(b) => Geometry3d::from_body(b),
+            Some(b) => Geometry3d::from_body(b.with_role(role)),
             None => Geometry3d::empty(),
         },
         None => Geometry3d::empty(),
@@ -267,7 +380,12 @@ fn single_result(
 /// turn, so the keeps stay separate bodies — MatterCAD's `DoSubtract`
 /// (L166-302) does exactly this, and it is also the cheap order: one union
 /// plus one subtract per keep instead of keeps × removers subtracts.
-fn subtract(ctx: &EvalCtx, groups: &[InputGroup], replace: bool) -> Result<Geometry3d, NodeError> {
+fn subtract(
+    ctx: &EvalCtx,
+    groups: &[InputGroup],
+    replace: bool,
+    opts: BooleanOptions,
+) -> Result<Geometry3d, NodeError> {
     // Resolved against every operand *slot*, not just the ones that
     // evaluated to something this frame: an input that is momentarily
     // empty must not hand its role to a neighbour (the default remover is
@@ -284,7 +402,7 @@ fn subtract(ctx: &EvalCtx, groups: &[InputGroup], replace: bool) -> Result<Geome
         // that named only parts which are gone. The parts pass through
         // untouched rather than vanishing (`GetSubtractItems` returns the
         // source itself for a single child).
-        return Ok(pass_through(groups));
+        return Ok(pass_through(ctx, groups));
     }
     if sockets.iter().all(|u| remover_sockets.contains(u)) {
         // Every operand is a remover: there is nothing left to cut *from*.
@@ -300,7 +418,7 @@ fn subtract(ctx: &EvalCtx, groups: &[InputGroup], replace: bool) -> Result<Geome
         // upstream node produced nothing). Cutting with nothing removes
         // nothing, so the keeps — which are all `groups` holds at this
         // point — pass through unchanged.
-        return Ok(pass_through(groups));
+        return Ok(pass_through(ctx, groups));
     }
     if keeps.is_empty() {
         // The keeps are all evaluating empty: there is genuinely nothing
@@ -308,28 +426,47 @@ fn subtract(ctx: &EvalCtx, groups: &[InputGroup], replace: bool) -> Result<Geome
         return Ok(Geometry3d::empty());
     }
 
-    let remover_union = match fold(import_groups(&removers)?, OpType::Add) {
+    let remover_union = match fold(import_groups(&removers, opts)?, OpType::Add, opts) {
         Some(u) => u,
-        None => return Ok(pass_through(groups)),
+        None => return Ok(pass_through(ctx, groups)),
     };
 
     let mut bodies: Vec<Body> = Vec::new();
     for keep in keeps {
-        for solid in import_group(keep)? {
-            let cut = solid.boolean(&remover_union, OpType::Subtract);
+        // Each imported solid is `keep.bodies[i]`, so its role is to hand
+        // on: cutting a hole leaves a hole. MatterCAD carries a child's
+        // `OutputType` across a subtract the same way, and without it a
+        // `Mark Hole → Subtract → Combine` chain quietly stops cutting.
+        // Intersect and Combine deliberately do *not* do this — their
+        // result is one body made of several operands, with no single role
+        // to inherit, and MatterCAD's Combine likewise emits material.
+        for (i, solid) in import_group(keep, opts)?.into_iter().enumerate() {
+            let role = keep.bodies[i].role;
+            let cut = boolean_op(&solid, &remover_union, OpType::Subtract, opts);
             if let Some(mesh) = finish_non_empty(&cut)? {
-                bodies.extend(result_body(ctx, mesh));
+                bodies.extend(result_body(ctx, mesh).map(|b| b.with_role(role)));
             }
             if replace {
                 // The volume the subtraction removed, kept beside its keep
                 // as its own body. B-6 gives it its own colour (MatterCAD
                 // tints a retained remover red).
-                let removed = solid.boolean(&remover_union, OpType::Intersect);
+                let removed = boolean_op(&solid, &remover_union, OpType::Intersect, opts);
                 if let Some(mesh) = finish_non_empty(&removed)? {
-                    bodies.extend(result_body(ctx, mesh));
+                    bodies.extend(result_body(ctx, mesh).map(|b| b.with_role(role)));
                 }
             }
         }
+    }
+    // "Keep Subtracted Parts" (plain Subtract only — Subtract & Replace
+    // already emits the removed volume). MatterCAD re-adds the remover
+    // *meshes* as children of the boolean, with their world properties
+    // copied (`BooleanMeshBuilder.SubtractMeshes`, L269-285) — which is
+    // what puts them in the boolean's frame rather than their own. Ours
+    // does the same through `compose_with_upstream`: the remover keeps its
+    // own mesh, colour and role, untouched by the subtraction that used
+    // it, but moves with this node like every other body it emits.
+    if !replace && ctx.properties.bool_(KEEP_SUBTRACTED, false) {
+        bodies.extend(composed_bodies(ctx, &removers));
     }
     Ok(Geometry3d::from_bodies(bodies))
 }
@@ -356,3 +493,7 @@ mod tests;
 #[cfg(test)]
 #[path = "boolean_nary_tests.rs"]
 mod nary_tests;
+
+#[cfg(test)]
+#[path = "boolean_options_tests.rs"]
+mod options_tests;

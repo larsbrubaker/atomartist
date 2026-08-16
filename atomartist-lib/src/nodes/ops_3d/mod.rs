@@ -10,6 +10,7 @@ pub mod combine_node;
 pub mod dynamic_inputs;
 pub mod extrude_node;
 pub mod fit_to_bounds_node;
+pub mod mark_hole_node;
 pub mod transform_node;
 
 use crate::registry::NodeRegistry;
@@ -21,4 +22,5 @@ pub fn register_all(reg: &mut NodeRegistry) {
     boolean_node::register(reg);
     align_node::register(reg);
     fit_to_bounds_node::register(reg);
+    mark_hole_node::register(reg);
 }

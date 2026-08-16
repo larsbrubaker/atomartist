@@ -52,6 +52,31 @@ pub fn is_inherit_color(color: &[f32; 4]) -> bool {
     color[3] <= 0.0
 }
 
+/// What a body *means* to an operation that consumes it — MatterCAD's
+/// per-object `OutputType` (`PrintOutputTypes`), narrowed to the two
+/// values a boolean cares about.
+///
+/// A [`BodyRole::Hole`] body is negative space: the Boolean node's
+/// **Combine** operation unions the holes separately and subtracts that
+/// union from the union of the solids (`BooleanMeshBuilder.CombineMeshes`,
+/// L104-192). Nothing else in the pipeline reads the role today — the
+/// renderer paints a hole body like any other, and the other three
+/// boolean operations treat holes as ordinary participants, exactly as
+/// MatterCAD does.
+///
+/// The role is **runtime state**, not saved geometry: it is set by the
+/// Mark Hole node on each evaluation and travels down the wire with the
+/// body. What persists in an `.atmr` file is that node and its property,
+/// not the role stamped on a mesh.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BodyRole {
+    /// Positive material. Every producer's default.
+    #[default]
+    Solid,
+    /// Negative space — subtracted from the solids by Boolean's Combine.
+    Hole,
+}
+
 /// One renderable body: a mesh plus its per-body transform + tint and
 /// an optional per-vertex colour attribute.
 ///
@@ -107,6 +132,10 @@ pub struct Body {
     /// `None` is the "no claim" sentinel — clicking such a body
     /// selects nothing rather than guessing.
     pub origin: Option<NodeId>,
+    /// Solid material or negative space — see [`BodyRole`]. Producers
+    /// leave this at [`BodyRole::Solid`]; the Mark Hole node sets it,
+    /// and pass-through ops preserve whatever upstream carried.
+    pub role: BodyRole,
 }
 
 impl Body {
@@ -119,6 +148,7 @@ impl Body {
             color: DEFAULT_GEOMETRY_COLOR,
             vertex_colors: None,
             origin: None,
+            role: BodyRole::Solid,
         }
     }
 
@@ -149,6 +179,17 @@ impl Body {
     pub fn with_origin(mut self, origin: NodeId) -> Self {
         self.origin = Some(origin);
         self
+    }
+
+    /// Builder-style override of the solid/hole role.
+    pub fn with_role(mut self, role: BodyRole) -> Self {
+        self.role = role;
+        self
+    }
+
+    /// True when this body is negative space rather than material.
+    pub fn is_hole(&self) -> bool {
+        self.role == BodyRole::Hole
     }
 
     /// True when this body should render through the per-vertex

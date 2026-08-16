@@ -104,6 +104,9 @@ pub fn compose_with_upstream(ctx: &EvalCtx, upstream: &Body) -> Body {
         color: composed_color,
         vertex_colors: upstream.vertex_colors.clone(),
         origin: Some(ctx.instance.id),
+        // Solid/hole is a property of the part, not of the op acting on
+        // it: a hole that is moved or aligned is still a hole.
+        role: upstream.role,
     }
 }
 
@@ -128,6 +131,7 @@ pub fn compose_with_upstream_and_mesh(ctx: &EvalCtx, upstream: &Body, new_mesh: 
         color: composed_color,
         vertex_colors: None,
         origin: Some(ctx.instance.id),
+        role: upstream.role,
     }
 }
 
@@ -153,5 +157,8 @@ pub fn wrap_mesh(ctx: &EvalCtx, mesh: MeshGL) -> Geometry3d {
         color,
         vertex_colors: None,
         origin: Some(ctx.instance.id),
+        // A producer makes material; Mark Hole is the only thing that
+        // turns a body into negative space.
+        role: crate::geometry::BodyRole::Solid,
     })
 }

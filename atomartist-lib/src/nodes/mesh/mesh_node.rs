@@ -112,6 +112,7 @@ impl NodeDef for MeshNode {
                 color,
                 vertex_colors: None,
                 origin: Some(ctx.instance.id),
+                role: crate::geometry::BodyRole::Solid,
             });
             out.set("out", PortValue::Geometry3d(Arc::new(geom)));
         }

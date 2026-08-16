@@ -69,6 +69,17 @@ pub(super) fn run_boolean_inputs(
     operation: PortValue,
     removers: Option<&[&str]>,
 ) -> Result<Geometry3d, NodeError> {
+    run_boolean_with_props(operands, operation, removers, &[])
+}
+
+/// [`run_boolean_inputs`] with extra property values written on top — the
+/// B-4 toggles, which are plain `Bool` properties.
+pub(super) fn run_boolean_with_props(
+    operands: &[(&str, Geometry3d)],
+    operation: PortValue,
+    removers: Option<&[&str]>,
+    extra: &[(&str, PortValue)],
+) -> Result<Geometry3d, NodeError> {
     let n = BooleanNode;
     let mut alloc = SocketUidAlloc::new();
     let tpl = n.instantiate(&mut alloc);
@@ -106,6 +117,10 @@ pub(super) fn run_boolean_inputs(
                 crate::nodes::ops_3d::boolean_selection::encode(&uids),
             )),
         );
+    }
+
+    for (name, value) in extra {
+        props.insert(*name, value.clone());
     }
 
     let ctx = EvalCtx { instance: &inst, properties: &props, inputs: &inputs };
