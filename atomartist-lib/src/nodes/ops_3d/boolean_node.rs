@@ -61,6 +61,15 @@
 //! The other three operations treat a hole as an ordinary participant,
 //! also as MatterCAD does.
 //!
+//! ## Colours (plan step B-6)
+//!
+//! Each operand is imported as an *original* so the result's run data says
+//! which operand every output triangle came from, and the result is
+//! painted accordingly: a Combine shows each part's own colour, a Subtract
+//! leaves the remover's colour on the faces it cut, and Subtract &
+//! Replace's replacement wears the "removed material" red. The node's own
+//! `Color` overrides all of it. See [`super::boolean_colors`].
+//!
 //! ## Toggles (plan step B-4)
 //!
 //! `keep_inside_out` and `repair_winding` resolve into
@@ -71,21 +80,21 @@
 
 use std::sync::Arc;
 
-use manifold_rust::manifold::Manifold;
 use manifold_rust::types::OpType;
 
+use super::boolean_colors::{node_color_override, operand_color, Palette, REPLACED_TINT};
 use super::boolean_degrade::{self, OperandReport};
 use super::boolean_ops::{
-    boolean_op, composed_bodies, finish_non_empty, fold, gather_inputs, import_group, import_groups,
-    operand_sockets, pass_through, result_body, BooleanOptions, InputGroup,
+    boolean_op, composed_bodies, fold, gather_inputs, import_group, import_groups, operand_sockets,
+    painted_result_body, pass_through, tinted_result_body, BooleanOptions, InputGroup,
 };
 use super::boolean_selection::{self, SUBTRACT_PARTS};
 use super::dynamic_inputs;
-use crate::geometry::{Body, BodyRole, Geometry3d};
+use crate::geometry::{Body, BodyRole, Geometry3d, DEFAULT_GEOMETRY_COLOR, INHERIT_COLOR};
 use crate::graph::node::PortValue;
 use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    enum_variant_for_index, geometry_props, ConnectCtx, DisconnectCtx, EditorKind, EvalCtx,
+    enum_variant_for_index, op_props, ConnectCtx, DisconnectCtx, EditorKind, EvalCtx,
     InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeProperties, NodeRegistry, ParamSet,
     PropDef, VisibleWhen,
 };
@@ -105,7 +114,7 @@ pub struct BooleanNode;
 pub const OPERATIONS: [&str; 4] = ["Combine", "Subtract", "Intersect", "Subtract & Replace"];
 
 /// The Boolean node's own params — the shared `color` / `matrix` pair is
-/// added by [`properties`] from [`geometry_props`], which strips the socket
+/// added by [`properties`] from [`op_props`], which strips the socket
 /// binding.
 ///
 /// Nothing here mints an input socket, and neither does the node: its input
@@ -179,8 +188,14 @@ fn options_of(props: &NodeProperties) -> BooleanOptions {
 
 /// The full property list: the shared (socket-free) `color` + `matrix`
 /// rows first, then this node's own params.
+///
+/// The **op** pair, not the producer one: Boolean's `Color` defaults to
+/// the inherit sentinel, which is what lets the operands' own colours
+/// reach the result (B-6, [`super::boolean_colors`]) and what the rescue
+/// path has always resolved against (`compose_with_upstream_and_mesh`).
+/// Picking a colour on the node still overrides every part of the result.
 fn properties() -> Vec<PropDef> {
-    let mut props = geometry_props();
+    let mut props = op_props();
     props.extend(own_params().prop_defs());
     props
 }
@@ -249,6 +264,7 @@ impl NodeDef for BooleanNode {
         // empty slot, and every slot it does have is occupied — without
         // this the node could never take a third operand.
         dynamic_inputs::ensure_trailing_empty_input(graph, node);
+        normalize_pre_b6_color(graph, node);
     }
 
     fn on_input_disconnected(&self, ctx: &mut DisconnectCtx) {
@@ -335,12 +351,44 @@ fn single_result(
     opts: BooleanOptions,
 ) -> Result<Geometry3d, NodeError> {
     let refs: Vec<&InputGroup> = groups.iter().collect();
-    let solids = import_groups(&refs, opts)?;
+    let mut palette = new_palette(ctx);
+    // An intersection is one body made of every operand, with no single
+    // part to call its own — the first one the user wired stands in
+    // wherever the run data cannot answer (B-6).
+    let base = first_operand_color(groups);
+    let solids = import_groups(&refs, opts, &mut palette)?;
     let result = match fold(solids, op, opts) {
         Some(r) => r,
         None => return Ok(Geometry3d::empty()),
     };
-    one_body(ctx, &result, BodyRole::Solid)
+    Ok(match painted_result_body(ctx, &result, &palette, base, BodyRole::Solid)? {
+        Some(body) => Geometry3d::from_body(body),
+        None => Geometry3d::empty(),
+    })
+}
+
+/// The colour that stands in for a result with no single source part —
+/// the first operand the user wired. See
+/// [`painted_body`](super::boolean_colors::painted_body) for why a body
+/// needs one even when it carries a per-vertex overlay.
+fn first_operand_color(groups: &[InputGroup]) -> [f32; 4] {
+    groups
+        .first()
+        .and_then(|g| g.bodies.first())
+        .map(operand_color)
+        .unwrap_or(DEFAULT_GEOMETRY_COLOR)
+}
+
+/// The colour bookkeeping this evaluation should do: none at all when the
+/// node's own `Color` already decides every body's colour (B-6 —
+/// re-tagging each operand as an original is not free, and the run data
+/// would only be discarded).
+fn new_palette(ctx: &EvalCtx) -> Palette {
+    if node_color_override(ctx).is_some() {
+        Palette::disabled()
+    } else {
+        Palette::new()
+    }
 }
 
 /// Combine: union the solids, union the holes, subtract the hole union
@@ -358,18 +406,6 @@ fn combine(
     opts: BooleanOptions,
 ) -> Result<(Geometry3d, OperandReport), NodeError> {
     boolean_degrade::combine_degrading(ctx, groups, opts)
-}
-
-/// Finish one boolean result into a single-body group with `role`, or the
-/// empty group when the result bounds no volume.
-fn one_body(ctx: &EvalCtx, result: &Manifold, role: BodyRole) -> Result<Geometry3d, NodeError> {
-    Ok(match finish_non_empty(result)? {
-        Some(mesh) => match result_body(ctx, mesh) {
-            Some(b) => Geometry3d::from_body(b.with_role(role)),
-            None => Geometry3d::empty(),
-        },
-        None => Geometry3d::empty(),
-    })
 }
 
 /// Subtract / Subtract & Replace.
@@ -424,7 +460,17 @@ fn subtract(
         return Ok(Geometry3d::empty());
     }
 
-    let remover_union = match fold(import_groups(&removers, opts)?, OpType::Add, opts) {
+    // One palette for the whole operation: the removers are tagged here
+    // and the keeps below, so the cut faces the removers leave behind come
+    // out wearing the remover's colour — MatterCAD paints a result face
+    // from whichever operand it came from, and a cut face came from the
+    // cutter (`ExtractFaceColorsFromRuns`, L870-927).
+    let mut palette = new_palette(ctx);
+    let remover_union = match fold(
+        import_groups(&removers, opts, &mut palette)?,
+        OpType::Add,
+        opts,
+    ) {
         Some(u) => u,
         None => return Ok(pass_through(ctx, groups)),
     };
@@ -438,20 +484,24 @@ fn subtract(
         // Intersect and Combine deliberately do *not* do this — their
         // result is one body made of several operands, with no single role
         // to inherit, and MatterCAD's Combine likewise emits material.
-        for (i, solid) in import_group(keep, opts)?.into_iter().enumerate() {
+        for (i, solid) in import_group(keep, opts, &mut palette)?.into_iter().enumerate() {
             let role = keep.bodies[i].role;
+            // The keep's own colour is what this body is: it stands in
+            // on the surfaces the run data cannot claim, and it is the
+            // colour every consumer that drops the per-vertex overlay
+            // sees. The remover's colour reaches the cut faces through
+            // the run data alone — it must never become the body's.
+            let base = operand_color(&keep.bodies[i]);
             let cut = boolean_op(&solid, &remover_union, OpType::Subtract, opts);
-            if let Some(mesh) = finish_non_empty(&cut)? {
-                bodies.extend(result_body(ctx, mesh).map(|b| b.with_role(role)));
-            }
+            bodies.extend(painted_result_body(ctx, &cut, &palette, base, role)?);
             if replace {
                 // The volume the subtraction removed, kept beside its keep
-                // as its own body. B-6 gives it its own colour (MatterCAD
-                // tints a retained remover red).
+                // as its own body — and tinted red, the "removed material"
+                // colour of the operation's own icon, so the replacement
+                // reads as what it is rather than as another keep
+                // (MatterCAD's retained remover, plan §3.5).
                 let removed = boolean_op(&solid, &remover_union, OpType::Intersect, opts);
-                if let Some(mesh) = finish_non_empty(&removed)? {
-                    bodies.extend(result_body(ctx, mesh).map(|b| b.with_role(role)));
-                }
+                bodies.extend(tinted_result_body(ctx, &removed, REPLACED_TINT, role)?);
             }
         }
     }
@@ -467,6 +517,32 @@ fn subtract(
         bodies.extend(composed_bodies(ctx, &removers));
     }
     Ok(Geometry3d::from_bodies(bodies))
+}
+
+/// Turn a **pre-B-6** stored `color` back into "no colour chosen".
+///
+/// Every node is seeded with its schema's defaults at creation
+/// (`Graph::add_new_node`) and those defaults are saved, so a Boolean
+/// written before B-6 carries an explicit [`DEFAULT_GEOMETRY_COLOR`] —
+/// the producer default this node used to declare. Read literally that is
+/// an override, and B-6 would be silently inert on every existing file:
+/// the operands' colours would never show, with nothing on screen to say
+/// why. Mapping exactly that value back to the inherit sentinel costs one
+/// comparison per load and puts old and new files on the same footing.
+///
+/// The cost is a user who deliberately picked the default grey: their
+/// choice becomes "inherit". That is the right trade — the two render
+/// identically unless the operands disagree, and when they do, showing
+/// the parts' own colours is what the user is now asking for by opening a
+/// B-6 build.
+fn normalize_pre_b6_color(graph: &mut crate::graph::graph::Graph, node: crate::graph::node::NodeId) {
+    let is_default = matches!(
+        graph.get(node).and_then(|n| n.properties.get("color")),
+        Some(PortValue::Color(c)) if *c == DEFAULT_GEOMETRY_COLOR
+    );
+    if is_default {
+        let _ = graph.set_property(node, "color", PortValue::Color(INHERIT_COLOR));
+    }
 }
 
 /// A [`NodeProperties`] view of a live instance's property map, so the
@@ -502,3 +578,9 @@ mod options_tests;
 #[cfg(test)]
 #[path = "boolean_degrade_tests.rs"]
 mod degrade_tests;
+
+// Likewise the colour tests (B-6): the run-data mapping is only observable
+// through a whole evaluation, and the fixtures for that live here.
+#[cfg(test)]
+#[path = "boolean_colors_tests.rs"]
+mod colors_tests;

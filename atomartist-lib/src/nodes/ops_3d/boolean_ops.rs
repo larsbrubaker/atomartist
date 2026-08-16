@@ -55,11 +55,12 @@ use std::sync::Arc;
 use manifold_rust::manifold::Manifold;
 use manifold_rust::types::{BooleanEngine, Error, MeshGL, OpType, WindingRule};
 
+use super::boolean_colors::{painted_body, tag_original, Palette};
 use super::boolean_import::{import_operand, refusal_message};
 use crate::geometry::mesh3d::{
     apply_transform, compute_flat_normals, split_for_flat_normals, NUM_PROP,
 };
-use crate::geometry::{num_tris, num_verts, Body, Geometry3d};
+use crate::geometry::{num_tris, num_verts, Body, BodyRole, Geometry3d};
 use crate::graph::node::PortValue;
 use crate::graph::socket::SocketUid;
 use crate::registry::{compose_with_upstream, wrap_mesh, EvalCtx, NodeError};
@@ -104,6 +105,30 @@ impl BooleanOptions {
 /// Every boolean in this module goes through here: the engine stays
 /// `Auto` (see [`BooleanOptions::keep_inside_out`]) and the rule is the
 /// node's, so no call site can forget the toggle.
+///
+/// ## Cancel and progress (B-6): deliberately not wired
+///
+/// manifold-rust also offers `boolean_with_engine_rule_and_progress`,
+/// taking a cancel token and a progress reporter. Neither has anything to
+/// connect to here yet, and both would cost something to fake:
+///
+///   * **Cancel.** Evaluation runs on `AppState`'s `EvalTask`, which has
+///     no supersede signal to derive a token from. Its `ticket` /
+///     `published` pair guards the *publication* of a stale result, not
+///     its computation, and the task holds the graph mutex for the whole
+///     pass — so a newer evaluation cannot even start until the older one
+///     has finished. Cancellation is therefore a change to the evaluator
+///     (a shared "newest ticket" the node can watch, a cancelled outcome
+///     the executor must distinguish from a failure so nothing is badged
+///     or blocked, and a token on `EvalCtx` to carry it), not to this
+///     module. Left to that step.
+///   * **Progress.** Nothing consumes evaluation progress — the status
+///     bar's notices are storage operations. MatterCAD's `ScaledReporter`
+///     (`Object3DBooleanOperations.cs:93-101`) is explicit that a
+///     non-null reporter turns the batch boolean into a pairwise fold, so
+///     passing one nobody listens to is pure cost. We already fold
+///     pairwise, so the cost is smaller — but it is still a cost with no
+///     benefit.
 pub fn boolean_op(a: &Manifold, b: &Manifold, op: OpType, opts: BooleanOptions) -> Manifold {
     a.boolean_with_engine_and_rule(b, op, BooleanEngine::Auto, opts.winding_rule())
 }
@@ -217,12 +242,22 @@ pub fn gather_inputs(ctx: &EvalCtx) -> Result<Vec<InputGroup>, NodeError> {
 /// rewound before it is handed back — MatterCAD repairs the operand right
 /// after import too, so every consumer of the handle sees the repaired
 /// geometry and no boolean can run against a half-repaired operand list.
-pub fn import_group(group: &InputGroup, opts: BooleanOptions) -> Result<Vec<Manifold>, NodeError> {
+///
+/// Each handle is then re-tagged as an original ([`tag_original`]) so the
+/// result's run data can say which operand a triangle came from, and
+/// `palette` learns that operand's colour (B-6). Repair first, tag last:
+/// the tag has to be on the handle the boolean actually sees.
+pub fn import_group(
+    group: &InputGroup,
+    opts: BooleanOptions,
+    palette: &mut Palette,
+) -> Result<Vec<Manifold>, NodeError> {
     let mut solids = Vec::with_capacity(group.bodies.len());
     for operand in baked_operands(group) {
         let solid = import_operand(&operand.mesh)
             .map_err(|f| NodeError::msg(refusal_message(&operand.label, f)))?;
-        solids.push(apply_repair(solid, opts));
+        let color = super::boolean_colors::operand_color(&operand.source);
+        solids.push(tag_original(apply_repair(solid, opts), color, palette));
     }
     Ok(solids)
 }
@@ -293,10 +328,11 @@ pub fn apply_repair(solid: Manifold, opts: BooleanOptions) -> Manifold {
 pub fn import_groups(
     groups: &[&InputGroup],
     opts: BooleanOptions,
+    palette: &mut Palette,
 ) -> Result<Vec<Manifold>, NodeError> {
     let mut all = Vec::new();
     for g in groups {
-        all.extend(import_group(g, opts)?);
+        all.extend(import_group(g, opts, palette)?);
     }
     Ok(all)
 }
@@ -365,6 +401,62 @@ pub fn finish_non_empty(result: &Manifold) -> Result<Option<MeshGL>, NodeError> 
 /// the Boolean node's own transform and nothing else.
 pub fn result_body(ctx: &EvalCtx, mesh: MeshGL) -> Option<Body> {
     wrap_mesh(ctx, mesh).bodies.into_iter().next()
+}
+
+/// Finish one boolean result into an output body, painted from the run
+/// data (B-6) — the one path every operation's result goes through.
+///
+/// `None` when the result bounds no volume: an empty body is still a
+/// *body*, and part counts, exports and the viewport's per-body iteration
+/// would all see a phantom part with no triangles.
+///
+/// The mesh is exported **once**, before it is made render-ready: run data
+/// is the kernel's, and [`finish_mesh`]'s vertex split drops it (it is
+/// meaningless once every triangle owns its corners). The per-triangle
+/// colours are read off the raw export and re-attached to the split mesh,
+/// whose triangle order is the same.
+/// `base` is the colour of the part this body *is* — the keep a Subtract
+/// cut, the first operand of a union set. It stands in wherever the run
+/// data cannot answer (an operand that could not be tagged) and, more
+/// importantly, it is the body's own `Body::color` for every consumer
+/// that cannot read the per-vertex overlay. See [`painted_body`].
+pub fn painted_result_body(
+    ctx: &EvalCtx,
+    result: &Manifold,
+    palette: &Palette,
+    base: [f32; 4],
+    role: BodyRole,
+) -> Result<Option<Body>, NodeError> {
+    if result.status() != Error::NoError {
+        return Err(NodeError::msg(format!(
+            "Boolean: the operation failed ({})",
+            result.status().to_str()
+        )));
+    }
+    let raw = result.get_mesh_gl(-1);
+    let paint = palette.paint_for(&raw, base);
+    let mesh = finish_mesh(raw);
+    if mesh.tri_verts.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(painted_body(ctx, mesh, paint, None, base, role)))
+}
+
+/// [`painted_result_body`] with a colour the operation itself assigns —
+/// Subtract & Replace's red for the volume it kept in place of the one it
+/// cut away. The tint beats the run colours and loses to the node's own
+/// `Color`; see [`painted_body`].
+pub fn tinted_result_body(
+    ctx: &EvalCtx,
+    result: &Manifold,
+    tint: [f32; 4],
+    role: BodyRole,
+) -> Result<Option<Body>, NodeError> {
+    let mesh = match finish_non_empty(result)? {
+        Some(m) => m,
+        None => return Ok(None),
+    };
+    Ok(Some(painted_body(ctx, mesh, None, Some(tint), tint, role)))
 }
 
 /// The bodies of every group, handed back as they arrived — same meshes,

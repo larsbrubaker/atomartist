@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use manifold_rust::types::MeshGL;
 
+use super::super::boolean_colors::Palette;
 use super::super::boolean_degrade::{
     classify_repaired, union_degrading, union_degrading_with, DegradedBody, RepairedOperandUse,
 };
@@ -349,10 +350,11 @@ fn a_repaired_operand_rejoins_the_union() {
     let refused = union_degrading(
         vec![operand("wide seam", wide_seam_box())],
         BooleanOptions::default(),
+        Palette::new(),
     );
     assert_eq!(refused.bodies.len(), 1);
     assert!(
-        matches!(refused.bodies[0], DegradedBody::Solid(_)),
+        matches!(refused.bodies[0], DegradedBody::Solid { .. }),
         "the repaired part is a kernel solid, not a rescue"
     );
     assert!(refused.report.skipped.is_empty(), "nothing was left out");
@@ -382,6 +384,7 @@ fn a_self_intersecting_repair_is_kept_beside_the_union() {
     let degraded = union_degrading_with(
         vec![operand("good", good), operand("crossed", open_box())],
         BooleanOptions::default(),
+        Palette::new(),
         &repair,
     );
     assert_eq!(
@@ -395,7 +398,7 @@ fn a_self_intersecting_repair_is_kept_beside_the_union() {
         degraded
             .bodies
             .iter()
-            .all(|b| matches!(b, DegradedBody::Solid(_))),
+            .all(|b| matches!(b, DegradedBody::Solid { .. })),
         "both bodies came from the kernel"
     );
 }
@@ -429,6 +432,7 @@ fn a_failed_repair_rescues_the_original_geometry() {
     let degraded = union_degrading_with(
         vec![operand("broken", original.clone())],
         BooleanOptions::default(),
+        Palette::new(),
         &|_| None,
     );
     let skipped: Vec<&str> = degraded

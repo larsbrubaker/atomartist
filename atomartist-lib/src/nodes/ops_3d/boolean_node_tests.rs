@@ -347,11 +347,19 @@ fn union_result_has_per_triangle_flat_normals() {
     );
 }
 
-/// A closed-but-non-manifold operand (four faces on one edge) must keep both
-/// of its bodies. This one the old strict import happened to survive — the
-/// welded edge is still index-pairable — so it is a guard on the soup path
-/// rather than a reproducer; the reproducers are the seam-split and
-/// not-closed cases below.
+/// An edge-sharing operand (four faces on one edge) must keep both of its
+/// bodies.
+///
+/// **Not** a soup-path test, despite the shape: an edge with four
+/// halfedges still pairs 2-and-2, so this operand imports as an ordinary
+/// manifold and never reaches
+/// [`Manifold::from_mesh_gl_robust`](manifold_rust::manifold::Manifold::from_mesh_gl_robust)'s
+/// soup branch — measured while writing B-6, which needed a real soup
+/// handle and could not get one through this funnel (`MeshGL::merge` heals
+/// the disconnected case, and shared-face and doubled-shell inputs pair
+/// too). It is a guard on the *closed-non-manifold import*: the shape a
+/// naive weld turns into garbage. A genuine soup fixture, built straight
+/// against the kernel, lives in `boolean_colors_tests::soup_cube`.
 #[test]
 fn union_with_closed_non_manifold_operand_keeps_the_geometry() {
     let operands = (two_boxes_sharing_an_edge(), generate_box(1.0, 1.0, 1.0));

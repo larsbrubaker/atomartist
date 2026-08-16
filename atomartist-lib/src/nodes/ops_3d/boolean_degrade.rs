@@ -58,12 +58,13 @@
 use manifold_rust::manifold::Manifold;
 use manifold_rust::types::{MeshGL, OpType};
 
+use super::boolean_colors::{operand_color, tag_original, Palette};
 use super::boolean_import::{import_operand, refusal_message, repair_weld};
 use super::boolean_ops::{
-    apply_repair, baked_operands_of, boolean_op, finish_mesh, finish_non_empty, result_body,
-    split_roles, BooleanOptions, InputGroup, Operand,
+    apply_repair, baked_operands_of, boolean_op, finish_mesh, painted_result_body, split_roles,
+    BooleanOptions, InputGroup, Operand,
 };
-use crate::geometry::{Body, BodyRole, Geometry3d};
+use crate::geometry::{Body, BodyRole, Geometry3d, DEFAULT_GEOMETRY_COLOR};
 use crate::registry::{compose_with_upstream_and_mesh, EvalCtx, NodeError};
 
 /// How many operands a message names before it starts counting them
@@ -77,7 +78,14 @@ pub enum DegradedBody {
     /// A kernel result — a set's union, or a repaired operand that had to
     /// be kept beside one. Still needs
     /// [`finish`](super::boolean_ops::finish).
-    Solid(Manifold),
+    Solid {
+        solid: Manifold,
+        /// The colour this body wears where the run data cannot answer,
+        /// and the `Body::color` every consumer that ignores the
+        /// per-vertex overlay sees: the first part of the set that made
+        /// it (B-6, [`super::boolean_colors::painted_body`]).
+        base: [f32; 4],
+    },
     /// Geometry the kernel refused, handed back exactly as the user
     /// modelled it (world space, un-unioned, uncut). MatterCAD's
     /// `CopyRescuedOperand`: "the part could not take part in the boolean,
@@ -242,6 +250,11 @@ impl OperandReport {
 pub struct Degraded {
     pub bodies: Vec<DegradedBody>,
     pub report: OperandReport,
+    /// Which operand painted which run of the union's result (B-6). Built
+    /// here rather than passed in because it is a *product* of the union:
+    /// only this module knows which operands the kernel actually took, and
+    /// only a taken operand has an id in the result's run data.
+    pub palette: Palette,
 }
 
 /// `'a', 'b', 'c' and 2 more` — MatterCAD's `OperandNames` (L643).
@@ -289,29 +302,37 @@ pub fn combine_degrading(
     opts: BooleanOptions,
 ) -> Result<(Geometry3d, OperandReport), NodeError> {
     let (solid_groups, hole_groups) = split_roles(groups);
+    // One palette per union, folded back together below: the solids and
+    // the holes are two unions over one set of the user's parts, and the
+    // hole union's operands can still paint the result (a hole cuts a
+    // solid; the faces it leaves behind are its own).
     let solids = union_degrading(
         baked_operands_of(&solid_groups.iter().collect::<Vec<_>>()),
         opts,
+        new_palette(ctx),
     );
     let holes = union_degrading(
         baked_operands_of(&hole_groups.iter().collect::<Vec<_>>()),
         opts,
+        new_palette(ctx),
     );
 
     let mut report = solids.report;
     report.absorb(holes.report);
+    let mut palette = solids.palette;
+    palette.absorb(holes.palette);
 
     if solids.bodies.is_empty() {
         // Nothing to cut: the holes are the whole answer, and they stay
         // holes so a downstream Combine can still use them.
-        let bodies = emit_bodies(ctx, holes.bodies, &[], BodyRole::Hole, opts)?;
+        let bodies = emit_bodies(ctx, holes.bodies, &[], BodyRole::Hole, opts, &palette)?;
         return Ok((Geometry3d::from_bodies(bodies), report));
     }
 
     let mut cutters: Vec<Manifold> = Vec::new();
     for body in holes.bodies {
         match body {
-            DegradedBody::Solid(m) => cutters.push(m),
+            DegradedBody::Solid { solid, .. } => cutters.push(solid),
             // A hole the kernel refused cuts nothing, and putting it in
             // the output would show material where the user asked for a
             // void. It is dropped — and the report is told so, because
@@ -319,8 +340,19 @@ pub fn combine_degrading(
             DegradedBody::Rescued { label, .. } => report.mark_dropped(&label),
         }
     }
-    let bodies = emit_bodies(ctx, solids.bodies, &cutters, BodyRole::Solid, opts)?;
+    let bodies = emit_bodies(ctx, solids.bodies, &cutters, BodyRole::Solid, opts, &palette)?;
     Ok((Geometry3d::from_bodies(bodies), report))
+}
+
+/// The palette a union should fill: a real one normally, a disabled one
+/// when the node's own `Color` already decides the answer and the re-tag
+/// would only be thrown away.
+fn new_palette(ctx: &EvalCtx) -> Palette {
+    if super::boolean_colors::node_color_override(ctx).is_some() {
+        Palette::disabled()
+    } else {
+        Palette::new()
+    }
 }
 
 /// Finish a union's bodies into output bodies, cutting each solid one with
@@ -336,11 +368,12 @@ fn emit_bodies(
     cutters: &[Manifold],
     role: BodyRole,
     opts: BooleanOptions,
+    palette: &Palette,
 ) -> Result<Vec<Body>, NodeError> {
     let mut out = Vec::new();
     for body in bodies {
         match body {
-            DegradedBody::Solid(mut solid) => {
+            DegradedBody::Solid { mut solid, base } => {
                 for cutter in cutters {
                     if solid
                         .bounding_box()
@@ -349,9 +382,7 @@ fn emit_bodies(
                         solid = boolean_op(&solid, cutter, OpType::Subtract, opts);
                     }
                 }
-                if let Some(mesh) = finish_non_empty(&solid)? {
-                    out.extend(result_body(ctx, mesh).map(|b| b.with_role(role)));
-                }
+                out.extend(painted_result_body(ctx, &solid, palette, base, role)?);
             }
             // The rescue keeps the part's own colour (and role): it goes
             // through the same `compose_with_upstream` rule as
@@ -372,8 +403,12 @@ fn emit_bodies(
 
 /// Union `operands` under the degradation policy, with the repair this
 /// codebase can actually perform.
-pub fn union_degrading(operands: Vec<Operand>, opts: BooleanOptions) -> Degraded {
-    union_degrading_with(operands, opts, &|mesh| repair_weld(mesh))
+///
+/// `palette` is the colour bookkeeping to fill — [`Palette::disabled`]
+/// when the caller already knows the result's colour (the node's own
+/// `Color` overrides it), so no operand pays for the re-tag.
+pub fn union_degrading(operands: Vec<Operand>, opts: BooleanOptions, palette: Palette) -> Degraded {
+    union_degrading_with(operands, opts, palette, &|mesh| repair_weld(mesh))
 }
 
 /// [`union_degrading`] with the repair attempt supplied — the seam
@@ -382,9 +417,10 @@ pub fn union_degrading(operands: Vec<Operand>, opts: BooleanOptions) -> Degraded
 pub fn union_degrading_with(
     operands: Vec<Operand>,
     opts: BooleanOptions,
+    palette: Palette,
     repair: &dyn Fn(&MeshGL) -> Option<MeshGL>,
 ) -> Degraded {
-    let mut out = Degraded::default();
+    let mut out = Degraded { palette, ..Degraded::default() };
     out.report.total = operands.len();
     for set in touching_sets(operands) {
         union_one_set(set, opts, repair, &mut out);
@@ -405,9 +441,27 @@ fn union_one_set(
     // refusal is discovered here and reported much later, and re-deriving
     // "why" from a rescued mesh is not possible.
     let mut refused: Vec<(Operand, String)> = Vec::new();
+    // The set's stand-in colour: the first part the user wired into it.
+    // A union of several parts has no single colour, and this is the one
+    // the run data will agree with over the largest share of the surface
+    // in the common case (a part unioned with its own detailing).
+    let union_base = set
+        .first()
+        .map(|o| operand_color(&o.source))
+        .unwrap_or(DEFAULT_GEOMETRY_COLOR);
     for operand in set {
         match import_operand(&operand.mesh) {
-            Ok(solid) => partial = Some(union_into(partial, apply_repair(solid, opts), opts)),
+            Ok(solid) => {
+                // Tagged with the part's own colour before it joins the
+                // fold: after the union its triangles are only findable
+                // through the run data (B-6).
+                let solid = tag_original(
+                    apply_repair(solid, opts),
+                    operand_color(&operand.source),
+                    &mut out.palette,
+                );
+                partial = Some(union_into(partial, solid, opts));
+            }
             Err(failure) => {
                 let detail = refusal_message(&operand.label, failure);
                 refused.push((operand, detail));
@@ -422,14 +476,23 @@ fn union_one_set(
     // 104 that already worked a second time").
     let mut beside: Vec<DegradedBody> = Vec::new();
     for (operand, detail) in refused {
+        let color = operand_color(&operand.source);
         let repaired = repair(&operand.mesh).map(|mesh| classify_repaired(&mesh, opts));
         match repaired {
+            // A repaired operand is still the user's part, so it keeps its
+            // colour on both of the paths that put it in the kernel.
             Some((RepairedOperandUse::RejoinsUnion, Some(solid))) => {
+                let solid = tag_original(solid, color, &mut out.palette);
                 partial = Some(union_into(partial, solid, opts));
                 out.report.repaired.push(operand.label);
             }
             Some((RepairedOperandUse::KeptSeparate, Some(solid))) => {
-                beside.push(DegradedBody::Solid(solid));
+                // Its own colour, not the set's: this body *is* that one
+                // part, carried beside the union rather than in it.
+                beside.push(DegradedBody::Solid {
+                    solid: tag_original(solid, color, &mut out.palette),
+                    base: color,
+                });
                 out.report.repaired.push(operand.label);
             }
             // No repair, or one the kernel refuses too. A repair the
@@ -455,7 +518,7 @@ fn union_one_set(
     }
 
     if let Some(solid) = partial {
-        out.bodies.push(DegradedBody::Solid(solid));
+        out.bodies.push(DegradedBody::Solid { solid, base: union_base });
     }
     out.bodies.extend(beside);
 }
