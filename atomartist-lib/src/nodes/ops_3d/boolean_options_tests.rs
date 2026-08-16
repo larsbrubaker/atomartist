@@ -670,9 +670,11 @@ fn a_refusal_names_the_original_part_number_after_the_hole_split() {
         Body::from_mesh(Arc::new(box_mesh())).with_role(BodyRole::Hole),
         Body::from_mesh(Arc::new(open)),
     ]);
-    let err = run_boolean_inputs(&[("in", group)], op("Combine"), None)
-        .expect_err("an open sheet is not a solid");
-    let msg = format!("{:?}", err);
+    // B-5: a Combine degrades instead of failing, so the refusal arrives
+    // as a warning — the part *numbering* is what this test pins.
+    let run = super::tests::run_boolean_outputs(&[("in", group)], op("Combine"), None, &[])
+        .expect("a Combine degrades rather than failing");
+    let msg = run.warnings.join(" ");
     assert!(
         msg.contains("part 2"),
         "the message must still count parts the way the user's input does: {msg}"

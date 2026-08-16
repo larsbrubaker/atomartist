@@ -70,10 +70,41 @@ pub fn messages_for(report: &EvalReport, registry: &NodeRegistry) -> HashMap<Nod
         .collect()
 }
 
+/// The user-facing message set for one pass's **warnings**: nodes that
+/// evaluated fine but had something to say. A node may raise several, so
+/// they are joined into one sentence per node — the map is keyed by node
+/// because that is what the change-detection rule below needs.
+pub fn warnings_for(report: &EvalReport, registry: &NodeRegistry) -> HashMap<NodeId, String> {
+    let mut out: HashMap<NodeId, Vec<String>> = HashMap::new();
+    for w in &report.warnings {
+        let label = registry
+            .get(&w.type_id)
+            .map(|def| def.display_name().to_string())
+            .unwrap_or_else(|| w.type_id.to_string());
+        // The Boolean node already prefixes its own messages, and
+        // "Boolean: Boolean: …" is not a sentence.
+        let text = if w.message.starts_with(&format!("{}:", label)) {
+            w.message.clone()
+        } else {
+            format!("{}: {}", label, w.message)
+        };
+        out.entry(w.node).or_default().push(text);
+    }
+    out.into_iter()
+        .map(|(id, messages)| (id, messages.join(" ")))
+        .collect()
+}
+
 /// What one evaluation pass did, in the terms this module needs.
 pub struct PassOutcome<'a> {
     /// Message per node that failed this pass.
     pub failures: HashMap<NodeId, String>,
+    /// Message per node that succeeded with something to report. Kept
+    /// apart from [`failures`](Self::failures) all the way to the
+    /// status bar: a warning must not badge the node, because the badge
+    /// means "this node produced nothing and everything downstream is
+    /// blocked", which is exactly what a degraded result is not.
+    pub warnings: HashMap<NodeId, String>,
     /// Nodes that evaluated *successfully* this pass — their stale error
     /// is dropped.
     pub succeeded: &'a [NodeId],
@@ -93,27 +124,65 @@ pub struct PassOutcome<'a> {
 /// Any-thread safe: it takes the two mutexes and [`push_notice`] signals
 /// the shell's waker, which is what lets the native background evaluator
 /// report from off the UI thread.
-pub fn record(errors: &NodeErrors, notices: &Notices, pass: PassOutcome<'_>) {
+pub fn record(
+    errors: &NodeErrors,
+    warnings: &NodeErrors,
+    notices: &Notices,
+    pass: PassOutcome<'_>,
+) {
+    // Warnings first, so that when a pass produces both the louder error
+    // is the newer notice and wins the status-bar slot.
+    post_changed(
+        warnings,
+        notices,
+        NoticeLevel::Warning,
+        pass.warnings,
+        // A node that succeeded *without* warning this pass drops its
+        // stale warning — but a node that succeeded *with* one is in
+        // `succeeded` too, and `extend` below puts it straight back.
+        pass.succeeded,
+        pass.live,
+    );
+    post_changed(
+        errors,
+        notices,
+        NoticeLevel::Error,
+        pass.failures,
+        pass.succeeded,
+        pass.live,
+    );
+}
+
+/// The shared body of [`record`], for one severity: fold this pass's
+/// messages into `previous`, drop the entries that no longer apply, and
+/// post only what is new or changed.
+fn post_changed(
+    previous: &NodeErrors,
+    notices: &Notices,
+    level: NoticeLevel,
+    messages: HashMap<NodeId, String>,
+    succeeded: &[NodeId],
+    live: &HashSet<NodeId>,
+) {
     let mut changed: Vec<(NodeId, String)> = {
-        let mut previous = errors.lock().unwrap_or_else(|e| e.into_inner());
-        let changed = pass
-            .failures
+        let mut previous = previous.lock().unwrap_or_else(|e| e.into_inner());
+        let changed = messages
             .iter()
             .filter(|(id, message)| previous.get(id) != Some(message))
             .map(|(id, message)| (*id, message.clone()))
             .collect();
-        for id in pass.succeeded {
+        for id in succeeded {
             previous.remove(id);
         }
-        previous.retain(|id, _| pass.live.contains(id));
-        previous.extend(pass.failures);
+        previous.retain(|id, _| live.contains(id));
+        previous.extend(messages);
         changed
     };
     // Node order, so two nodes failing in the same pass report in a
     // stable sequence rather than the hash map's.
     changed.sort_by_key(|(id, _)| id.0);
     for (_, message) in changed {
-        push_notice(notices, NoticeLevel::Error, message);
+        push_notice(notices, level, message);
     }
 }
 

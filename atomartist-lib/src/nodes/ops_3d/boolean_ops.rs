@@ -218,27 +218,75 @@ pub fn gather_inputs(ctx: &EvalCtx) -> Result<Vec<InputGroup>, NodeError> {
 /// after import too, so every consumer of the handle sees the repaired
 /// geometry and no boolean can run against a half-repaired operand list.
 pub fn import_group(group: &InputGroup, opts: BooleanOptions) -> Result<Vec<Manifold>, NodeError> {
-    let multi = group.total_parts > 1;
     let mut solids = Vec::with_capacity(group.bodies.len());
-    for (i, body) in group.bodies.iter().enumerate() {
-        let mut baked = apply_transform(&body.mesh, &body.matrix);
-        if is_mirroring(&body.matrix) {
-            reverse_winding(&mut baked);
-        }
-        let label = if multi {
-            format!("{} (part {})", group.name, group.parts[i])
-        } else {
-            group.name.to_string()
-        };
-        let solid =
-            import_operand(&baked).map_err(|f| NodeError::msg(refusal_message(&label, f)))?;
-        solids.push(if opts.repair_winding {
-            solid.repair_orientation()
-        } else {
-            solid
-        });
+    for operand in baked_operands(group) {
+        let solid = import_operand(&operand.mesh)
+            .map_err(|f| NodeError::msg(refusal_message(&operand.label, f)))?;
+        solids.push(apply_repair(solid, opts));
     }
     Ok(solids)
+}
+
+/// One boolean participant: the operand's mesh in **world space** (its
+/// [`Body::matrix`] baked in, a mirror rewound) and the name the user knows
+/// it by.
+///
+/// The pair that [`import_group`] used to build inline, named because the
+/// degradation policy ([`super::boolean_degrade`]) needs the same baked
+/// mesh both to import *and* to hand back untouched when the import is
+/// refused — a rescued part is the geometry the user modelled, in the place
+/// they modelled it.
+#[derive(Clone)]
+pub struct Operand {
+    /// The input socket's name, plus the part number when the input
+    /// carried more than one body.
+    pub label: String,
+    pub mesh: MeshGL,
+    /// The body this operand was baked from — kept whole because a
+    /// rescued operand has to come back out looking like *itself*:
+    /// [`compose_with_upstream_and_mesh`](crate::registry::compose_with_upstream_and_mesh)
+    /// resolves its colour and role
+    /// from here, the same rule
+    /// [`pass_through`] and Keep Subtracted Parts already follow. A part
+    /// that visibly failed to combine must not also change colour.
+    pub source: Body,
+}
+
+/// Bake every body of `group` into a world-space [`Operand`].
+pub fn baked_operands(group: &InputGroup) -> Vec<Operand> {
+    let multi = group.total_parts > 1;
+    group
+        .bodies
+        .iter()
+        .enumerate()
+        .map(|(i, body)| {
+            let mut mesh = apply_transform(&body.mesh, &body.matrix);
+            if is_mirroring(&body.matrix) {
+                reverse_winding(&mut mesh);
+            }
+            let label = if multi {
+                format!("{} (part {})", group.name, group.parts[i])
+            } else {
+                group.name.to_string()
+            };
+            Operand { label, mesh, source: body.clone() }
+        })
+        .collect()
+}
+
+/// Every group's operands in one flat list, in wiring order.
+pub fn baked_operands_of(groups: &[&InputGroup]) -> Vec<Operand> {
+    groups.iter().flat_map(|g| baked_operands(g)).collect()
+}
+
+/// "Repair Winding Order" applied to one imported handle, or the handle
+/// unchanged when the toggle is off.
+pub fn apply_repair(solid: Manifold, opts: BooleanOptions) -> Manifold {
+    if opts.repair_winding {
+        solid.repair_orientation()
+    } else {
+        solid
+    }
 }
 
 /// Import several groups' bodies into one flat operand list.
@@ -278,11 +326,23 @@ pub fn finish(result: &Manifold) -> Result<MeshGL, NodeError> {
             result.status().to_str()
         )));
     }
-    let mut out_mesh = result.get_mesh_gl(-1);
+    Ok(finish_mesh(result.get_mesh_gl(-1)))
+}
+
+/// Make one mesh render-ready: `num_prop = 6`, one vertex per triangle
+/// corner, flat normals recomputed.
+///
+/// Shared by [`finish`] and by the rescue path
+/// ([`super::boolean_degrade`]), which emits a mesh the kernel never saw:
+/// its normals came through a matrix bake and possibly a winding rewind, so
+/// recomputing them is the only way the rescued part shades like everything
+/// else the node emits.
+pub fn finish_mesh(mesh: MeshGL) -> MeshGL {
+    let mut out_mesh = mesh;
     promote_to_num_prop6(&mut out_mesh);
     out_mesh = split_for_flat_normals(&out_mesh);
     compute_flat_normals(&mut out_mesh);
-    Ok(out_mesh)
+    out_mesh
 }
 
 /// [`finish`], but an empty result yields `None` instead of a body: an

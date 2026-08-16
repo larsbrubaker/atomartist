@@ -52,6 +52,11 @@ const GAP: f64 = 6.0;
 /// second call site justifies the upstream addition.
 const ERROR_COLOR: Color = Color::rgb(0.85, 0.25, 0.25);
 
+/// Warning-notice colour — amber, for a result that came through with
+/// something the user should know (a degraded Boolean union). Local for
+/// the same reason [`ERROR_COLOR`] is.
+const WARNING_COLOR: Color = Color::rgb(0.85, 0.6, 0.15);
+
 pub struct StatusBar {
     bounds: Rect,
     children: Vec<Box<dyn Widget>>,
@@ -216,6 +221,7 @@ impl Widget for StatusBar {
         if let (Some(notice), Some((x0, _))) = (self.notice.clone(), self.notice_span) {
             let color = match notice.level {
                 NoticeLevel::Error => ERROR_COLOR,
+                NoticeLevel::Warning => WARNING_COLOR,
                 NoticeLevel::Info => visuals.text_color,
             };
             ctx.set_fill_color(color);

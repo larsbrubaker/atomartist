@@ -29,6 +29,15 @@
 //! operand of one Boolean was refused. Graph-level problems (a cycle, a
 //! missing node) still abort the pass as `Err`, since there is no
 //! meaningful partial answer for those.
+//!
+//! # A node can speak without failing
+//!
+//! [`NodeOutputs::warnings`](crate::registry::NodeOutputs::warnings)
+//! reaches [`EvalReport::warnings`] as [`NodeWarning`]s. A warning is not
+//! a failure in any respect: the node is walked, its outputs are stored,
+//! its dependents evaluate, and it is not flagged `failed`. It is how a
+//! node that produced a *degraded but correct* result (the Boolean node's
+//! partial union) tells the user what it had to do.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -92,11 +101,37 @@ impl std::fmt::Display for NodeFailure {
     }
 }
 
+/// One node that evaluated *successfully* but has something to say.
+///
+/// A warning never blocks anything: the node produced its outputs, its
+/// dependents run normally, and it is not marked `failed`. It exists for
+/// results that are correct but degraded — the Boolean node's partial
+/// union carries the parts the kernel refused into the output rather than
+/// losing them, and the only thing left to do is tell the user which ones
+/// (`Object3DBooleanOperations` + `BooleanObject3D.ReportSkippedOperands`).
+#[derive(Clone, Debug)]
+pub struct NodeWarning {
+    pub node: NodeId,
+    pub type_id: Arc<str>,
+    pub message: String,
+}
+
+impl std::fmt::Display for NodeWarning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.type_id, self.message)
+    }
+}
+
 /// Outcome of one evaluation pass.
 #[derive(Clone, Debug, Default)]
 pub struct EvalReport {
     /// Nodes that evaluated successfully, in topological order.
     pub walked: Vec<NodeId>,
+    /// Non-fatal messages from nodes that *did* evaluate, in topological
+    /// order. Independent of [`failures`](Self::failures): a node appears
+    /// in at most one of the two, and a warning leaves it walked, clean
+    /// and unblocking.
+    pub warnings: Vec<NodeWarning>,
     /// Nodes whose `evaluate` returned an error (or whose type is not
     /// registered), in topological order.
     pub failures: Vec<NodeFailure>,
@@ -212,8 +247,19 @@ fn run_pass(
             true
         } else {
             match evaluate_one(graph, registry, id) {
-                Ok(()) => {
+                Ok(warnings) => {
                     report.walked.push(id);
+                    let type_id = graph
+                        .get(id)
+                        .map(|n| n.type_id.clone())
+                        .unwrap_or_else(|| Arc::from(""));
+                    for message in warnings {
+                        report.warnings.push(NodeWarning {
+                            node: id,
+                            type_id: type_id.clone(),
+                            message,
+                        });
+                    }
                     false
                 }
                 Err(ExecuteError::Node {
@@ -257,12 +303,13 @@ fn run_pass(
 }
 
 /// Evaluate one node: gather its inputs from upstream `cached_outputs`,
-/// snapshot its properties, call `evaluate`, store the result.
+/// snapshot its properties, call `evaluate`, store the result. Returns the
+/// node's non-fatal messages ([`NodeOutputs::warnings`]).
 fn evaluate_one(
     graph: &mut Graph,
     registry: &NodeRegistry,
     id: NodeId,
-) -> Result<(), ExecuteError> {
+) -> Result<Vec<String>, ExecuteError> {
     // Look up the type_id without holding a long borrow.
     let type_id = {
         let node = graph
@@ -322,10 +369,12 @@ fn evaluate_one(
 
     // Resolve output names against the instance's output sockets to map
     // them to uids, then store under uid in cached_outputs.
+    let mut outputs = outputs;
+    let warnings = std::mem::take(&mut outputs.warnings);
     if let Some(node) = graph.get_mut(id) {
         store_outputs(node, outputs);
     }
-    Ok(())
+    Ok(warnings)
 }
 
 fn store_outputs(node: &mut NodeInstance, outputs: NodeOutputs) {
@@ -444,12 +493,72 @@ mod tests {
         }
     }
 
+    /// Succeeds, but has something to say about how — stands in for a
+    /// Boolean node that unioned everything it could and carried the rest
+    /// through.
+    struct Chatty;
+    impl NodeDef for Chatty {
+        fn type_id(&self) -> &'static str {
+            "Chatty"
+        }
+        fn category(&self) -> &'static str {
+            "Math"
+        }
+        fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
+            InstanceTemplate::builder(alloc)
+                .input("a", SocketType::Number)
+                .output("out", SocketType::Number)
+                .build()
+        }
+        fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
+            let a = match ctx.input_named("a") {
+                PortValue::Number(n) => *n,
+                _ => 0.0,
+            };
+            let mut o = NodeOutputs::default();
+            o.set("out", PortValue::Number(a + 1.0));
+            o.warn("1 of 3 parts are not watertight solids");
+            Ok(o)
+        }
+    }
+
     fn registry() -> NodeRegistry {
         let mut r = NodeRegistry::new();
         r.register(AddNode);
         r.register(Const);
         r.register(Fussy);
+        r.register(Chatty);
         r
+    }
+
+    /// A warning is reported without costing the node — or anything
+    /// downstream of it — its result.
+    #[test]
+    fn a_warning_is_reported_and_nothing_is_blocked() {
+        let reg = registry();
+        let mut g = Graph::new();
+        let k = g.add_new_node("Const", [0.0, 0.0], &reg).unwrap();
+        let w = g.add_new_node("Chatty", [0.0, 0.0], &reg).unwrap();
+        let sink = g.add_new_node("Add", [0.0, 0.0], &reg).unwrap();
+        g.set_property(k, "value", PortValue::Number(2.0)).unwrap();
+        let k_out = g.get(k).unwrap().output_by_name("out").unwrap().uid;
+        let w_in = g.get(w).unwrap().input_by_name("a").unwrap().uid;
+        let w_out = g.get(w).unwrap().output_by_name("out").unwrap().uid;
+        let s_in = g.get(sink).unwrap().input_by_name("a").unwrap().uid;
+        g.connect(Noodle::new(k, k_out, w, w_in), &reg).unwrap();
+        g.connect(Noodle::new(w, w_out, sink, s_in), &reg).unwrap();
+
+        let report = evaluate_all(&mut g, &reg).unwrap();
+
+        assert!(report.is_clean(), "a warning is not a failure");
+        assert_eq!(report.warnings.len(), 1);
+        assert_eq!(report.warnings[0].node, w);
+        assert_eq!(report.warnings[0].type_id.as_ref(), "Chatty");
+        assert!(report.warnings[0].message.contains("watertight"));
+        assert!(report.walked.contains(&w) && report.walked.contains(&sink));
+        assert!(report.skipped.is_empty(), "nothing downstream is blocked");
+        assert!(!g.get(w).unwrap().failed, "a warning does not fail the node");
+        assert_eq!(cached_number(&g, sink), Some(3.0));
     }
 
     /// Builds: a=2, b=3, c = a + b.

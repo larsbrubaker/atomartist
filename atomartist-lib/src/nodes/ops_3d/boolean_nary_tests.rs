@@ -47,13 +47,17 @@ fn total_volume(g: &Geometry3d) -> f64 {
 // ------------------------------------------------------- n-ary operations
 
 /// Combine unions every connected input, not just the first two.
+///
+/// The three boxes overlap in a chain, so they are one touching set and
+/// one body (B-5); scattered parts get a body each, which
+/// `boolean_degrade_tests` covers.
 #[test]
 fn combine_unions_three_operands() {
     let out = run_boolean_inputs(
         &[
             ("a", box_at(0.0, 0.0, 0.0)),
-            ("b", box_at(5.0, 0.0, 0.0)),
-            ("c", box_at(10.0, 0.0, 0.0)),
+            ("b", box_at(1.5, 0.0, 0.0)),
+            ("c", box_at(3.0, 0.0, 0.0)),
         ],
         op("Combine"),
         None,
@@ -61,9 +65,10 @@ fn combine_unions_three_operands() {
     .expect("Combine of three operands failed");
     assert_eq!(out.len(), 1, "a union is one body");
     let v = total_volume(&out);
+    // The three overlap into one [-1,4] × [-1,1]² slab.
     assert!(
-        (v - 24.0).abs() < 1e-3,
-        "union of three disjoint 2mm boxes has volume {}, expected 24",
+        (v - 20.0).abs() < 1e-3,
+        "union of the three overlapping 2mm boxes has volume {}, expected 20",
         v
     );
 }

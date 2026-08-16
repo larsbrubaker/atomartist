@@ -74,9 +74,10 @@ use std::sync::Arc;
 use manifold_rust::manifold::Manifold;
 use manifold_rust::types::OpType;
 
+use super::boolean_degrade::{self, OperandReport};
 use super::boolean_ops::{
     boolean_op, composed_bodies, finish_non_empty, fold, gather_inputs, import_group, import_groups,
-    operand_sockets, pass_through, result_body, split_roles, BooleanOptions, InputGroup,
+    operand_sockets, pass_through, result_body, BooleanOptions, InputGroup,
 };
 use super::boolean_selection::{self, SUBTRACT_PARTS};
 use super::dynamic_inputs;
@@ -300,15 +301,26 @@ impl NodeDef for BooleanNode {
         let operation = operation_of(ctx.properties);
         let opts = options_of(ctx.properties);
 
+        let mut out = NodeOutputs::default();
         let geometry = match operation {
             "Subtract" => subtract(ctx, &groups, false, opts)?,
             "Subtract & Replace" => subtract(ctx, &groups, true, opts)?,
             "Intersect" => single_result(ctx, &groups, OpType::Intersect, opts)?,
             // Combine, and anything unrecognised (see `operation_of`).
-            _ => combine(ctx, &groups, opts)?,
+            _ => {
+                let (geometry, report) = combine(ctx, &groups, opts)?;
+                // The node succeeded: a degraded union still produced real
+                // geometry and everything downstream of it is valid. The
+                // parts it could not use are in the output too — the only
+                // thing left is to say so, which is what the warning
+                // channel is for (B-5; `NodeOutputs::warnings`).
+                for message in report.warnings() {
+                    out.warn(message);
+                }
+                geometry
+            }
         };
 
-        let mut out = NodeOutputs::default();
         out.set("out", PortValue::Geometry3d(Arc::new(geometry)));
         Ok(out)
     }
@@ -332,7 +344,10 @@ fn single_result(
 }
 
 /// Combine: union the solids, union the holes, subtract the hole union
-/// from the solid union (`BooleanMeshBuilder.CombineMeshes`, L104-192).
+/// from the solid union (`BooleanMeshBuilder.CombineMeshes`, L104-192),
+/// under the degradation policy — touching sets, partial union, repair
+/// triage, rescue. See [`super::boolean_degrade`]; the report it hands
+/// back becomes this node's warnings.
 ///
 /// With no holes wired in this is exactly the plain n-ary union. With
 /// *only* holes it is the hole union, still marked as a hole — see the
@@ -341,25 +356,8 @@ fn combine(
     ctx: &EvalCtx,
     groups: &[InputGroup],
     opts: BooleanOptions,
-) -> Result<Geometry3d, NodeError> {
-    let (solid_groups, hole_groups) = split_roles(groups);
-    let solid_refs: Vec<&InputGroup> = solid_groups.iter().collect();
-    let hole_refs: Vec<&InputGroup> = hole_groups.iter().collect();
-
-    let solids = fold(import_groups(&solid_refs, opts)?, OpType::Add, opts);
-    let holes = fold(import_groups(&hole_refs, opts)?, OpType::Add, opts);
-
-    match (solids, holes) {
-        (None, None) => Ok(Geometry3d::empty()),
-        (Some(s), None) => one_body(ctx, &s, BodyRole::Solid),
-        // Nothing to cut: the holes are the whole answer, and they stay
-        // holes so a downstream Combine can still use them.
-        (None, Some(h)) => one_body(ctx, &h, BodyRole::Hole),
-        (Some(s), Some(h)) => {
-            let cut = boolean_op(&s, &h, OpType::Subtract, opts);
-            one_body(ctx, &cut, BodyRole::Solid)
-        }
-    }
+) -> Result<(Geometry3d, OperandReport), NodeError> {
+    boolean_degrade::combine_degrading(ctx, groups, opts)
 }
 
 /// Finish one boolean result into a single-body group with `role`, or the
@@ -497,3 +495,10 @@ mod nary_tests;
 #[cfg(test)]
 #[path = "boolean_options_tests.rs"]
 mod options_tests;
+
+// The degradation policy's tests live with the node rather than with
+// `boolean_degrade` because most of them drive the whole node (the shared
+// fixtures are in `boolean_node_tests`, a private sibling module).
+#[cfg(test)]
+#[path = "boolean_degrade_tests.rs"]
+mod degrade_tests;

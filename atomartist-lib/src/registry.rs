@@ -45,6 +45,11 @@ pub use editor::{EditorKind, NodeFieldAttrs, NumberAttrs, PropDef, VisibleWhen};
 mod params;
 pub use params::{enum_variant_for_index, ParamReader, ParamSet};
 
+/// The evaluate-time value bags and the node error, moved out when this
+/// file reached the 800-line limit.
+mod eval_io;
+pub use eval_io::{NodeError, NodeInputs, NodeOutputs, NodeProperties};
+
 
 /// Initial socket + property layout for a new node instance — what
 /// [`NodeDef::instantiate`] returns. The graph populates a new
@@ -151,136 +156,6 @@ impl<'a> TemplateBuilder<'a> {
     }
 }
 
-/// Inputs handed to `NodeDef::evaluate` — for each connected input socket
-/// (resolved by uid), the executor inserts the upstream value. Disconnected
-/// optional inputs are absent from the map; node code should use the
-/// `ctx.input*` accessors which fall back to `PortValue::None`.
-#[derive(Default)]
-pub struct NodeInputs {
-    pub by_uid: HashMap<SocketUid, PortValue>,
-    /// Source node id of the noodle landing on each input socket.
-    /// Lets dynamic nodes (Output, Combine) tag their downstream
-    /// payload with "which node directly fed this slot" — used by
-    /// the 3-D pick path so clicking a rendered body selects the
-    /// first node wired into Output's matching slot, matching
-    /// NodeDesigner's `meshData.sourceNodeId` rule.
-    pub sources: HashMap<SocketUid, crate::graph::node::NodeId>,
-}
-
-impl NodeInputs {
-    pub fn insert(&mut self, uid: SocketUid, value: PortValue) {
-        self.by_uid.insert(uid, value);
-    }
-    pub fn insert_with_source(
-        &mut self,
-        uid: SocketUid,
-        value: PortValue,
-        source: crate::graph::node::NodeId,
-    ) {
-        self.by_uid.insert(uid, value);
-        self.sources.insert(uid, source);
-    }
-    pub fn get(&self, uid: SocketUid) -> &PortValue {
-        self.by_uid.get(&uid).unwrap_or(&PortValue::None)
-    }
-    /// Direct upstream source of the noodle landing on `uid`, or
-    /// `None` when the slot is disconnected.
-    pub fn source(&self, uid: SocketUid) -> Option<crate::graph::node::NodeId> {
-        self.sources.get(&uid).copied()
-    }
-}
-
-/// Property snapshot handed to `NodeDef::evaluate`. The executor copies a
-/// node's `properties` map into here at evaluation time so node code never
-/// touches mutable state.
-#[derive(Default)]
-pub struct NodeProperties {
-    pub by_name: HashMap<Arc<str>, PortValue>,
-}
-
-impl NodeProperties {
-    pub fn get(&self, name: &str) -> &PortValue {
-        self.by_name.get(name).unwrap_or(&PortValue::None)
-    }
-
-    /// Convenience accessor that unwraps `PortValue::Number`, returning the
-    /// `default` if the property is missing or wrong-typed.
-    pub fn number(&self, name: &str, default: f64) -> f64 {
-        match self.get(name) {
-            PortValue::Number(n) => *n,
-            _ => default,
-        }
-    }
-
-    pub fn bool_(&self, name: &str, default: bool) -> bool {
-        match self.get(name) {
-            PortValue::Bool(b) => *b,
-            _ => default,
-        }
-    }
-
-    /// Convenience accessor that unwraps `PortValue::Matrix4x4`,
-    /// returning `default` if the property is missing or wrong-typed.
-    /// Used by every geometry-producing node to pull its per-node
-    /// transform property into the emitted `Geometry3d`.
-    pub fn matrix4x4(&self, name: &str, default: [f32; 16]) -> [f32; 16] {
-        match self.get(name) {
-            PortValue::Matrix4x4(m) => *m,
-            _ => default,
-        }
-    }
-
-    /// Convenience accessor that unwraps `PortValue::Color`,
-    /// returning `default` if the property is missing or wrong-typed.
-    pub fn color(&self, name: &str, default: [f32; 4]) -> [f32; 4] {
-        match self.get(name) {
-            PortValue::Color(c) => *c,
-            _ => default,
-        }
-    }
-
-    pub fn insert(&mut self, name: impl Into<Arc<str>>, value: PortValue) {
-        self.by_name.insert(name.into(), value);
-    }
-}
-
-/// Outputs returned by `NodeDef::evaluate`, keyed by socket name. The
-/// executor resolves each name against the node instance's `outputs` list
-/// to find the producing socket's uid, then stores the value in
-/// `cached_outputs` under that uid. Keeping node code name-keyed is the
-/// ergonomic choice — nodes don't need to track uids themselves.
-#[derive(Default)]
-pub struct NodeOutputs {
-    pub by_name: HashMap<Arc<str>, PortValue>,
-}
-
-impl NodeOutputs {
-    pub fn set(&mut self, name: impl Into<Arc<str>>, value: PortValue) {
-        self.by_name.insert(name.into(), value);
-    }
-}
-
-/// Errors a node may raise during evaluation.
-#[derive(Clone, Debug)]
-pub enum NodeError {
-    Message(String),
-}
-
-impl NodeError {
-    pub fn msg(s: impl Into<String>) -> Self {
-        NodeError::Message(s.into())
-    }
-}
-
-impl std::fmt::Display for NodeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            NodeError::Message(s) => write!(f, "{}", s),
-        }
-    }
-}
-
-impl std::error::Error for NodeError {}
 
 /// Evaluation context handed to [`NodeDef::evaluate`]. Provides
 /// uid-keyed access to inputs plus name-keyed convenience accessors

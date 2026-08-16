@@ -32,6 +32,21 @@ fn pass<'a>(
 ) -> PassOutcome<'a> {
     PassOutcome {
         failures,
+        warnings: HashMap::new(),
+        succeeded,
+        live,
+    }
+}
+
+/// One pass whose only news is a warning: the node evaluated fine.
+fn warning_pass<'a>(
+    warnings: HashMap<NodeId, String>,
+    succeeded: &'a [NodeId],
+    live: &'a HashSet<NodeId>,
+) -> PassOutcome<'a> {
+    PassOutcome {
+        failures: HashMap::new(),
+        warnings,
         succeeded,
         live,
     }
@@ -43,11 +58,12 @@ fn pass<'a>(
 /// must not resurrect the message.
 #[test]
 fn a_persistently_failing_node_reports_once_not_every_pass() {
-    let (errors, notices, live) = (errors(), notices(), live());
+    let (errors, warnings, notices, live) = (errors(), errors(), notices(), live());
     let mut posted = Vec::new();
     for _ in 0..5 {
         record(
             &errors,
+            &warnings,
             &notices,
             pass(
                 one(1, "Boolean: input 'b' is not a closed solid"),
@@ -68,14 +84,16 @@ fn a_persistently_failing_node_reports_once_not_every_pass() {
 /// something and hit a new wall.
 #[test]
 fn a_changed_message_on_the_same_node_is_reported_again() {
-    let (errors, notices, live) = (errors(), notices(), live());
+    let (errors, warnings, notices, live) = (errors(), errors(), notices(), live());
     record(
         &errors,
+        &warnings,
         &notices,
         pass(one(1, "Boolean: input 'b' is empty"), &[], &live),
     );
     record(
         &errors,
+        &warnings,
         &notices,
         pass(
             one(1, "Boolean: input 'b' is not a closed solid"),
@@ -90,16 +108,22 @@ fn a_changed_message_on_the_same_node_is_reported_again() {
 /// Recovery is silent: the badge clears, the status bar says nothing.
 #[test]
 fn a_fixed_node_clears_its_error_without_posting() {
-    let (errors, notices, live) = (errors(), notices(), live());
+    let (errors, warnings, notices, live) = (errors(), errors(), notices(), live());
     record(
         &errors,
+        &warnings,
         &notices,
         pass(one(1, "Boolean: input 'b' is empty"), &[], &live),
     );
     notices.lock().unwrap().clear();
 
     // The repaired node re-evaluated cleanly this pass.
-    record(&errors, &notices, pass(HashMap::new(), &[NodeId(1)], &live));
+    record(
+        &errors,
+        &warnings,
+        &notices,
+        pass(HashMap::new(), &[NodeId(1)], &live),
+    );
 
     assert!(errors.lock().unwrap().is_empty(), "the badge clears");
     assert!(
@@ -111,10 +135,11 @@ fn a_fixed_node_clears_its_error_without_posting() {
 /// The same node failing again *after* it was fixed is news again.
 #[test]
 fn a_node_that_breaks_again_after_a_repair_reports_again() {
-    let (errors, notices, live) = (errors(), notices(), live());
+    let (errors, warnings, notices, live) = (errors(), errors(), notices(), live());
     let mut posted = Vec::new();
     record(
         &errors,
+        &warnings,
         &notices,
         pass(one(1, "Boolean: input 'b' is empty"), &[], &live),
     );
@@ -122,9 +147,15 @@ fn a_node_that_breaks_again_after_a_repair_reports_again() {
     // tail-duplicate check would hide the repeat and this test would
     // pass for the wrong reason.
     posted.extend(notices.lock().unwrap().drain(..));
-    record(&errors, &notices, pass(HashMap::new(), &[NodeId(1)], &live));
     record(
         &errors,
+        &warnings,
+        &notices,
+        pass(HashMap::new(), &[NodeId(1)], &live),
+    );
+    record(
+        &errors,
+        &warnings,
         &notices,
         pass(one(1, "Boolean: input 'b' is empty"), &[], &live),
     );
@@ -138,16 +169,22 @@ fn a_node_that_breaks_again_after_a_repair_reports_again() {
 /// editing an unrelated node would "fix" the Boolean on screen.
 #[test]
 fn a_pass_that_did_not_touch_the_broken_node_keeps_its_error() {
-    let (errors, notices, live) = (errors(), notices(), live());
+    let (errors, warnings, notices, live) = (errors(), errors(), notices(), live());
     record(
         &errors,
+        &warnings,
         &notices,
         pass(one(1, "Boolean: input 'b' is empty"), &[], &live),
     );
 
     // Some unrelated node re-evaluated; the broken one was not in the
     // dirty set at all.
-    record(&errors, &notices, pass(HashMap::new(), &[NodeId(9)], &live));
+    record(
+        &errors,
+        &warnings,
+        &notices,
+        pass(HashMap::new(), &[NodeId(9)], &live),
+    );
 
     assert_eq!(
         errors.lock().unwrap().get(&NodeId(1)).map(String::as_str),
@@ -160,9 +197,10 @@ fn a_pass_that_did_not_touch_the_broken_node_keeps_its_error() {
 /// route can't clear it.
 #[test]
 fn deleting_a_broken_node_drops_its_error() {
-    let (errors, notices, live) = (errors(), notices(), live());
+    let (errors, warnings, notices, live) = (errors(), errors(), notices(), live());
     record(
         &errors,
+        &warnings,
         &notices,
         pass(one(1, "Boolean: input 'b' is empty"), &[], &live),
     );
@@ -170,6 +208,7 @@ fn deleting_a_broken_node_drops_its_error() {
     let without_node_1: HashSet<NodeId> = live.iter().copied().filter(|n| n.0 != 1).collect();
     record(
         &errors,
+        &warnings,
         &notices,
         pass(HashMap::new(), &[], &without_node_1),
     );
@@ -187,17 +226,115 @@ fn deleting_a_broken_node_drops_its_error() {
 /// accident of the queue.
 #[test]
 fn two_nodes_failing_with_the_same_text_say_it_once() {
-    let (errors, notices, live) = (errors(), notices(), live());
+    let (errors, warnings, notices, live) = (errors(), errors(), notices(), live());
     let mut failures = one(1, "Boolean: input 'b' is not a closed solid");
     failures.insert(
         NodeId(2),
         "Boolean: input 'b' is not a closed solid".to_string(),
     );
 
-    record(&errors, &notices, pass(failures, &[], &live));
+    record(&errors, &warnings, &notices, pass(failures, &[], &live));
 
     assert_eq!(notices.lock().unwrap().len(), 1, "one sentence, once");
     assert_eq!(errors.lock().unwrap().len(), 2, "but both nodes badged");
+}
+
+/// A warning posts at [`NoticeLevel::Warning`] and — the part that
+/// matters — never lands in the error map, which is what the canvas
+/// badges. A degraded Boolean is not a broken one.
+#[test]
+fn a_warning_is_posted_but_never_badged() {
+    let (errors, warnings, notices, live) = (errors(), errors(), notices(), live());
+
+    record(
+        &errors,
+        &warnings,
+        &notices,
+        warning_pass(
+            one(1, "Boolean: 1 of 3 parts are not watertight solids"),
+            &[NodeId(1)],
+            &live,
+        ),
+    );
+
+    let posted = notices.lock().unwrap().clone();
+    assert_eq!(posted.len(), 1);
+    assert_eq!(posted[0].level, NoticeLevel::Warning);
+    assert!(errors.lock().unwrap().is_empty(), "no badge for a warning");
+    assert_eq!(warnings.lock().unwrap().len(), 1);
+}
+
+/// The same "say it once" rule as errors: a graph parked on a degraded
+/// Boolean must not repeat itself every pass.
+#[test]
+fn a_repeated_warning_is_only_said_once() {
+    let (errors, warnings, notices, live) = (errors(), errors(), notices(), live());
+    let mut posted = Vec::new();
+    for _ in 0..5 {
+        record(
+            &errors,
+            &warnings,
+            &notices,
+            warning_pass(
+                one(1, "Boolean: 1 of 3 parts are not watertight"),
+                &[NodeId(1)],
+                &live,
+            ),
+        );
+        posted.extend(notices.lock().unwrap().drain(..));
+    }
+    assert_eq!(posted.len(), 1, "five degraded passes, one message");
+}
+
+/// A node that stops warning drops its message silently — the same
+/// silent-recovery rule the errors follow.
+#[test]
+fn a_node_that_stops_warning_clears_silently() {
+    let (errors, warnings, notices, live) = (errors(), errors(), notices(), live());
+    record(
+        &errors,
+        &warnings,
+        &notices,
+        warning_pass(
+            one(1, "Boolean: 1 of 3 parts are not watertight"),
+            &[NodeId(1)],
+            &live,
+        ),
+    );
+    notices.lock().unwrap().clear();
+
+    record(
+        &errors,
+        &warnings,
+        &notices,
+        warning_pass(HashMap::new(), &[NodeId(1)], &live),
+    );
+
+    assert!(warnings.lock().unwrap().is_empty());
+    assert!(notices.lock().unwrap().is_empty(), "recovery is silent");
+}
+
+/// The node type's display name prefixes a warning too — but only once,
+/// because the Boolean node's own messages already start with "Boolean:".
+#[test]
+fn a_warning_is_not_double_prefixed() {
+    let mut registry = atomartist_lib::registry::NodeRegistry::new();
+    atomartist_lib::nodes::register_all(&mut registry);
+    let report = atomartist_lib::graph::executor::EvalReport {
+        walked: Vec::new(),
+        skipped: Vec::new(),
+        failures: Vec::new(),
+        warnings: vec![atomartist_lib::graph::executor::NodeWarning {
+            node: NodeId(3),
+            type_id: "Boolean".into(),
+            message: "Boolean: 1 of 3 parts are not watertight solids".into(),
+        }],
+    };
+
+    let messages = warnings_for(&report, &registry);
+
+    let text = messages.get(&NodeId(3)).expect("the warning is described");
+    assert_eq!(text, "Boolean: 1 of 3 parts are not watertight solids");
 }
 
 /// The message the user reads names the node type, then the node's own
@@ -214,6 +351,7 @@ fn the_message_is_prefixed_with_the_node_type_display_name() {
             type_id: "Boolean".into(),
             message: "input 'b' is not a closed solid".into(),
         }],
+        warnings: Vec::new(),
     };
 
     let messages = messages_for(&report, &registry);

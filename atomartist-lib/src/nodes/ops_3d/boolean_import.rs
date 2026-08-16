@@ -97,7 +97,7 @@ pub fn import_operand(mesh: &MeshGL) -> Result<Manifold, ImportFailure> {
     // Only a seam gap is worth a second chance; every other status is a
     // genuine property of the geometry.
     if imported.status() == Error::NotClosed {
-        if let Some(welded) = weld_seams(&prepared) {
+        if let Some(welded) = weld_seams(&prepared, SEAM_TOLERANCE_FRACTION) {
             let retried = Manifold::from_mesh_gl_robust(&welded);
             if retried.status() == Error::NoError {
                 return check_non_empty(retried, had_triangles);
@@ -152,13 +152,56 @@ pub fn positions_only(mesh: &MeshGL) -> MeshGL {
     }
 }
 
-/// MatterCAD's `WeldSeams`: merge coincident-within-tolerance vertices, drop
-/// the faces the weld collapsed, and drop the vertices those faces used.
+/// A second, deliberately coarser weld for an operand the import refused
+/// outright — the one repair this codebase can offer a not-closed part.
+///
+/// MatterCAD's equivalent fallback (`Object3DBooleanOperations.RepairRefusedOperand`)
+/// runs the Repair tool's **hole fill**, which can create faces that were
+/// never in the file. manifold-rust has no hole filler (`robust/repair.rs`
+/// is shell-orientation only, and `MeshGL::merge` welds), so the repair we
+/// can actually attempt is the seam weld again at a tolerance a hundred
+/// times looser than the import's: it closes a gap that is a modelling
+/// slip rather than a float rounding, and it cannot invent a lid over a
+/// genuine hole. **Candidate upstream addition to manifold-rust**: a
+/// boundary-loop hole fill would make this fallback reach the case
+/// MatterCAD's does — a part with real holes — instead of only the wide
+/// seam.
+///
+/// `mesh` may carry any layout; positions are taken from the first three
+/// slots. `None` when there is nothing to weld against.
+pub fn repair_weld(mesh: &MeshGL) -> Option<MeshGL> {
+    let prepared = positions_only(mesh);
+    if prepared.tri_verts.is_empty() || !indices_in_bounds(&prepared) {
+        return None;
+    }
+    let welded = weld_seams(&prepared, REPAIR_TOLERANCE_FRACTION)?;
+    if welded.tri_verts.is_empty() {
+        // Everything the weld touched collapsed: substituting that for
+        // the user's part would delete it silently, which is the outcome
+        // the whole rescue path exists to prevent (MatterCAD returns null
+        // for the same reason).
+        return None;
+    }
+    Some(welded)
+}
+
+/// The repair weld's tolerance, as a fraction of the operand's scale. Two
+/// orders of magnitude above [`SEAM_TOLERANCE_FRACTION`]: at that point the
+/// gap is not a rounding artefact but a modelled one, and closing it is a
+/// repair rather than a restoration — which is why it is only ever tried
+/// on a part the kernel has already refused.
+const REPAIR_TOLERANCE_FRACTION: f64 = 1e-3;
+
+/// MatterCAD's `WeldSeams`: merge coincident-within-tolerance vertices,
+/// drop the faces the weld collapsed, and drop the vertices those faces
+/// used. `tolerance_fraction` scales the operand's own size into the
+/// tolerance — [`SEAM_TOLERANCE_FRACTION`] for the import's one retry,
+/// [`REPAIR_TOLERANCE_FRACTION`] for [`repair_weld`].
 ///
 /// `mesh` must already be positions-only. Returns `None` when the operand
 /// has no finite extent to scale a tolerance against (welding is not the
 /// answer to a non-finite vertex either).
-fn weld_seams(mesh: &MeshGL) -> Option<MeshGL> {
+fn weld_seams(mesh: &MeshGL, tolerance_fraction: f64) -> Option<MeshGL> {
     let (lo, hi) = bounds(mesh)?;
     let size = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
     let diagonal = (size[0] * size[0] + size[1] * size[1] + size[2] * size[2]).sqrt();
@@ -170,7 +213,7 @@ fn weld_seams(mesh: &MeshGL) -> Option<MeshGL> {
     // a part parked far from the origin comes apart at a coarser step than
     // its own diagonal implies. Whichever is larger sets the tolerance.
     let dist_from_origin = max_abs_component(lo).max(max_abs_component(hi));
-    let tolerance = diagonal.max(dist_from_origin) * SEAM_TOLERANCE_FRACTION;
+    let tolerance = diagonal.max(dist_from_origin) * tolerance_fraction;
     // Area rather than length, and well under the tolerance squared: this
     // only drops triangles the weld itself collapsed, not thin ones the
     // model meant to have.

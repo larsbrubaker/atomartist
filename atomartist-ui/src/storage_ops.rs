@@ -142,8 +142,25 @@ use crate::app_state::AppState;
 pub enum NoticeLevel {
     /// Progress / confirmation text — the status bar is enough.
     Info,
+    /// Nothing failed, but the result is not quite what was asked for and
+    /// the user has to hear about it. The Boolean node's degraded union
+    /// (plan step B-5) is the first source: the node succeeded, every part
+    /// is in the output, and some of them could not be combined.
+    Warning,
     /// Something failed and the user needs to know.
     Error,
+}
+
+impl NoticeLevel {
+    /// Severity order, for "the loudest message in a batch wins" and "a
+    /// quieter one never displaces a louder one still on screen".
+    fn rank(self) -> u8 {
+        match self {
+            NoticeLevel::Info => 0,
+            NoticeLevel::Warning => 1,
+            NoticeLevel::Error => 2,
+        }
+    }
 }
 
 /// A user-facing message produced by a storage continuation.
@@ -372,10 +389,10 @@ impl AppState {
     ///
     /// - Within one drained batch the highest-severity message wins, and
     ///   the newest among equals.
-    /// - An [`NoticeLevel::Info`] never displaces an undismissed
-    ///   [`NoticeLevel::Error`] already in the slot — the error stays until
-    ///   another error replaces it or the user dismisses it
-    ///   ([`Self::dismiss_notice`], which clears the slot for anything).
+    /// - A quieter notice never displaces a louder undismissed one already
+    ///   in the slot — an error stays until another error replaces it or
+    ///   the user dismisses it ([`Self::dismiss_notice`], which clears the
+    ///   slot for anything).
     ///
     /// Deliberately still the simplest thing that works; the toast /
     /// dialog treatment (with a real message history) arrives with the
@@ -400,19 +417,20 @@ impl AppState {
                 eprintln!("storage error: {}", notice.text);
             }
         }
-        // Highest severity wins; `rposition` keeps the newest among equals.
+        // Highest severity wins; the *last* index of that severity keeps
+        // the newest among equals.
         let winner = drained
             .iter()
-            .rposition(|n| n.level == NoticeLevel::Error)
-            .or_else(|| drained.len().checked_sub(1))
-            .map(|i| &drained[i]);
+            .enumerate()
+            .max_by_key(|(i, n)| (n.level.rank(), *i))
+            .map(|(_, n)| n);
         if let Some(winner) = winner {
             let mut slot = lock(&self.last_notice);
-            let displacing_an_error = matches!(
+            let displacing_something_louder = matches!(
                 slot.as_ref(),
-                Some(shown) if shown.level == NoticeLevel::Error
-            ) && winner.level != NoticeLevel::Error;
-            if !displacing_an_error {
+                Some(shown) if shown.level.rank() > winner.level.rank()
+            );
+            if !displacing_something_louder {
                 *slot = Some(winner.clone());
             }
         }

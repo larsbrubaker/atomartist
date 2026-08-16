@@ -80,6 +80,25 @@ pub(super) fn run_boolean_with_props(
     removers: Option<&[&str]>,
     extra: &[(&str, PortValue)],
 ) -> Result<Geometry3d, NodeError> {
+    Ok(run_boolean_outputs(operands, operation, removers, extra)?.geometry)
+}
+
+/// What one Boolean evaluation produced: its geometry *and* its non-fatal
+/// messages. The degradation policy (B-5) succeeds and warns, so a fixture
+/// that only returned the geometry could not see half of what the node did.
+#[derive(Debug)]
+pub(super) struct BooleanRun {
+    pub geometry: Geometry3d,
+    pub warnings: Vec<String>,
+}
+
+/// [`run_boolean_with_props`], keeping the warnings.
+pub(super) fn run_boolean_outputs(
+    operands: &[(&str, Geometry3d)],
+    operation: PortValue,
+    removers: Option<&[&str]>,
+    extra: &[(&str, PortValue)],
+) -> Result<BooleanRun, NodeError> {
     let n = BooleanNode;
     let mut alloc = SocketUidAlloc::new();
     let tpl = n.instantiate(&mut alloc);
@@ -125,10 +144,11 @@ pub(super) fn run_boolean_with_props(
 
     let ctx = EvalCtx { instance: &inst, properties: &props, inputs: &inputs };
     let outs = n.evaluate(&ctx)?;
-    match outs.by_name.get("out") {
-        Some(PortValue::Geometry3d(g)) => Ok((**g).clone()),
-        _ => Ok(Geometry3d::empty()),
-    }
+    let geometry = match outs.by_name.get("out") {
+        Some(PortValue::Geometry3d(g)) => (**g).clone(),
+        _ => Geometry3d::empty(),
+    };
+    Ok(BooleanRun { geometry, warnings: outs.warnings })
 }
 
 /// Column-major translation matrix — the shape `Body::matrix` carries.
@@ -350,11 +370,32 @@ fn union_with_closed_non_manifold_operand_keeps_the_geometry() {
     assert!(lo[0] < -0.9 && lo[1] < -0.9, "first body lost: min = {:?}", lo);
 }
 
-/// A not-closed operand must produce a node error that names the operand —
-/// never silent emptiness.
+/// A not-closed operand must be reported by name — never silent
+/// emptiness. B-5 moved *where* that lands for a Combine: a union
+/// degrades rather than fails, so the same sentence arrives as a warning
+/// beside a result that still contains every part. Intersect, which is
+/// defined by every operand, still fails hard.
 #[test]
-fn not_closed_operand_reports_a_named_error() {
-    let err = match run_boolean(generate_box(2.0, 2.0, 2.0), open_box(), op("Combine")) {
+fn not_closed_operand_reports_a_named_problem() {
+    let run = run_boolean_outputs(
+        &[
+            ("a", Geometry3d::from_mesh(Arc::new(generate_box(2.0, 2.0, 2.0)))),
+            ("b", Geometry3d::from_mesh(Arc::new(open_box()))),
+        ],
+        op("Combine"),
+        None,
+        &[],
+    )
+    .expect("a Combine degrades rather than failing");
+    let said = run.warnings.join(" ");
+    assert!(said.contains("'b'"), "nothing names the operand: {}", said);
+    assert!(
+        said.to_lowercase().contains("closed"),
+        "nothing explains the problem: {}",
+        said
+    );
+
+    let err = match run_boolean(generate_box(2.0, 2.0, 2.0), open_box(), op("Intersect")) {
         Ok(m) => panic!("open box accepted, produced {} tris", m.tri_verts.len() / 3),
         Err(e) => e.to_string(),
     };
@@ -374,7 +415,10 @@ fn out_of_bounds_index_reports_a_named_error() {
     let mut mesh = generate_box(2.0, 2.0, 2.0);
     let n = (mesh.vert_properties.len() / STRIDE) as u32;
     mesh.tri_verts[0] = n + 7;
-    let err = match run_boolean(generate_box(2.0, 2.0, 2.0), mesh, op("Combine")) {
+    // Intersect, because a Combine now degrades instead of failing
+    // (B-5) — the *hostile input never panics* half of this test is
+    // unchanged either way.
+    let err = match run_boolean(generate_box(2.0, 2.0, 2.0), mesh, op("Intersect")) {
         Ok(m) => panic!("out-of-bounds operand accepted, produced {} tris", m.tri_verts.len() / 3),
         Err(e) => e.to_string(),
     };
@@ -397,7 +441,9 @@ fn degenerate_operand_reports_a_named_error() {
         v[1] = 0.0;
         v[2] = 0.0;
     }
-    let err = match run_boolean(generate_box(2.0, 2.0, 2.0), mesh, op("Combine")) {
+    // Intersect: a Combine degrades a refused operand into a warning
+    // (B-5), and this test is about the refusal itself.
+    let err = match run_boolean(generate_box(2.0, 2.0, 2.0), mesh, op("Intersect")) {
         Ok(m) => panic!("degenerate operand accepted, produced {} tris", m.tri_verts.len() / 3),
         Err(e) => e.to_string(),
     };

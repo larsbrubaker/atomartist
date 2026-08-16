@@ -235,6 +235,11 @@ pub struct AppState {
     /// [`crate::eval_errors::record`], the status bar. Empty while the
     /// graph evaluates cleanly.
     pub(crate) node_errors: crate::eval_errors::NodeErrors,
+    /// Message per node that evaluated **successfully** but had something
+    /// to say (a Boolean whose union had to leave a part out). Its own map
+    /// so a warning never reaches the canvas badge, which means "this node
+    /// produced nothing"; the dedupe rule is the same as `node_errors`'.
+    pub(crate) node_warnings: crate::eval_errors::NodeErrors,
     /// The most recent drained [`Notice`](crate::storage_ops::Notice),
     /// kept so the status bar has something to paint after the queue is
     /// emptied. Written by
@@ -323,6 +328,7 @@ impl AppState {
             pending_ops: Arc::new(Mutex::new(Vec::new())),
             notices: Arc::new(Mutex::new(Vec::new())),
             node_errors: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            node_warnings: Arc::new(Mutex::new(std::collections::HashMap::new())),
             last_notice: Arc::new(Mutex::new(None)),
         }
     }
@@ -470,6 +476,7 @@ impl AppState {
             ticket: 1 + self.eval_ticket.fetch_add(1, Ordering::Relaxed),
             published: self.eval_published.clone(),
             node_errors: self.node_errors.clone(),
+            node_warnings: self.node_warnings.clone(),
             notices: self.notices.clone(),
         }
     }
@@ -599,6 +606,8 @@ struct EvalTask {
     published: Arc<std::sync::atomic::AtomicU64>,
     /// Per-node failures from the pass, for the canvas badges.
     node_errors: crate::eval_errors::NodeErrors,
+    /// Per-node non-fatal messages from the pass — status bar only.
+    node_warnings: crate::eval_errors::NodeErrors,
     /// Status-bar queue the same failures are announced on.
     notices: crate::storage_ops::Notices,
 }
@@ -615,10 +624,16 @@ impl EvalTask {
             if let Ok(report) = evaluate_dirty(&mut g, &self.registry) {
                 let pass = crate::eval_errors::PassOutcome {
                     failures: crate::eval_errors::messages_for(&report, &self.registry),
+                    warnings: crate::eval_errors::warnings_for(&report, &self.registry),
                     succeeded: &report.walked,
                     live: &g.nodes().map(|n| n.id).collect(),
                 };
-                crate::eval_errors::record(&self.node_errors, &self.notices, pass);
+                crate::eval_errors::record(
+                    &self.node_errors,
+                    &self.node_warnings,
+                    &self.notices,
+                    pass,
+                );
             }
             self.pick_display_mesh(&g)
         };
@@ -763,6 +778,7 @@ impl Clone for AppState {
             pending_ops: self.pending_ops.clone(),
             notices: self.notices.clone(),
             node_errors: self.node_errors.clone(),
+            node_warnings: self.node_warnings.clone(),
             last_notice: self.last_notice.clone(),
         }
     }
