@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use atomartist_lib::geometry::Geometry3d;
 use atomartist_lib::graph::node::NodeId;
 
-use crate::camera::OrbitCamera;
+use crate::camera::{CameraPose, OrbitCamera};
 use crate::camera_animations::{CameraPoseAnimation, ProjectionAnimation};
 use crate::scene_renderer::RenderStyle;
 
@@ -111,6 +111,18 @@ pub struct ViewportInputs {
     /// edge, Z drags snap the body's bottom position, height drags
     /// snap the size.
     pub snap_amount: Arc<Mutex<f64>>,
+    /// The pose the **current document** was first framed at, or `None`
+    /// while it has never been framed.
+    ///
+    /// This slot is the auto-frame gate *and* its record: the viewport
+    /// frames the first geometry it sees only while the slot is empty,
+    /// and writes the resulting pose into it. A host therefore gets both
+    /// behaviours for free — filling the slot from a project's saved
+    /// `cameraState` suppresses the auto-frame that would otherwise
+    /// overwrite the restored view, and clearing it (File > New) re-arms
+    /// the framing for the next geometry. Mirrors NodeDesigner's
+    /// `initialPosition` / `initialTarget`.
+    pub camera_framed: Arc<Mutex<Option<CameraPose>>>,
 }
 
 impl ViewportInputs {
@@ -135,6 +147,7 @@ impl ViewportInputs {
             write_node_number: None,
             write_node_number_and_matrix: None,
             snap_amount: Arc::new(Mutex::new(0.0)),
+            camera_framed: Arc::new(Mutex::new(None)),
         }
     }
 

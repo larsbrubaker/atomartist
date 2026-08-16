@@ -7,7 +7,7 @@ use std::f32::consts::PI;
 
 use glam::{Quat, Vec3};
 
-use super::{orientation_for_view_direction, OrbitCamera, OrbitMode, Projection};
+use super::{orientation_for_view_direction, CameraPose, OrbitCamera, OrbitMode, Projection};
 use crate::camera_animations::{CameraPoseAnimation, ProjectionAnimation};
 
 /// Default home pose: MatterCAD's `ResetView()` rotates world
@@ -226,6 +226,83 @@ fn projection_animation_preserves_visible_height_mid_tween() {
         ref_half_h,
         mid_half_h
     );
+}
+
+/// `pose()` is the eye / target pair, and `set_pose` puts the camera
+/// back on it — the round trip a saved `cameraState` depends on.
+#[test]
+fn pose_round_trips_through_set_pose() {
+    let mut c = OrbitCamera::default();
+    c.center = [3.0, -4.0, 5.0];
+    c.radius = 87.0;
+    c.orbit(0.4, 0.2);
+    let pose = c.pose();
+
+    let mut restored = OrbitCamera::default();
+    assert!(restored.set_pose(pose));
+    let back = restored.pose();
+    for k in 0..3 {
+        assert!(
+            (back.position[k] - pose.position[k]).abs() < 1e-2,
+            "eye {:?} vs {:?}",
+            back.position,
+            pose.position
+        );
+        assert!((back.target[k] - pose.target[k]).abs() < 1e-4);
+    }
+    assert!((restored.radius - 87.0).abs() < 1e-2, "distance survives");
+}
+
+/// Documented limitation: a pose is two points, so roll is lost — the
+/// restored camera's up vector is level with the bed. Pinned so the
+/// behaviour can't change silently (a saved `up` would be the fix).
+#[test]
+fn set_pose_restores_a_level_horizon_and_loses_roll() {
+    let mut rolled = OrbitCamera::default();
+    // Roll about the view axis: the up vector tips away from world +Z.
+    rolled.orientation = (rolled.orientation * Quat::from_rotation_z(0.6)).normalize();
+    let rolled_up = rolled.orientation * glam::Vec3::Y;
+
+    let mut restored = OrbitCamera::default();
+    assert!(restored.set_pose(rolled.pose()));
+    let restored_up = restored.orientation * glam::Vec3::Y;
+
+    // Same eye and target...
+    for k in 0..3 {
+        assert!((restored.pose().position[k] - rolled.pose().position[k]).abs() < 1e-2);
+    }
+    // ...but the horizon is level again: the restored up is the one with
+    // the larger world-Z component of the two.
+    assert!(
+        restored_up.z > rolled_up.z + 1e-3,
+        "expected the roll to be dropped: {restored_up:?} vs {rolled_up:?}"
+    );
+}
+
+/// A degenerate pose is refused rather than silently producing a
+/// zero-radius camera — the caller needs to know so it doesn't record
+/// the document as "framed".
+#[test]
+fn set_pose_refuses_degenerate_and_non_finite_poses() {
+    let mut c = OrbitCamera::default();
+    let before = c.pose();
+
+    assert!(!c.set_pose(CameraPose {
+        position: [1.0, 2.0, 3.0],
+        target: [1.0, 2.0, 3.0],
+    }));
+    assert!(!c.set_pose(CameraPose {
+        position: [f32::NAN, 0.0, 0.0],
+        target: [0.0, 0.0, 0.0],
+    }));
+    assert!(!c.set_pose(CameraPose {
+        position: [f32::INFINITY, 0.0, 0.0],
+        target: [0.0, 0.0, 0.0],
+    }));
+
+    let after = c.pose();
+    assert_eq!(after.position, before.position);
+    assert_eq!(after.target, before.target);
 }
 
 #[test]

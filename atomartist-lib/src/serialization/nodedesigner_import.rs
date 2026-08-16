@@ -417,7 +417,14 @@ fn import_scene(scene: NdScene, registry: &NodeRegistry) -> LoadResult {
     // the conversion path above.
     let _ = PortValue::None;
 
-    LoadResult { graph, warnings }
+    LoadResult {
+        graph,
+        warnings,
+        // NodeDesigner scenes are *imported into* the current session,
+        // not opened as documents, so their view is deliberately not
+        // adopted (see `view_state`'s restore rules).
+        view: None,
+    }
 }
 
 #[cfg(test)]

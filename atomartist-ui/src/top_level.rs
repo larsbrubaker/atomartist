@@ -120,6 +120,21 @@ pub fn build_app(
                 }
             }),
     );
+    // Step 6h-3: the navigation cluster (home + Select/Pan/Zoom) floats
+    // over the canvas pane's top-left corner. A `Stack` is the right
+    // container because the cluster's `hit_test` is true only over its
+    // own buttons — everywhere else the press reaches the editor
+    // underneath, exactly like the floating-overlay host.
+    let canvas: Box<dyn Widget> = Box::new(
+        Stack::new()
+            .with_h_anchor(HAnchor::STRETCH)
+            .with_v_anchor(VAnchor::STRETCH)
+            .add(canvas)
+            .add(Box::new(crate::graph_nav::GraphNavCluster::new(
+                state.node_editor.clone(),
+            ))),
+    );
+
     // Step 6f-1: the favorites bar is docked on the *3-D viewport's* left
     // edge. Its favourites are parts — they belong to the model, not to
     // the graph — and the node canvas keeps its full width. The viewport
@@ -217,7 +232,11 @@ pub fn build_app(
     // 60% of the height (matching NodeDesigner's default).
     let split: Box<dyn Widget> = Box::new(
         Splitter::vertical(viewport, canvas)
-            .with_ratio(0.6)
+            // The handle is the authority (it is seeded with
+            // `DEFAULT_DIVIDER_RATIO`); a project's saved
+            // `divider_position` writes it and the splitter adopts that
+            // on its next layout.
+            .with_ratio_handle(state.divider_ratio.clone())
             .with_h_anchor(HAnchor::STRETCH)
             .with_v_anchor(VAnchor::STRETCH),
     );

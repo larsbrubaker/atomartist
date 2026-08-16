@@ -60,6 +60,21 @@ pub enum OrbitMode {
     Trackball,
 }
 
+/// Where the camera is, as a world-space eye + look-at pair.
+///
+/// The orbit camera's own state (`center` / `radius` / `orientation`) is
+/// a rendering convenience; a *pose* is what a document persists, what a
+/// host hands around, and what a different camera implementation could
+/// still consume. Mirrors NodeDesigner's saved `cameraState.position` /
+/// `.target`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CameraPose {
+    /// World-space eye position.
+    pub position: [f32; 3],
+    /// World-space point the camera looks at (the orbit centre).
+    pub target: [f32; 3],
+}
+
 #[derive(Clone, Debug)]
 pub struct OrbitCamera {
     pub center: [f32; 3],
@@ -216,6 +231,47 @@ impl OrbitCamera {
         }
         let snap = Quat::from_rotation_arc(cam_up, Vec3::Z);
         self.orientation = (snap * self.orientation).normalize();
+    }
+
+    /// The camera as an eye / target pair — the persistable, renderer-
+    /// agnostic description of where the view is (see [`CameraPose`]).
+    pub fn pose(&self) -> CameraPose {
+        CameraPose {
+            position: self.eye(),
+            target: self.center,
+        }
+    }
+
+    /// Move the camera to `pose`, keeping `fov_y`, `projection` and
+    /// `orbit_mode` as they are.
+    ///
+    /// **Roll is not restored.** A pose is two points, so the orientation
+    /// is rebuilt with [`orientation_for_view_direction`]'s level-horizon
+    /// up-hint — a trackball view that was rolled comes back level. That
+    /// is the same trade NodeDesigner's saved `cameraState` makes (it
+    /// stores `position` + `target` and restores through `lookAt`), and
+    /// keeping the file format compatible with it is worth more than the
+    /// roll of an unusual view.
+    ///
+    /// Returns `false` — leaving the camera untouched — for a
+    /// **degenerate** pose: eye and target coincident (no view direction
+    /// to rebuild an orientation from) or either point non-finite. A
+    /// caller that records "this document has been framed" must gate
+    /// that on the return value, or a corrupt file pins the default
+    /// camera forever.
+    #[must_use = "a degenerate pose is refused; the caller must notice"]
+    pub fn set_pose(&mut self, pose: CameraPose) -> bool {
+        let eye = Vec3::from(pose.position);
+        let target = Vec3::from(pose.target);
+        let back = eye - target;
+        let radius = back.length();
+        if !radius.is_finite() || radius < 1e-4 {
+            return false;
+        }
+        self.center = pose.target;
+        self.radius = radius;
+        self.orientation = orientation_for_view_direction(back.to_array());
+        true
     }
 
     /// Reset the orbit pose to the default 3/4 view (used by the Home

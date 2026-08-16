@@ -68,6 +68,13 @@ pub const SEARCH: char = '\u{f002}'; // fa-search (the search box's leading glyp
 pub const TIMES_CIRCLE: char = '\u{f057}'; // fa-times-circle (round "clear the search")
 pub const HOURGLASS: char = '\u{f254}'; // fa-hourglass (a listing still in flight)
 
+// Node-canvas navigation cluster (design §5d, step 6h-3): the home
+// button plus the Select / Pan / Zoom mode group.
+pub const HOME: char = '\u{f015}'; // fa-home ("Reset graph view")
+pub const MOUSE_POINTER: char = '\u{f245}'; // fa-mouse-pointer (Select mode)
+pub const ARROWS: char = '\u{f047}'; // fa-arrows (Pan mode — the move cursor)
+pub const SEARCH_PLUS: char = '\u{f00e}'; // fa-search-plus (Zoom mode)
+
 /// Every icon constant paired with its name. The coverage test iterates this,
 /// so adding a new icon above without listing it here (or with a code point
 /// absent from the font) fails loudly.
@@ -105,6 +112,10 @@ pub(crate) const ALL_ICONS: &[(&str, char)] = &[
     ("SEARCH", SEARCH),
     ("TIMES_CIRCLE", TIMES_CIRCLE),
     ("HOURGLASS", HOURGLASS),
+    ("HOME", HOME),
+    ("MOUSE_POINTER", MOUSE_POINTER),
+    ("ARROWS", ARROWS),
+    ("SEARCH_PLUS", SEARCH_PLUS),
 ];
 
 #[cfg(test)]

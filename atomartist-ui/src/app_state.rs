@@ -20,8 +20,12 @@ use atomartist_lib::registry::NodeRegistry;
 use atomartist_lib::serialization::{ChangeTracker, SavedBaseline};
 use atomartist_lib::Graph;
 use atomartist_renderer::{
-    CameraPoseAnimation, OrbitCamera, ProjectionAnimation, RenderStyle, ViewportTool,
+    CameraPose, CameraPoseAnimation, OrbitCamera, ProjectionAnimation, RenderStyle, ViewportTool,
 };
+
+/// Fraction of the window height the 3-D viewport (top) pane gets before
+/// any project has said otherwise — NodeDesigner's default split.
+pub const DEFAULT_DIVIDER_RATIO: f64 = 0.6;
 
 /// One drilled-in editing level on the component-navigation stack.
 ///
@@ -138,6 +142,18 @@ pub struct AppState {
     /// `projection` ease over ~0.25 s instead of snapping. Mirrors
     /// MatterCAD's `TrackballTumbleWidgetExtended.DoSwitchToProjectionMode`.
     pub projection_animation: Arc<Mutex<Option<ProjectionAnimation>>>,
+    /// The pose the open document was first framed at — `None` until
+    /// some geometry has been auto-framed (or a project carrying a saved
+    /// `cameraState` has been opened). Shared with the viewport widget,
+    /// which uses it as its auto-frame gate; see
+    /// [`ViewportInputs::camera_framed`](atomartist_renderer::ViewportInputs).
+    /// Persisted as `cameraState.initial_position` / `.initial_target`.
+    pub camera_framed: Arc<Mutex<Option<CameraPose>>>,
+    /// Live position of the viewport / canvas splitter, as the fraction
+    /// of the height going to the **viewport** (top) pane. Two-way: the
+    /// splitter publishes drags into it, and a write moves the divider on
+    /// the next layout. Persisted per project as `divider_position`.
+    pub divider_ratio: agg_gui::SplitterRatio,
     /// Bytes for every asset embedded in the project (`MeshNode` assets,
     /// future images, etc.). Saved alongside `graph.json` inside the
     /// `.atmr` zip. Cloned via `Arc` so background threads can read
@@ -283,6 +299,8 @@ impl AppState {
             snap_amount: Arc::new(Mutex::new(1.0)),
             camera_animation: Arc::new(Mutex::new(None)),
             projection_animation: Arc::new(Mutex::new(None)),
+            camera_framed: Arc::new(Mutex::new(None)),
+            divider_ratio: agg_gui::SplitterRatio::new(DEFAULT_DIVIDER_RATIO),
             assets: Arc::new(Mutex::new(
                 atomartist_lib::serialization::AssetStore::new(),
             )),
@@ -689,6 +707,10 @@ impl Clone for AppState {
             snap_amount: self.snap_amount.clone(),
             camera_animation: self.camera_animation.clone(),
             projection_animation: self.projection_animation.clone(),
+            camera_framed: self.camera_framed.clone(),
+            // Shared, not copied: the splitter installed in the tree and
+            // every clone that saves / restores it must be the same cell.
+            divider_ratio: self.divider_ratio.clone(),
             assets: self.assets.clone(),
             latest_thumbnail: self.latest_thumbnail.clone(),
             theme: self.theme.clone(),

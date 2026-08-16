@@ -312,12 +312,21 @@ impl Viewport3dWidget {
         if !mn[0].is_finite() || !mx[0].is_finite() {
             return;
         }
-        let is_first_mesh = self.last_aabb.is_none();
         self.last_aabb = Some((mn, mx));
-        if is_first_mesh {
-            // First mesh ever — fit the view so the user has
-            // something visible to start from.
-            self.cam_mut(|c| c.fit_to_bounds(mn, mx));
+        // The auto-frame gate is the shared `camera_framed` slot, not a
+        // per-widget "have I seen a mesh" flag: the widget outlives the
+        // document, so a flag would frame only the first project of the
+        // session and a project that arrives with a saved camera would
+        // be framed over. Empty slot = this document has never been
+        // framed, so frame it now and record where.
+        let already_framed = self.inputs.camera_framed.lock().unwrap().is_some();
+        if !already_framed {
+            let pose = {
+                let mut cam = self.inputs.camera.lock().unwrap();
+                cam.fit_to_bounds(mn, mx);
+                cam.pose()
+            };
+            *self.inputs.camera_framed.lock().unwrap() = Some(pose);
         }
     }
 

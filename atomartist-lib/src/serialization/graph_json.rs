@@ -27,6 +27,7 @@ use crate::graph::graph::{Noodle, NoodleEndpoint, Graph};
 use crate::graph::node::{NodeId, NodeInstance, PortValue};
 use crate::graph::socket::{Socket, SocketUid};
 use crate::registry::NodeRegistry;
+use crate::serialization::view_state::ProjectView;
 use crate::socket_types::SocketType;
 
 #[derive(Serialize, Deserialize, Debug, Default)]
@@ -39,6 +40,14 @@ pub struct GraphFile {
     pub next_socket_uid: u64,
     pub nodes: Vec<NodeFile>,
     pub noodles: Vec<NoodleFile>,
+    /// Where the user was looking when the project was written — canvas
+    /// pan/zoom, splitter position, camera. Absent on every graph the
+    /// *engine* serializes: [`save_graph`] leaves it `None` so the
+    /// change-detection payload (and therefore the dirty bit) never
+    /// moves when the user merely pans. Only the project encoder fills
+    /// it in. See [`crate::serialization::view_state`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<ProjectView>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -202,6 +211,8 @@ pub fn save_graph(graph: &Graph) -> GraphFile {
         next_socket_uid: graph.peek_next_socket_uid(),
         nodes,
         noodles,
+        // Never here — see the field's documentation.
+        view: None,
     }
 }
 
@@ -211,6 +222,10 @@ pub fn save_graph(graph: &Graph) -> GraphFile {
 pub struct LoadResult {
     pub graph: Graph,
     pub warnings: Vec<String>,
+    /// The file's view state, if it carried any. `None` for a project
+    /// saved before views were persisted — callers leave their view
+    /// alone in that case rather than resetting it.
+    pub view: Option<ProjectView>,
 }
 
 /// Reconstruct a `Graph` from a `GraphFile`. Unknown nodes are skipped
@@ -311,12 +326,29 @@ pub fn load_graph(file: GraphFile, registry: &NodeRegistry) -> LoadResult {
         });
     }
 
-    LoadResult { graph, warnings }
+    LoadResult {
+        graph,
+        warnings,
+        view: file.view,
+    }
 }
 
 /// Serialize a graph to a pretty-printed JSON string.
+///
+/// Carries **no** view state — this is the canonical form the
+/// unsaved-changes tracker compares, and a view move must not read as an
+/// edit. Use [`graph_to_json_string_with_view`] when writing a project.
 pub fn graph_to_json_string(graph: &Graph) -> String {
     serde_json::to_string_pretty(&save_graph(graph)).unwrap_or_else(|_| "{}".into())
+}
+
+/// [`graph_to_json_string`] plus the project's view state. An empty (or
+/// `None`) view produces byte-identical output to the plain encoder, so
+/// projects that have no view to save keep their old bytes.
+pub fn graph_to_json_string_with_view(graph: &Graph, view: Option<&ProjectView>) -> String {
+    let mut file = save_graph(graph);
+    file.view = view.filter(|v| !v.is_empty()).cloned();
+    serde_json::to_string_pretty(&file).unwrap_or_else(|_| "{}".into())
 }
 
 /// Parse a JSON string back into a `LoadResult`.
@@ -353,7 +385,7 @@ mod tests {
         g.connect(Noodle::new(a, out_a, b, in_b), &reg).unwrap();
 
         let json = graph_to_json_string(&g);
-        let LoadResult { graph: g2, warnings } = graph_from_json_str(&json, &reg).unwrap();
+        let LoadResult { graph: g2, warnings, .. } = graph_from_json_str(&json, &reg).unwrap();
         assert!(warnings.is_empty(), "warnings: {:?}", warnings);
         assert_eq!(g2.node_count(), 2);
         assert_eq!(g2.noodle_count(), 1);
@@ -389,7 +421,7 @@ mod tests {
         g.set_property(id, "matrix", PortValue::Matrix4x4(m)).unwrap();
 
         let json = graph_to_json_string(&g);
-        let LoadResult { graph: g2, warnings } = graph_from_json_str(&json, &reg).unwrap();
+        let LoadResult { graph: g2, warnings, .. } = graph_from_json_str(&json, &reg).unwrap();
         assert!(warnings.is_empty(), "warnings: {:?}", warnings);
 
         let restored = g2.nodes().find(|n| n.type_id.as_ref() == "Extrude").unwrap();

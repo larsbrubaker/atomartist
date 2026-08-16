@@ -20,17 +20,18 @@ pub mod mesh_mcx;
 pub mod mesh_obj;
 pub mod nodedesigner_import;
 pub mod thumbnail;
+pub mod view_state;
 
 pub use asset_store::{AssetEntry, AssetRef, AssetStore};
 pub use change_detection::{ChangeTracker, SavedBaseline};
 pub use atmr::{
     read_graph_json_from_atmr, read_project_from_bytes, write_atmr_into,
     write_atmr_into_with_thumbnail, write_project_to_bytes, write_project_to_bytes_with_thumbnail,
-    AtmrError, GRAPH_ENTRY_NAME, PROJECT_EXTENSION,
+    write_project_to_bytes_with_view, AtmrError, GRAPH_ENTRY_NAME, PROJECT_EXTENSION,
 };
 pub use graph_json::{
-    graph_from_json_str, graph_to_json_string, load_graph, save_graph, GraphFile, JsonPortValue,
-    LoadResult, SCHEMA_VERSION,
+    graph_from_json_str, graph_to_json_string, graph_to_json_string_with_view, load_graph,
+    save_graph, GraphFile, JsonPortValue, LoadResult, SCHEMA_VERSION,
 };
 pub use mesh_3mf::{export_3mf, import_3mf, ThreemfError};
 pub use mesh_mcx::{import_mcx, McxError, McxPart};
@@ -38,3 +39,4 @@ pub use mesh_io::{export_stl, import_stl, StlError};
 pub use mesh_obj::{export_obj, import_obj, ObjError};
 pub use nodedesigner_import::import_nodedesigner_scene_str;
 pub use thumbnail::{read_thumbnail_from_bytes, THUMBNAIL_ENTRY_NAME};
+pub use view_state::{clamp_divider, CameraState, CanvasView, ProjectView};

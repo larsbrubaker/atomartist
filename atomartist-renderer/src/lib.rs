@@ -61,7 +61,7 @@ pub mod scene_renderer;
 pub mod tumble_cube;
 pub mod viewport_widget;
 
-pub use camera::{OrbitCamera, OrbitMode, Projection};
+pub use camera::{CameraPose, OrbitCamera, OrbitMode, Projection};
 pub use camera_animations::{CameraPoseAnimation, OrientAnimation, ProjectionAnimation};
 pub use picking::{
     project_to_view_plane, raycast_mesh, resolve_pivot_or_fallback, HitPlane, PivotResolution,

@@ -11,6 +11,7 @@ pub mod app_state_files;
 pub mod app_state_files_import;
 pub mod app_state_model;
 pub mod app_state_storage;
+pub mod app_state_view;
 pub mod breadcrumb_bar;
 pub mod circular_dropdown;
 pub mod circular_icon_button;
@@ -27,6 +28,7 @@ mod favorites_strip;
 pub mod file_browser;
 pub mod first_paint;
 pub mod floating_overlay;
+pub mod graph_nav;
 pub mod icons;
 pub mod mattercad_icons;
 pub mod menu_actions;
@@ -56,6 +58,7 @@ pub use drag_insert_ghost::{DragGhost, GHOST_ID as DRAG_GHOST_ID};
 pub use favorites_bar::{FavoritesBar, BAR_ID as FAVORITES_BAR_ID, EMBEDDED_BROWSER_ID};
 pub use first_paint::FirstPaintGate;
 pub use floating_overlay::{FloatingOverlayHandle, FloatingOverlayHost};
+pub use graph_nav::GraphNavCluster;
 pub use node_helpers::add_node_with_defaults;
 pub use node_insertion::{
     auto_connect_to_output, find_position_left_of_output, position_for_insertion, NodeBox,

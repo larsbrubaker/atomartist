@@ -38,10 +38,15 @@ fn node_bounds(h: &TestHarness, node_id: NodeId) -> Option<Rect> {
     })
 }
 
-/// Screen point (Y-down) on a node's title bar — centred so we clear the
-/// collapse chevron on the far left and miss the interior value rows.
+/// Screen point (Y-down) on a node's title bar.
+///
+/// Deliberately at 85 % of the width rather than the middle: it has to
+/// clear the collapse chevron on the far left, miss the interior value
+/// rows, *and* stay out from under the graph-navigation cluster (step
+/// 6h-3), which floats over the pane's top-left 184 × 52 px and so
+/// covers the left of the starter graph's first node.
 fn title_bar_point(sb: Rect) -> (f64, f64) {
-    let wx = sb.x + sb.width * 0.5;
+    let wx = sb.x + sb.width * 0.85;
     let wy = sb.y + sb.height - TITLE_HEIGHT * 0.5;
     (wx, DEFAULT_HEIGHT - wy)
 }

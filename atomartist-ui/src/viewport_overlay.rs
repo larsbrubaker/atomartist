@@ -131,6 +131,11 @@ pub fn build_viewport_overlay(state: AppState, font: Arc<Font>) -> Box<dyn Widge
         // Same cell the toolbar's snap dropdown edits — the drag
         // handlers read it live, so a snap change applies immediately.
         snap_amount: state.snap_amount.clone(),
+        // Auto-frame gate + record (step 6h-4): the viewport frames the
+        // first geometry of a document only while this is empty, and a
+        // project opened with a saved `cameraState` arrives with it
+        // already filled.
+        camera_framed: state.camera_framed.clone(),
     };
     let cube_inputs = TumbleCubeInputs {
         camera: state.camera.clone(),

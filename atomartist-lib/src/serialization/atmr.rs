@@ -61,9 +61,10 @@ use crate::graph::graph::Graph;
 use crate::registry::NodeRegistry;
 use crate::serialization::asset_store::AssetStore;
 use crate::serialization::graph_json::{
-    graph_from_json_str, graph_to_json_string, LoadResult,
+    graph_from_json_str, graph_to_json_string_with_view, LoadResult,
 };
 use crate::serialization::thumbnail::THUMBNAIL_ENTRY_NAME;
+use crate::serialization::view_state::ProjectView;
 
 /// Conventional file extension for an AtomArtist project file. Lowercase
 /// — callers that need to match user-typed extensions should compare
@@ -143,7 +144,24 @@ pub fn write_project_to_bytes_with_thumbnail(
     assets: &AssetStore,
     thumbnail_png: Option<&[u8]>,
 ) -> Result<Vec<u8>, AtmrError> {
-    let json = graph_to_json_string(graph);
+    write_project_to_bytes_with_view(graph, assets, thumbnail_png, None)
+}
+
+/// [`write_project_to_bytes_with_thumbnail`] plus the per-project view
+/// state (canvas pan/zoom, splitter, camera — see
+/// [`crate::serialization::view_state`]).
+///
+/// This is the full project encoder; the two shorter spellings above
+/// exist for the many callers with no view to save (importers, tests,
+/// headless tools). Passing `None` — or an empty [`ProjectView`] —
+/// produces bytes identical to those encoders.
+pub fn write_project_to_bytes_with_view(
+    graph: &Graph,
+    assets: &AssetStore,
+    thumbnail_png: Option<&[u8]>,
+    view: Option<&ProjectView>,
+) -> Result<Vec<u8>, AtmrError> {
+    let json = graph_to_json_string_with_view(graph, view);
     let cursor = write_atmr_into_with_thumbnail(
         Cursor::new(Vec::new()),
         &json,
@@ -241,6 +259,7 @@ mod tests {
     use std::io::Cursor;
 
     use crate::graph::graph::Graph;
+    use crate::serialization::graph_json::graph_to_json_string;
 
     fn empty_registry() -> NodeRegistry { NodeRegistry::new() }
 
@@ -365,6 +384,51 @@ mod tests {
         // files and hashes don't move.
         let plain = write_project_to_bytes(&Graph::new(), &AssetStore::new()).expect("write");
         assert_eq!(with_none, plain);
+    }
+
+    /// View state rides in the project bytes and comes back out on read.
+    #[test]
+    fn view_state_round_trips_through_a_project() {
+        use crate::serialization::view_state::{CameraState, CanvasView};
+
+        let view = ProjectView {
+            view_state: Some(CanvasView { scale: 0.85, offset: [120.0, -40.0] }),
+            divider_position: Some(0.42),
+            camera_state: Some(CameraState {
+                position: [60.0, -80.0, 45.0],
+                target: [1.0, 2.0, 3.0],
+                initial_position: Some([10.0, 20.0, 30.0]),
+                initial_target: Some([0.0, 0.0, 0.0]),
+            }),
+        };
+        let bytes =
+            write_project_to_bytes_with_view(&Graph::new(), &AssetStore::new(), None, Some(&view))
+                .expect("write with view");
+
+        let reg = empty_registry();
+        let (load, _) = read_project_from_bytes(&bytes, &reg).expect("read");
+        assert_eq!(load.view.as_ref(), Some(&view));
+    }
+
+    /// A project with nothing to say about its view is byte-identical to
+    /// one written by the plain encoder — old files and their hashes
+    /// don't move, and a graph-only save can't smuggle a view in.
+    #[test]
+    fn an_empty_view_writes_the_same_bytes_as_no_view() {
+        let plain = write_project_to_bytes(&Graph::new(), &AssetStore::new()).expect("write");
+        let with_none = write_project_to_bytes_with_view(
+            &Graph::new(),
+            &AssetStore::new(),
+            None,
+            Some(&ProjectView::default()),
+        )
+        .expect("write empty view");
+        assert_eq!(plain, with_none);
+
+        // …and such a project reads back with no view at all.
+        let reg = empty_registry();
+        let (load, _) = read_project_from_bytes(&plain, &reg).expect("read");
+        assert!(load.view.is_none(), "missing view must stay missing");
     }
 
     #[test]

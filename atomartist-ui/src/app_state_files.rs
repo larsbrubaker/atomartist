@@ -37,7 +37,7 @@ use atomartist_storage::StorageUri;
 use atomartist_lib::nodes::mesh::mesh_node;
 use atomartist_lib::serialization::{
     export_3mf, export_obj, export_stl, read_project_from_bytes,
-    write_project_to_bytes_with_thumbnail, ChangeTracker,
+    write_project_to_bytes_with_view, ChangeTracker,
 };
 use atomartist_lib::Graph;
 
@@ -82,6 +82,10 @@ impl AppState {
         // before the shell's next capture would bake it into the new
         // project's file.
         self.clear_thumbnail_png();
+        // Step 6h-4: New resets *camera positioning* only — the canvas
+        // pan/zoom and the splitter are workspace, not document, and
+        // NodeDesigner leaves both alone here.
+        self.reset_camera_positioning();
         self.mark_saved_baseline();
         self.mark_viewport_dirty();
     }
@@ -211,6 +215,10 @@ impl AppState {
         self.clear_thumbnail_png();
         self.mark_saved_baseline();
         self.note_recent_project(uri);
+        // Where the user was looking when they saved. Absent groups
+        // leave the live view alone; an absent camera re-arms the
+        // auto-frame below (see `app_state_view`).
+        self.apply_project_view(result.view.as_ref());
         // Pick a default display node — the highest-id node with a
         // Geometry3d output, matching what evaluate_now does.
         *self.display_node.lock().unwrap() = None;
@@ -274,11 +282,21 @@ impl AppState {
         // independent slot the shell fills from its paint loop, and
         // taking it first keeps the graph lock's scope to serialization.
         let thumbnail = self.thumbnail_png();
+        // Read before the graph lock, like the preview: the view lives in
+        // its own slots and the baseline below must describe the *graph*
+        // only — view state is deliberately outside it, which is what
+        // keeps a pan from marking the project dirty.
+        let view = self.current_project_view();
         let (bytes, baseline) = {
             let graph = self.graph.lock().unwrap();
             let assets = self.assets.lock().unwrap();
             (
-                write_project_to_bytes_with_thumbnail(&graph, &assets, thumbnail.as_deref()),
+                write_project_to_bytes_with_view(
+                    &graph,
+                    &assets,
+                    thumbnail.as_deref(),
+                    Some(&view),
+                ),
                 ChangeTracker::baseline_of(&graph),
             )
         };
@@ -454,10 +472,11 @@ impl AppState {
     /// baseline all stay put, unlike [`Self::save_project`].
     pub fn export_project_copy_to_uri(&self, uri: &StorageUri) {
         let thumbnail = self.thumbnail_png();
+        let view = self.current_project_view();
         let bytes = {
             let graph = self.graph.lock().unwrap();
             let assets = self.assets.lock().unwrap();
-            write_project_to_bytes_with_thumbnail(&graph, &assets, thumbnail.as_deref())
+            write_project_to_bytes_with_view(&graph, &assets, thumbnail.as_deref(), Some(&view))
         };
         match bytes {
             Ok(bytes) => self.submit_write(uri, bytes, "Exporting"),
