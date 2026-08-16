@@ -6,6 +6,8 @@
 //! 96 × 96 PNG would break on any framing tweak and tell us nothing
 //! about what actually went wrong.
 
+use std::collections::HashMap;
+
 use super::*;
 
 /// A cube spanning `-half ..= half` on every axis, wound
@@ -42,8 +44,16 @@ fn cube(half: f32) -> Vec<Triangle> {
 
 const GREY: [f32; 4] = [0.8, 0.8, 0.8, 1.0];
 
-/// A base colour dark enough that shading differences survive the
-/// clamp — `GREY` saturates to white under the key light.
+/// The base colour the shade-comparison pins below are written against.
+///
+/// It used to be here to dodge the clamp — before the Lambert BRDF's
+/// `1/π` landed (6h-1), `GREY` reached `0.8 · 1.89 = 1.51` under the key
+/// light and saturated to white on several orientations, hiding the very
+/// differences those tests assert. Nothing clamps any more: the brightest
+/// face of a `GREY` cube is now `0.8 · 0.6014 = 0.48`. `DIM` stays
+/// because it keeps those pins in the low mid-tones (linear ≈ 0.13–0.17,
+/// encoded ≈ 100–113), where the sRGB curve is steep enough that a small
+/// Lambert difference is tens of byte steps apart rather than one or two.
 const DIM: [f32; 4] = [0.25, 0.25, 0.25, 1.0];
 
 fn render_cube() -> IconImage {
@@ -99,28 +109,48 @@ fn cube_fills_a_reasonable_share_of_the_frame() {
 }
 
 /// Faceted, not smooth: the three visible faces of a cube must land on
-/// three distinct shades (per-face normals — the ancestor's explicit
-/// `toNonIndexed` + `computeVertexNormals`).
+/// three distinct *flat* shades (per-face normals — the ancestor's
+/// explicit `toNonIndexed` + `computeVertexNormals`).
+///
+/// Counted by area, not by distinct value: the supersampled resolve
+/// blends across the two interior silhouette edges, so a handful of
+/// pixels legitimately sit between two face shades. A smooth-shaded blob
+/// would instead spread its pixels over dozens of values with no shade
+/// owning a meaningful share.
 #[test]
 fn cube_faces_get_distinct_flat_shades() {
     let img = render_cube();
-    let mut shades: Vec<u8> = img
+    let opaque: Vec<u8> = img
         .rgba
         .chunks_exact(4)
         .filter(|p| p[3] == 255)
         .map(|p| p[0])
         .collect();
-    shades.sort_unstable();
-    shades.dedup();
-    assert!(
-        shades.len() >= 3,
-        "expected three flat face shades, saw {shades:?}"
+    assert!(!opaque.is_empty(), "the cube must cover some pixels");
+    let mut histogram: HashMap<u8, usize> = HashMap::new();
+    for shade in &opaque {
+        *histogram.entry(*shade).or_default() += 1;
+    }
+    // A face of a fitted cube owns roughly a third of the silhouette;
+    // 5 % is well above any edge-blend bucket and well below that.
+    let floor = opaque.len() / 20;
+    let mut major: Vec<u8> = histogram
+        .iter()
+        .filter(|(_, count)| **count > floor)
+        .map(|(shade, _)| *shade)
+        .collect();
+    major.sort_unstable();
+    assert_eq!(
+        major.len(),
+        3,
+        "expected three flat face shades, saw {major:?} of {histogram:?}"
     );
-    // …and only a handful: a smooth-shaded blob would produce dozens.
+    // …and together they are nearly the whole silhouette.
+    let flat: usize = major.iter().map(|s| histogram[s]).sum();
     assert!(
-        shades.len() <= 6,
-        "expected flat faces, saw {} distinct shades",
-        shades.len()
+        flat as f64 / opaque.len() as f64 > 0.95,
+        "flat faces covered only {flat} of {} opaque pixels",
+        opaque.len()
     );
 }
 
@@ -192,8 +222,9 @@ fn nearer_geometry_wins_the_depth_test() {
     // renderer's two-sided flip does not change the normal under it.
     let tilted = glam::Vec3::new(0.9, -0.2, 1.0).normalize();
     assert!(tilted.dot(dir) > 0.0, "the far quad must face the camera");
-    // A dim base colour: GREY under two lights clamps to white on both
-    // orientations, which would hide the very difference under test.
+    // `DIM` rather than `GREY` — see its docs. The two orientations
+    // shade 0.166 vs 0.127 linear (encoded 113 vs 100), so the centre
+    // pixel names which quad won by a comfortable margin.
     let near_shade = shade(DIM, dir);
     let far_shade = shade(DIM, tilted);
     assert!(
@@ -270,6 +301,81 @@ fn lit_pixels_are_srgb_encoded_not_raw() {
         p[0] as i32 - raw as i32 > 30,
         "encoding must lift the midtone: encoded {} vs raw {raw}",
         p[0]
+    );
+}
+
+/// The exact bytes NodeDesigner's icon renderer produces for a Box, pinned.
+///
+/// # Derivation (three 0.182, `node_modules/three`)
+///
+/// `MeshLambertMaterial` is a physical shader in this release: the light
+/// uniforms carry `colour · intensity` with no π compensation
+/// (`renderers/webgl/WebGLLights.js:263` ambient, `:281` directional —
+/// `useLegacyLights` / `physicallyCorrectLights` are gone, and ND sets
+/// neither), `getAmbientLightIrradiance` passes the ambient colour
+/// straight through (`ShaderChunk/lights_pars_begin.glsl.js:48`), and
+/// both `RE_Direct_Lambert` and `RE_IndirectDiffuse_Lambert` multiply
+/// their irradiance by `BRDF_Lambert`
+/// (`ShaderChunk/lights_lambert_pars_fragment.glsl.js:13-23`), which is
+/// `RECIPROCAL_PI · diffuseColor` (`ShaderChunk/common.glsl.js:94`).
+/// `ShaderLib/meshlambert.glsl.js:113` sums the two diffuse terms, `:117`
+/// tone-maps (no-op — the renderer defaults to `NoToneMapping`) and
+/// `:118` applies the sRGB OETF. With `ColorManagement.enabled = false`
+/// (`rendering/three-viewer.js:14`) the material colour is the raw sRGB
+/// triple. Hence, per face:
+///
+/// ```text
+/// srgb_encode( tint · (0.55 + 1.6·dotNL_key + 0.5·dotNL_fill) / π )
+/// ```
+///
+/// with `key = normalize(-40, -60, 80)` and `fill = normalize(60, -20, 20)`.
+/// Evaluated for `#FE8D86` = (254, 141, 134):
+///
+/// ```text
+/// face   lambert   L/π      expected byte triple
+/// +X     1.0023   0.3190    (153, 117, 114)
+/// -X     1.1442   0.3642    (162, 124, 121)
+/// +Y     0.5500   0.1751    (116,  88,  86)   ambient only
+/// -Y     1.5921   0.5068    (188, 144, 141)
+/// +Z     1.8892   0.6014    (203, 156, 152)
+/// -Z     0.5500   0.1751    (116,  88,  86)   ambient only
+/// ```
+///
+/// Before this pin the `1/π` was missing, and the same faces came out
+/// (255, 196, 192) / (255, 208, 204) / (195, 150, 146) / (255, 241, 236)
+/// / (255, 255, 254) / (195, 150, 146) — a near-white wash instead of the
+/// ancestor's reddish-brown box.
+#[test]
+fn box_faces_match_node_designers_shading_numbers() {
+    // MatterCAD's `Cube` tint, #FE8D86, as authored.
+    let tint = [254.0 / 255.0, 141.0 / 255.0, 134.0 / 255.0, 1.0];
+    let expected: [(Vec3, [u8; 3]); 6] = [
+        (Vec3::X, [153, 117, 114]),
+        (Vec3::NEG_X, [162, 124, 121]),
+        (Vec3::Y, [116, 88, 86]),
+        (Vec3::NEG_Y, [188, 144, 141]),
+        (Vec3::Z, [203, 156, 152]),
+        (Vec3::NEG_Z, [116, 88, 86]),
+    ];
+    for (normal, want) in expected {
+        let lit = shade(tint, normal);
+        let got = [to_srgb_u8(lit[0]), to_srgb_u8(lit[1]), to_srgb_u8(lit[2])];
+        assert_eq!(got, want, "face {normal:?} shaded {lit:?}");
+    }
+}
+
+/// The `1/π` itself: the ambient-only face must be exactly
+/// `tint · 0.55 / π`, not `tint · 0.55`. Pins the normalization
+/// independently of the byte-level table above, so a future lighting
+/// tweak cannot quietly drop it.
+#[test]
+fn every_light_term_passes_through_the_lambert_brdf() {
+    // -Z faces away from both lights, so only the ambient term survives.
+    let lit = shade([1.0, 1.0, 1.0, 1.0], Vec3::NEG_Z);
+    let want = AMBIENT * std::f32::consts::FRAC_1_PI;
+    assert!(
+        (lit[0] - want).abs() < 1e-6,
+        "ambient-only face is {lit:?}, expected {want}"
     );
 }
 

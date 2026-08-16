@@ -36,6 +36,7 @@
 import init, {
   render,
   on_mouse_move,
+  on_mouse_leave,
   on_mouse_down,
   on_mouse_up,
   on_mouse_wheel,
@@ -79,6 +80,13 @@ async function main() {
     // to re-sync its own press counter, which would otherwise stay stuck
     // after a drag released outside the canvas.
     on_mouse_move(x, y, e.buttons);
+  });
+  // The pointer left the canvas: no further `mousemove` arrives, so
+  // hover state has to be cleared explicitly or a latched highlight (and
+  // its tooltip) sticks. `mouseleave`, not `mouseout` — the latter also
+  // fires when moving onto a child element.
+  canvas.addEventListener('mouseleave', () => {
+    on_mouse_leave();
   });
   // Modifier flags ride along with every button/wheel event. They come
   // from the event itself (not tracked key state) so they stay correct

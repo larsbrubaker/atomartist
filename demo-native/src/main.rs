@@ -12,9 +12,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use agg_gui::{
-    persistence::AutoSave, App, DrawCtx, Key, Modifiers, MouseButton,
-};
+use agg_gui::{persistence::AutoSave, App, DrawCtx, Modifiers};
 use atomartist_storage::{LocalFsProvider, StorageRegistry};
 use atomartist_ui::{
     build_app, fresh_state_with_starter_graph_and_storage, install_theme_and_fonts,
@@ -24,7 +22,7 @@ use demo_wgpu::WgpuGfxCtx;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Event, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
-use winit::window::{Window, WindowAttributes};
+use winit::window::WindowAttributes;
 
 mod close_gate;
 mod dialogs;
@@ -33,6 +31,7 @@ mod gpu;
 mod shell_settings;
 mod thumbnail_capture;
 mod wake;
+mod winit_input;
 
 use close_gate::{deferred_close_decision, DeferredClose};
 use dialogs::NativeDialogs;
@@ -42,70 +41,7 @@ use shell_settings::{
     compose_settings_blob, initial_normal_bounds, monitor_to_rect, settings_path,
     write_settings_blob,
 };
-
-
-fn translate_winit_button(b: winit::event::MouseButton) -> Option<MouseButton> {
-    use winit::event::MouseButton as W;
-    match b {
-        W::Left => Some(MouseButton::Left),
-        W::Middle => Some(MouseButton::Middle),
-        W::Right => Some(MouseButton::Right),
-        W::Other(n) => Some(MouseButton::Other(n as u8)),
-        _ => None,
-    }
-}
-
-fn translate_winit_key(key: &winit::keyboard::Key) -> Option<Key> {
-    use winit::keyboard::{Key as W, NamedKey};
-    match key {
-        W::Character(s) => s.chars().next().map(Key::Char),
-        W::Named(n) => match n {
-            NamedKey::Backspace => Some(Key::Backspace),
-            NamedKey::Delete => Some(Key::Delete),
-            NamedKey::Insert => Some(Key::Insert),
-            NamedKey::ArrowLeft => Some(Key::ArrowLeft),
-            NamedKey::ArrowRight => Some(Key::ArrowRight),
-            NamedKey::ArrowUp => Some(Key::ArrowUp),
-            NamedKey::ArrowDown => Some(Key::ArrowDown),
-            NamedKey::Home => Some(Key::Home),
-            NamedKey::End => Some(Key::End),
-            NamedKey::Tab => Some(Key::Tab),
-            NamedKey::Enter => Some(Key::Enter),
-            NamedKey::Escape => Some(Key::Escape),
-            NamedKey::Space => Some(Key::Char(' ')),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-/// Physical-pixel cursor position relative to the window's client
-/// area, queried live from the OS. Used by the file-drop handler
-/// because winit's tracked cursor is stale during an OLE drag (see
-/// the DroppedFile arm). Returns `None` off-Windows or when the
-/// window position is unavailable — callers fall back to the last
-/// tracked cursor position.
-#[cfg(target_os = "windows")]
-fn live_cursor_in_window(window: &Window) -> Option<(f64, f64)> {
-    use windows_sys::Win32::Foundation::POINT;
-    use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
-    let mut pt = POINT { x: 0, y: 0 };
-    // SAFETY: GetCursorPos writes into the POINT we own; no other
-    // preconditions.
-    if unsafe { GetCursorPos(&mut pt) } == 0 {
-        return None;
-    }
-    let client_origin = window.inner_position().ok()?;
-    Some((
-        (pt.x - client_origin.x) as f64,
-        (pt.y - client_origin.y) as f64,
-    ))
-}
-
-#[cfg(not(target_os = "windows"))]
-fn live_cursor_in_window(_window: &Window) -> Option<(f64, f64)> {
-    None
-}
+use winit_input::{live_cursor_in_window, translate_winit_button, translate_winit_key};
 
 /// Parsed CLI: `--screenshot <path>` exits after grabbing one frame.
 struct CliArgs {
@@ -493,6 +429,23 @@ fn main() {
                     cursor_x = position.x;
                     cursor_y = position.y;
                     app.on_mouse_move(cursor_x, cursor_y);
+                }
+                Event::WindowEvent {
+                    event: WindowEvent::CursorLeft { .. }, ..
+                } => {
+                    // The cursor left the window, so no further
+                    // `CursorMoved` arrives to clear hover state. Without
+                    // this, a widget that latches a hover flag (the
+                    // favourites bar's grip, for one) keeps its highlight
+                    // — and its tooltip — after a fast flick out of the
+                    // window. `on_mouse_leave` re-dispatches the (-1, -1)
+                    // sentinel move that every hover hit-test already
+                    // reads as "outside", and resets the cursor icon.
+                    //
+                    // Same no-explicit-redraw rule as `CursorMoved`: the
+                    // widget's own `request_draw` bumps the epoch when
+                    // something visible actually changed.
+                    app.on_mouse_leave();
                 }
                 Event::WindowEvent {
                     event: WindowEvent::MouseInput { state, button, .. }, ..

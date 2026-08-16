@@ -694,6 +694,26 @@ pub fn on_mouse_move(x: f64, y: f64, buttons: u32) {
     });
 }
 
+/// The pointer left the canvas — the browser's `mouseleave`.
+///
+/// No further `mousemove` arrives to clear hover state, so a widget that
+/// latches a hover flag (the favourites bar's grip, for one) would keep
+/// its highlight and its tooltip after a fast flick off the canvas.
+/// `App::on_mouse_leave` re-dispatches the `(-1, -1)` sentinel move that
+/// every hover hit-test already reads as "outside", and resets the cursor
+/// icon.
+///
+/// Deliberately paired with `mouseleave` and not `mouseout`: the latter
+/// bubbles and also fires when the pointer moves onto a child element.
+#[wasm_bindgen]
+pub fn on_mouse_leave() {
+    APP.with(|c| {
+        if let Some(app) = c.borrow_mut().as_mut() {
+            app.on_mouse_leave();
+        }
+    });
+}
+
 #[wasm_bindgen]
 pub fn on_mouse_down(x: f64, y: f64, button: u8, ctrl: bool, shift: bool, alt: bool, meta: bool) {
     CURSOR.with(|c| *c.borrow_mut() = (x, y));

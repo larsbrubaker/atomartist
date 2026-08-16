@@ -90,6 +90,15 @@
 //!   already there for it; the gesture belongs with the drag controller,
 //!   which owns the threshold / ghost machinery this would duplicate.
 //!
+//! # Where the rest of the bar lives
+//!
+//! This file is state, layout and assembly only. Its neighbours, split
+//! off to keep every one of them well under the 800-line cap:
+//! `favorites_bar_geom` (every rectangle), `favorites_bar_handle` (the
+//! gesture arithmetic), `favorites_bar_events` (all pointer handling —
+//! a *child* module, so it reaches the private fields), and
+//! `favorites_bar_paint` (drawing).
+//!
 //! # Coordinates
 //!
 //! Bar-local and Y-up; see [`crate::favorites_bar_geom`], which owns every
@@ -105,7 +114,7 @@ use atomartist_storage::StorageUri;
 
 use crate::app_state::AppState;
 use crate::app_state_storage::uri_extension;
-use crate::drag_insert::{DragInsertHandle, GestureEnd};
+use crate::drag_insert::DragInsertHandle;
 use crate::favorites_bar_geom::{self as geom, BarLayout, COLLAPSED_W};
 use crate::favorites_bar_handle::{clamp_panel, HandleGesture};
 use crate::favorites_bar_host::PaneRect;
@@ -115,6 +124,11 @@ use crate::file_browser::model::BrowserModel;
 use crate::file_browser::thumbs::ThumbnailCache;
 use crate::file_browser::widget::{BrowserMode, FileBrowser};
 use crate::top_menu_bar::FileDialogProvider;
+
+// Pointer handling lives next door but stays a *child* module, so its
+// handlers can touch this struct's private fields. See its docs.
+#[path = "favorites_bar_events.rs"]
+mod events;
 
 /// Widget id of the bar itself — the harness and the inspector look it up
 /// with this (design §6).
@@ -181,6 +195,10 @@ pub struct FavoritesBar {
     /// Whether the pin-current-project item was offered this frame.
     show_pin: bool,
     drag: Option<HandleGesture>,
+    /// Whether the pointer is inside the 16 × 56 grip. Drives the grip's
+    /// accent highlight and its tooltip; deliberately *only* the grip,
+    /// since 6g-2 gave the handle no width of its own.
+    handle_hovered: bool,
     /// Drag-insert controller shared with the embedded browser (step
     /// 6e). `None` when the host never supplied one (unit tests that
     /// build a bare bar) — the bar then behaves exactly as it did
@@ -234,6 +252,7 @@ impl FavoritesBar {
             items: Vec::new(),
             show_pin: false,
             drag: None,
+            handle_hovered: false,
             insert: None,
             scroll: 0.0,
             pressed_item: None,
@@ -422,150 +441,6 @@ impl FavoritesBar {
     /// [`favorites_bar_host`](crate::favorites_bar_host).
     fn viewport_rect_local(&self, bar: Size) -> Option<Rect> {
         crate::favorites_bar_host::viewport_rect_local(self.pane.get(), bar.width)
-    }
-
-    fn on_mouse_down(&mut self, pos: Point) -> EventResult {
-        if self.layout.handle.contains(pos) {
-            // A press that starts a *different* gesture takes over the
-            // mouse capture, so the drag-insert in flight would never
-            // see its release: end it here rather than orphan whatever
-            // it was carrying.
-            if let Some(insert) = self.insert.clone() {
-                insert.cancel();
-            }
-            self.pressed_item = None;
-            self.drag = Some(HandleGesture::begin(pos.x, self.panel_width()));
-            return EventResult::Consumed;
-        }
-        if let Some(index) = self.item_at(pos) {
-            // Activation is deferred to the release: this press may
-            // still turn into a drag, and a drag must not *also* open
-            // the project it was carrying.
-            self.pressed_item = self
-                .items
-                .get(index)
-                .map(|item| (item.kind, item.stable_key.clone()));
-            let payload = self.items.get(index).and_then(StripItem::payload);
-            if let (Some(insert), Some(payload)) = (self.insert.clone(), payload) {
-                insert.press(payload, pos);
-            }
-            return EventResult::Consumed;
-        }
-        if self.layout.pin.is_some_and(|rect| rect.contains(pos)) {
-            self.pin_current_project();
-            return EventResult::Consumed;
-        }
-        // The bar is opaque chrome: a click on its background must not
-        // fall through to whatever is behind it.
-        EventResult::Consumed
-    }
-
-    /// Wheel over the strip scrolls the favourites (ND's
-    /// `overflow-y: auto`). agg-gui's sign convention: positive
-    /// `delta_y` means "show me what is above", i.e. *decrease* the
-    /// offset. The clamp is re-applied every layout, so a wheel spun
-    /// against a short palette does nothing at all.
-    fn on_wheel(&mut self, pos: Point, delta_y: f64) -> EventResult {
-        if !self.layout.strip.contains(pos) || self.max_scroll() <= 0.0 {
-            return EventResult::Ignored;
-        }
-        let next = (self.scroll - delta_y * SCROLL_STEP).clamp(0.0, self.max_scroll());
-        if next != self.scroll {
-            self.scroll = next;
-            agg_gui::animation::request_draw();
-        }
-        EventResult::Consumed
-    }
-
-    /// Furthest the strip may scroll at the size it was last laid out
-    /// at. Zero whenever every favourite already fits.
-    fn max_scroll(&self) -> f64 {
-        geom::max_scroll(
-            Size::new(self.bounds.width, self.bounds.height),
-            self.items.len(),
-            self.show_pin,
-        )
-    }
-
-    fn on_mouse_move(&mut self, pos: Point) -> EventResult {
-        let Some(drag) = self.drag.as_mut() else {
-            // No handle gesture — the press may instead be a
-            // drag-insert (a favourite on its way to the canvas).
-            if let Some(insert) = self.insert.clone() {
-                if insert.pointer_move(pos) {
-                    return EventResult::Consumed;
-                }
-            }
-            return EventResult::Ignored;
-        };
-        if !drag.pointer_x(pos.x) {
-            // Still inside the toggle threshold: the release will be a
-            // click, and there is nothing to redraw.
-            return EventResult::Consumed;
-        }
-        // Pull-open: a rightward drag out of the collapsed bar opens the
-        // panel as it sizes. The *width* is deliberately not committed
-        // here — see [`FavoritesBar::on_mouse_up`]. Mid-drag the panel
-        // renders the gesture's raw width anyway, so the user still sees
-        // it follow the pointer.
-        if drag.wants_open() {
-            self.set_expanded(true);
-        }
-        agg_gui::animation::request_draw();
-        EventResult::Consumed
-    }
-
-    /// End of the gesture — and the only place the stored width moves.
-    ///
-    /// Committing on each `MouseMove` looks equivalent and is not: a drag
-    /// that closes the panel sweeps through every width on its way down,
-    /// so the last one above the threshold would be written just before
-    /// the release. "Snap closed keeps the stored width" would then mean
-    /// "keeps ≈120 px", not the width the user actually sized to. So a
-    /// released-narrow gesture writes nothing at all and the previous
-    /// size stands.
-    fn on_mouse_up(&mut self, pos: Point) -> EventResult {
-        let Some(drag) = self.drag.take() else {
-            // Drag-insert release: a sub-threshold press is still the
-            // item's click, anything else was handled by the controller.
-            let pressed = self.pressed_item.take();
-            if let Some(insert) = self.insert.clone() {
-                match insert.pointer_up(pos) {
-                    GestureEnd::Click => {
-                        if let Some(key) = pressed {
-                            self.activate_item(&key);
-                        }
-                        return EventResult::Consumed;
-                    }
-                    GestureEnd::Dropped | GestureEnd::Cancelled => {
-                        agg_gui::animation::request_draw();
-                        return EventResult::Consumed;
-                    }
-                    GestureEnd::None => {}
-                }
-            }
-            // No controller attached: keep the pre-drag-insert behaviour
-            // of activating the pressed item.
-            if let Some(key) = pressed {
-                self.activate_item(&key);
-                return EventResult::Consumed;
-            }
-            return EventResult::Ignored;
-        };
-        if !drag.is_resizing() {
-            // A press released in place is the toggle.
-            let expanded = self.expanded();
-            self.set_expanded(!expanded);
-        } else if drag.wants_open() {
-            self.set_expanded(true);
-            self.set_stored_width(clamp_panel(drag.raw(), self.max_panel_width()));
-        } else {
-            // Snap closed — and keep the stored width, so the next open
-            // is the size the user had chosen.
-            self.set_expanded(false);
-        }
-        agg_gui::animation::request_draw();
-        EventResult::Consumed
     }
 }
 
@@ -761,6 +636,14 @@ impl Widget for FavoritesBar {
                     .as_ref()
                     .is_some_and(|d| d.is_resizing())
                     .to_string(),
+            ),
+            // Whether the grip is drawn highlighted — the pointer is on
+            // it, or a resize it started is still in flight (6h-2).
+            ("handle_hovered", self.handle_hovered().to_string()),
+            // The hover help the grip is currently offering, if any.
+            (
+                "handle_tooltip",
+                self.base.tooltip.clone().unwrap_or_default(),
             ),
         ]
     }

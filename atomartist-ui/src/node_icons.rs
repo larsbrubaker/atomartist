@@ -62,14 +62,16 @@ const MAX_TRIANGLES: usize = 50_000;
 
 /// Bumped whenever [`crate::mesh_raster`]'s output changes, so no icon
 /// produced by an older rendering rule can be served. 2 = the sRGB
-/// output encode (step 6g-3).
+/// output encode (step 6g-3); 3 = the Lambert BRDF's `1/π` on every
+/// light term, matching three's physical `MeshLambertMaterial` (step
+/// 6h-1).
 ///
 /// The cache below is in-memory and process-scoped, so today this can
 /// never actually differ within a run — it is in the key so the
 /// invalidation contract is already there if these renders ever gain a
 /// persistent tier, the way the browser's thumbnails did
 /// (`file_browser::thumbs::CACHE_VERSION`).
-pub const RENDER_VERSION: u32 = 2;
+pub const RENDER_VERSION: u32 = 3;
 
 /// Cache key: the type id, the pixel size it was rasterized at, and the
 /// [`RENDER_VERSION`] that produced it. The size is part of the key

@@ -352,6 +352,86 @@ fn the_width_cap_reapplies_when_the_pane_matches_the_bar() {
     );
 }
 
+// ── Handle: hover highlight and tooltip (6h-2) ──────────────────────────
+
+/// The grip lights up only while the pointer is **on it**. Since 6g-2 the
+/// handle reserves no width, so a hover anywhere else in the strip — where
+/// the old full-height lane used to be — must leave it cold.
+#[test]
+fn only_the_grip_itself_takes_the_hover_highlight() {
+    let mut h = TestHarness::with_starter_graph();
+    let grip = handle_center(&h);
+    let (gx, gy) = h.to_screen(grip);
+    h.mouse_move(gx, gy);
+    assert_eq!(
+        prop(&h, BAR_ID, "handle_hovered"),
+        "true",
+        "the pointer is on the grip"
+    );
+
+    // Same column, well above the 56 px grip: strip, not handle.
+    let bar = rect_of(&h, BAR_ID);
+    let (sx, sy) = h.to_screen(Point::new(grip.x, bar.y + bar.height - 8.0));
+    h.mouse_move(sx, sy);
+    assert_eq!(
+        prop(&h, BAR_ID, "handle_hovered"),
+        "false",
+        "above the grip is the strip, not the handle"
+    );
+}
+
+/// The hover help is the ancestor's, and it names the action the click
+/// will take: `parts-bar.js` swaps `handle.title` on every toggle.
+#[test]
+fn the_grip_offers_the_ancestors_tooltip_for_its_current_state() {
+    let mut h = TestHarness::with_starter_graph();
+    let grip = handle_center(&h);
+    let (gx, gy) = h.to_screen(grip);
+
+    h.mouse_move(gx, gy);
+    assert!(!expanded(&h), "the bar starts collapsed");
+    assert_eq!(
+        prop(&h, BAR_ID, "handle_tooltip"),
+        "Show library (drag to resize)"
+    );
+
+    // Click to open — the tip has to follow the state, not the widget.
+    h.click_local(grip, MouseButton::Left);
+    assert!(expanded(&h));
+    assert_eq!(
+        prop(&h, BAR_ID, "handle_tooltip"),
+        "Hide library (drag to resize)"
+    );
+
+    // Off the grip the bar offers no hover help at all, so a strip item
+    // never inherits the handle's tip.
+    let bar = rect_of(&h, BAR_ID);
+    let (sx, sy) = h.to_screen(Point::new(grip.x, bar.y + bar.height - 8.0));
+    h.mouse_move(sx, sy);
+    assert_eq!(prop(&h, BAR_ID, "handle_tooltip"), "");
+}
+
+/// The visual rework changed no geometry: the handle is still the
+/// ancestor's 16 × 56 tab flush with the strip's outer edge, hovered or
+/// not, and painting it either way is clean.
+#[test]
+fn the_hover_rework_leaves_the_grip_geometry_alone() {
+    let mut h = TestHarness::with_starter_graph();
+    let bar = rect_of(&h, BAR_ID);
+    let layout = bar_geom::compute(Size::new(bar.width, bar.height), false, 0, false, 0.0);
+    assert_eq!(layout.handle.width, HANDLE_W);
+    assert_eq!(layout.handle.height, bar_geom::HANDLE_H);
+    assert_eq!(layout.handle.x + layout.handle.width, COLLAPSED_W);
+
+    // Paint smoke, cold and hot: the grip's path is hand-built (rounded
+    // on the protruding side only), so both branches get exercised.
+    h.paint_once();
+    let (gx, gy) = h.to_screen(handle_center(&h));
+    h.mouse_move(gx, gy);
+    assert_eq!(prop(&h, BAR_ID, "handle_hovered"), "true");
+    h.paint_once();
+}
+
 // ── Expanded panel ──────────────────────────────────────────────────────
 
 /// The panel hosts the shared browser in its embedded face — under its own

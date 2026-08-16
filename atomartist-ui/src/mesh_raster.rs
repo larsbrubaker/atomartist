@@ -32,29 +32,75 @@
 //!
 //! NodeDesigner's icon renderer is a plain `THREE.WebGLRenderer`, and the
 //! app sets `THREE.ColorManagement.enabled = false`
-//! (`rendering/three-viewer.js`) — so a `THREE.Color("#fe8d86")` keeps its
-//! raw sRGB components, the Lambert term multiplies *those*, and the
+//! (`rendering/three-viewer.js:14`) — so a `THREE.Color("#fe8d86")` keeps
+//! its raw sRGB components, the Lambert term multiplies *those*, and the
 //! renderer's default `outputColorSpace = SRGBColorSpace` then encodes the
 //! result linear→sRGB on the way to the framebuffer (`getTransfer` ignores
 //! the `enabled` flag, so the output encode still runs). The net pipeline
 //! is therefore `srgb_encode(tint · lambert)`, not `tint · lambert`.
 //!
-//! We used to write `tint · lambert` straight out, which is the same
-//! picture only where `lambert ≈ 1`; everywhere else it read darker and
-//! far more saturated. Measured on a Box (MatterCAD's `Cube` tint,
-//! `#FE8D86`), old → new:
+//! # The icons do *not* use the ancestor's viewer pipeline
+//!
+//! Worth stating plainly, because it is the obvious wrong guess: ND's
+//! main 3-D viewer does **not** use stock three materials. It builds a
+//! hand-written `THREE.ShaderMaterial`
+//! (`rendering/depth-peeling.js:1012`, `createDepthPeelMaterial`) that
+//! deliberately emulates OpenGL's fixed-function pipeline with
+//! MatterControl's `LightingData.cs` numbers — everything in gamma
+//! space, no `1/π`, no output encode (its renderer is set to
+//! `LinearSRGBColorSpace`, `rendering/three-viewer.js:150`). Bed
+//! geometry goes through it via `geometry-renderer.js:353`.
+//!
+//! The **icon** renderer shares none of that. `parts-bar-icons.js` is
+//! self-contained: it imports only `three` and the primitive generators
+//! (lines 11-24), builds its *own* `WebGLRenderer` (line 70) which
+//! therefore keeps three's default `outputColorSpace = SRGBColorSpace`
+//! (`WebGLRenderer.js:300`), its own scene and lights (lines 80-86), and
+//! a stock `new THREE.MeshLambertMaterial` (line 104). No material
+//! factory, and nothing anywhere in ND patches
+//! `MeshLambertMaterial.prototype`. So the icon math below really is
+//! stock three, and this module is right to model it that way.
+//!
+//! # The Lambert BRDF's `1/π` — why the rig is dimmer than it reads
+//!
+//! `MeshLambertMaterial` in three ≥ r155 is a *physical* shader: light
+//! intensities are irradiance and are pushed through the Lambert BRDF,
+//! which normalizes by π. Traced through three 0.182 (ND's
+//! `node_modules/three`):
+//!
+//! * `renderers/webgl/WebGLLights.js:263` (ambient accumulate) and `:281`
+//!   (directional) multiply colour by intensity and nothing else — the
+//!   `useLegacyLights` / `physicallyCorrectLights` π-compensation is gone
+//!   from this release, and ND never referenced either flag.
+//! * `ShaderChunk/lights_pars_begin.glsl.js:48` —
+//!   `getAmbientLightIrradiance` returns the ambient colour unchanged.
+//! * `ShaderChunk/lights_lambert_pars_fragment.glsl.js:13-23` —
+//!   `RE_Direct_Lambert` forms `irradiance = saturate(dot(N,L)) · light`
+//!   and both it and `RE_IndirectDiffuse_Lambert` finish with
+//!   `irradiance * BRDF_Lambert(diffuseColor)`.
+//! * `ShaderChunk/common.glsl.js:94` — `BRDF_Lambert(c) = RECIPROCAL_PI · c`.
+//! * `ShaderLib/meshlambert.glsl.js:113` sums direct + indirect diffuse;
+//!   `:117` tone-maps (a no-op: the default is `NoToneMapping`) and `:118`
+//!   applies `linearToOutputTexel`, i.e. the sRGB OETF.
+//!
+//! So the ancestor's per-face value is
+//! `srgb_encode(tint · (0.55 + 1.6·dotNL_key + 0.5·dotNL_fill) / π)` —
+//! the same Lambert sum this module already computed, divided by π.
+//! Dropping the `1/π` made every icon roughly three stops too bright, so
+//! the tint clipped toward white instead of staying saturated. Measured
+//! on a Box (MatterCAD's `Cube` tint `#FE8D86`), the three faces the
+//! camera sees, without the `1/π` → with it:
 //!
 //! ```text
-//! face            lambert   tint·lambert    srgb_encode(tint·lambert)
-//! ambient only      0.55    (140,  78,  74)   (195, 150, 146)
-//! -X (key light)    1.14    (255, 161, 153)   (255, 208, 203)
-//! -Y (front)        1.59    (255, 225, 213)   (255, 241, 236)
+//! face            lambert   L/π     no 1/π (wrong)     with 1/π (ND)
+//! -X (key side)    1.1442  0.3642   (255, 208, 204)    (162, 124, 121)
+//! -Y (front)       1.5921  0.5068   (255, 241, 236)    (188, 144, 141)
+//! +Z (top)         1.8892  0.6014   (255, 255, 254)    (203, 156, 152)
 //! ```
 //!
-//! Average saturation over the covered pixels of the 96 px Box icon
-//! halves, 0.15 → 0.07. The encode happens where the supersampled
-//! buffer resolves into bytes (`SampleBuffer::resolve`), and it is what
-//! makes an AtomArtist icon read as softly as its ancestor's.
+//! i.e. a near-white wash becomes the reddish-brown box the ancestor
+//! shows. The division lives in [`shade`]; the encode happens where the
+//! supersampled buffer resolves into bytes (`SampleBuffer::resolve`).
 //!
 //! # Two-sided shading instead of back-face culling
 //!
@@ -133,6 +179,10 @@ const AMBIENT: f32 = 0.55;
 const KEY_LIGHT: ([f32; 3], f32) = ([-40.0, -60.0, 80.0], 1.6);
 /// Fill light, same convention.
 const FILL_LIGHT: ([f32; 3], f32) = ([60.0, -20.0, 20.0], 0.5);
+/// The Lambert BRDF's normalization, `BRDF_Lambert`'s `RECIPROCAL_PI`
+/// (three `ShaderChunk/common.glsl.js:94`). Every light term — ambient
+/// included — passes through it; see the module docs.
+const RECIPROCAL_PI: f32 = std::f32::consts::FRAC_1_PI;
 
 /// One world-space triangle: three positions, no normals (they are
 /// computed per face — see the module docs).
@@ -260,17 +310,19 @@ pub fn render_mesh_icon(triangles: &[Triangle], color: [f32; 4], size: u32) -> O
 }
 
 /// Lambert shading: ambient plus the two directional lights, each
-/// `intensity · max(dot(N, L), 0)`, applied to the base colour and
-/// clamped. Only RGB comes out: transparency in an icon is *coverage*,
-/// so `color`'s alpha is deliberately dropped and a lit pixel is always
-/// opaque. Translucent tints would need blending in the depth loop and
-/// are not supported.
+/// `intensity · max(dot(N, L), 0)`, the sum divided by π (the Lambert
+/// BRDF's normalization — see the module docs), applied to the base
+/// colour and clamped. Only RGB comes out: transparency in an icon is
+/// *coverage*, so `color`'s alpha is deliberately dropped and a lit pixel
+/// is always opaque. Translucent tints would need blending in the depth
+/// loop and are not supported.
 fn shade(color: [f32; 4], normal: Vec3) -> [f32; 3] {
     let mut lambert = AMBIENT;
     for (pos, intensity) in [KEY_LIGHT, FILL_LIGHT] {
         let l = Vec3::from_array(pos).normalize_or_zero();
         lambert += intensity * normal.dot(l).max(0.0);
     }
+    let lambert = lambert * RECIPROCAL_PI;
     [
         (color[0] * lambert).clamp(0.0, 1.0),
         (color[1] * lambert).clamp(0.0, 1.0),
