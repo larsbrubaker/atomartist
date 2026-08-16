@@ -37,7 +37,7 @@ fn box_transform_graph() -> (Graph, NodeRegistry, NodeId) {
 #[test]
 fn box_through_transform_produces_translated_mesh() {
     let (mut g, reg, xform_id) = box_transform_graph();
-    evaluate_all(&mut g, &reg).unwrap();
+    evaluate_all(&mut g, &reg).unwrap().expect_clean();
 
     let out_uid = g.get(xform_id).unwrap().output_by_name("out").unwrap().uid;
     let out = g.get(xform_id).unwrap()
@@ -98,7 +98,7 @@ fn rectangle_through_extrude_produces_solid() {
     let in_e = g.get(e).unwrap().input_by_name("Paths").unwrap().uid;
     g.connect(Noodle::new(r, out_r, e, in_e), &reg).unwrap();
 
-    atomartist_lib::graph::executor::evaluate_all(&mut g, &reg).unwrap();
+    atomartist_lib::graph::executor::evaluate_all(&mut g, &reg).unwrap().expect_clean();
     let geo_uid = g.get(e).unwrap().output_by_name("Geometry").unwrap().uid;
     match g.get(e).unwrap().cached_outputs.get(&geo_uid) {
         Some(PortValue::Geometry3d(geo)) => {
@@ -140,7 +140,7 @@ fn combine_two_boxes_via_executor() {
     let slot_2 = g.get(c).unwrap().inputs.last().unwrap().uid;
     g.connect(Noodle::new(b, out_b, c, slot_2), &reg).unwrap();
 
-    evaluate_all(&mut g, &reg).unwrap();
+    evaluate_all(&mut g, &reg).unwrap().expect_clean();
     let out_c = g.get(c).unwrap().output_by_name("out").unwrap().uid;
     match g.get(c).unwrap().cached_outputs.get(&out_c) {
         Some(PortValue::Geometry3d(geo)) => {

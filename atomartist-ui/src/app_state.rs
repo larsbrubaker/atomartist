@@ -229,6 +229,12 @@ pub struct AppState {
     /// outside the widget tree and so have no dialog provider to talk
     /// to. Drained by the UI on its next paint.
     pub(crate) notices: crate::storage_ops::Notices,
+    /// Message per node that refused to evaluate in the most recent
+    /// pass — the badge source for
+    /// [`node_views`](crate::app_state_model::node_views) and, via
+    /// [`crate::eval_errors::record`], the status bar. Empty while the
+    /// graph evaluates cleanly.
+    pub(crate) node_errors: crate::eval_errors::NodeErrors,
     /// The most recent drained [`Notice`](crate::storage_ops::Notice),
     /// kept so the status bar has something to paint after the queue is
     /// emptied. Written by
@@ -316,6 +322,7 @@ impl AppState {
             storage,
             pending_ops: Arc::new(Mutex::new(Vec::new())),
             notices: Arc::new(Mutex::new(Vec::new())),
+            node_errors: Arc::new(Mutex::new(std::collections::HashMap::new())),
             last_notice: Arc::new(Mutex::new(None)),
         }
     }
@@ -462,7 +469,18 @@ impl AppState {
             display_node: self.display_node.clone(),
             ticket: 1 + self.eval_ticket.fetch_add(1, Ordering::Relaxed),
             published: self.eval_published.clone(),
+            node_errors: self.node_errors.clone(),
+            notices: self.notices.clone(),
         }
+    }
+
+    /// Snapshot of every currently-failing node, keyed by node id, with
+    /// the message the canvas badges and the status bar shows.
+    pub fn node_errors_snapshot(&self) -> std::collections::HashMap<NodeId, String> {
+        self.node_errors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Set the display target — the canvas calls this when the user
@@ -579,13 +597,29 @@ struct EvalTask {
     ticket: u64,
     /// Highest ticket already published — guards the result store.
     published: Arc<std::sync::atomic::AtomicU64>,
+    /// Per-node failures from the pass, for the canvas badges.
+    node_errors: crate::eval_errors::NodeErrors,
+    /// Status-bar queue the same failures are announced on.
+    notices: crate::storage_ops::Notices,
 }
 
 impl EvalTask {
     fn run(self) {
         let mesh = {
             let mut g = self.graph.lock().unwrap();
-            let _ = evaluate_dirty(&mut g, &self.registry);
+            // A node that refuses no longer takes the pass down with it
+            // (see `executor::run_pass`); we collect what failed and
+            // hand it to the two user-facing surfaces. A *graph*-level
+            // error (a cycle) leaves the previous error set alone —
+            // nothing was evaluated, so nothing changed.
+            if let Ok(report) = evaluate_dirty(&mut g, &self.registry) {
+                let pass = crate::eval_errors::PassOutcome {
+                    failures: crate::eval_errors::messages_for(&report, &self.registry),
+                    succeeded: &report.walked,
+                    live: &g.nodes().map(|n| n.id).collect(),
+                };
+                crate::eval_errors::record(&self.node_errors, &self.notices, pass);
+            }
             self.pick_display_mesh(&g)
         };
         {
@@ -728,6 +762,7 @@ impl Clone for AppState {
             // same in-flight operations the shell's pump drains.
             pending_ops: self.pending_ops.clone(),
             notices: self.notices.clone(),
+            node_errors: self.node_errors.clone(),
             last_notice: self.last_notice.clone(),
         }
     }

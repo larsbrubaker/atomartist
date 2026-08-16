@@ -18,6 +18,7 @@ pub mod circular_icon_button;
 pub mod debug_windows;
 pub mod drag_insert;
 pub mod drag_insert_ghost;
+pub mod eval_errors;
 pub mod fa;
 pub mod favorites_bar;
 pub mod favorites_bar_geom;

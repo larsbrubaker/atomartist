@@ -17,8 +17,20 @@
 //!     loaded, or after structural changes that invalidate the cache.
 //!   - `evaluate_dirty`: walks only nodes flagged `dirty` and propagates
 //!     their newly-computed outputs to downstream nodes.
+//!
+//! # A refused node does not stop the pass
+//!
+//! Node failures are *collected*, not propagated: a node whose
+//! `evaluate` returns `Err` is recorded in [`EvalReport::failures`] and
+//! the walk continues with every node that does not depend on it. Only
+//! the failed node's transitive dependents are skipped (recorded in
+//! [`EvalReport::skipped`]), and they keep their previously cached
+//! outputs — stale-but-visible beats a viewport that empties because one
+//! operand of one Boolean was refused. Graph-level problems (a cycle, a
+//! missing node) still abort the pass as `Err`, since there is no
+//! meaningful partial answer for those.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::graph::graph::{Graph, GraphError};
@@ -28,8 +40,15 @@ use crate::registry::{EvalCtx, NodeError, NodeInputs, NodeOutputs, NodePropertie
 #[derive(Clone, Debug)]
 pub enum ExecuteError {
     Graph(GraphError),
-    Node { node: NodeId, type_id: Arc<str>, error: NodeError },
-    UnknownNodeType { node: NodeId, type_id: Arc<str> },
+    Node {
+        node: NodeId,
+        type_id: Arc<str>,
+        error: NodeError,
+    },
+    UnknownNodeType {
+        node: NodeId,
+        type_id: Arc<str>,
+    },
     CycleDetected,
 }
 
@@ -37,7 +56,11 @@ impl std::fmt::Display for ExecuteError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ExecuteError::Graph(e) => write!(f, "{}", e),
-            ExecuteError::Node { node, type_id, error } => {
+            ExecuteError::Node {
+                node,
+                type_id,
+                error,
+            } => {
                 write!(f, "node {} ({}) failed: {}", node.0, type_id, error)
             }
             ExecuteError::UnknownNodeType { node, type_id } => {
@@ -50,28 +73,90 @@ impl std::fmt::Display for ExecuteError {
 
 impl std::error::Error for ExecuteError {}
 
-/// Walk every node in topological order. Returns the topo-sorted list of
-/// `NodeId`s for callers (e.g. tests, or the UI to indicate progress).
-pub fn evaluate_all(graph: &mut Graph, registry: &NodeRegistry) -> Result<Vec<NodeId>, ExecuteError> {
-    let order = topo_sort(graph)?;
-    for &id in &order {
-        evaluate_one(graph, registry, id)?;
-        if let Some(n) = graph.get_mut(id) {
-            n.dirty = false;
-        }
+/// One node that refused to evaluate during a pass.
+///
+/// Carries enough for a host to both *find* the node (badge it on a
+/// canvas) and *describe* the failure (a status-bar message).
+#[derive(Clone, Debug)]
+pub struct NodeFailure {
+    pub node: NodeId,
+    pub type_id: Arc<str>,
+    /// The node's own message — already operand-naming for nodes that
+    /// bother (e.g. "input 'b' is not a closed solid").
+    pub message: String,
+}
+
+impl std::fmt::Display for NodeFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.type_id, self.message)
     }
-    Ok(order)
+}
+
+/// Outcome of one evaluation pass.
+#[derive(Clone, Debug, Default)]
+pub struct EvalReport {
+    /// Nodes that evaluated successfully, in topological order.
+    pub walked: Vec<NodeId>,
+    /// Nodes whose `evaluate` returned an error (or whose type is not
+    /// registered), in topological order.
+    pub failures: Vec<NodeFailure>,
+    /// Nodes not evaluated because something upstream failed. Their
+    /// `cached_outputs` are whatever the last good pass left there.
+    pub skipped: Vec<NodeId>,
+}
+
+impl EvalReport {
+    /// True when every node the pass touched produced a value.
+    pub fn is_clean(&self) -> bool {
+        self.failures.is_empty()
+    }
+
+    /// The recorded failure for `node`, if it failed this pass.
+    pub fn failure_for(&self, node: NodeId) -> Option<&NodeFailure> {
+        self.failures.iter().find(|f| f.node == node)
+    }
+
+    /// Panic unless every walked node produced a value, naming what
+    /// failed.
+    ///
+    /// Evaluation no longer returns `Err` for a node failure, so a bare
+    /// `evaluate_all(..).unwrap()` — which *was* the assertion in a lot
+    /// of tests — now succeeds on a broken graph. Chain this where the
+    /// point of the call is "and it all worked". Also useful to a host
+    /// that treats any node failure as fatal.
+    #[track_caller]
+    pub fn expect_clean(self) -> Self {
+        assert!(
+            self.failures.is_empty(),
+            "evaluation failed: {}",
+            self.failures
+                .iter()
+                .map(|f| f.to_string())
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+        self
+    }
+}
+
+/// Walk every node in topological order.
+pub fn evaluate_all(
+    graph: &mut Graph,
+    registry: &NodeRegistry,
+) -> Result<EvalReport, ExecuteError> {
+    let order = topo_sort(graph)?;
+    let all: HashSet<NodeId> = order.iter().copied().collect();
+    run_pass(graph, registry, order, &all)
 }
 
 /// Walk only dirty nodes (and their downstream dependents) in topological
 /// order. Skips clean upstream nodes whose outputs are already cached.
-pub fn evaluate_dirty(graph: &mut Graph, registry: &NodeRegistry) -> Result<Vec<NodeId>, ExecuteError> {
+pub fn evaluate_dirty(
+    graph: &mut Graph,
+    registry: &NodeRegistry,
+) -> Result<EvalReport, ExecuteError> {
     let order = topo_sort(graph)?;
-    let mut to_eval: std::collections::HashSet<NodeId> = graph
-        .nodes()
-        .filter(|n| n.dirty)
-        .map(|n| n.id)
-        .collect();
+    let mut to_eval: HashSet<NodeId> = graph.nodes().filter(|n| n.dirty).map(|n| n.id).collect();
     // Propagate "dirty" forward through the topo order: any node downstream
     // of a dirty node is also stale.
     for id in &order {
@@ -81,17 +166,94 @@ pub fn evaluate_dirty(graph: &mut Graph, registry: &NodeRegistry) -> Result<Vec<
             }
         }
     }
-    let mut walked = Vec::new();
+    run_pass(graph, registry, order, &to_eval)
+}
+
+/// Shared walk for both modes: evaluate each selected node in topological
+/// order, collecting per-node failures and skipping their dependents.
+///
+/// Every selected node ends the pass `dirty == false`, failed and skipped
+/// ones included. That is deliberate: leaving a broken node dirty would
+/// make it re-evaluate (and re-report) on every single tick while the
+/// graph stays broken. Because dirty propagates forward from whatever the
+/// user edits next, fixing the failed node re-evaluates its dependents
+/// anyway.
+///
+/// The blocked cone is seeded from [`NodeInstance::failed`], not just
+/// from failures observed in *this* pass: a node whose upstream failed
+/// two passes ago must still not evaluate against that upstream's stale
+/// outputs when the user edits it directly.
+fn run_pass(
+    graph: &mut Graph,
+    registry: &NodeRegistry,
+    order: Vec<NodeId>,
+    selected: &HashSet<NodeId>,
+) -> Result<EvalReport, ExecuteError> {
+    let mut report = EvalReport::default();
+    // Nodes with a failed ancestor. Because we walk in topological order,
+    // marking direct dependents as we pass each stalled node is enough to
+    // reach the whole downstream cone.
+    let mut blocked: HashSet<NodeId> = HashSet::new();
     for id in order {
-        if to_eval.contains(&id) {
-            evaluate_one(graph, registry, id)?;
-            if let Some(n) = graph.get_mut(id) {
-                n.dirty = false;
+        // A node still carrying a failure from an earlier pass poisons
+        // its dependents even when it isn't being re-walked now.
+        let already_failed = graph.get(id).is_some_and(|n| n.failed);
+        if already_failed && !selected.contains(&id) {
+            for e in graph.noodles().iter().filter(|e| e.from.node == id) {
+                blocked.insert(e.to.node);
             }
-            walked.push(id);
+            continue;
+        }
+        if !selected.contains(&id) {
+            continue;
+        }
+        let stalled = if blocked.contains(&id) {
+            report.skipped.push(id);
+            true
+        } else {
+            match evaluate_one(graph, registry, id) {
+                Ok(()) => {
+                    report.walked.push(id);
+                    false
+                }
+                Err(ExecuteError::Node {
+                    node,
+                    type_id,
+                    error,
+                }) => {
+                    report.failures.push(NodeFailure {
+                        node,
+                        type_id,
+                        message: error.to_string(),
+                    });
+                    true
+                }
+                Err(ExecuteError::UnknownNodeType { node, type_id }) => {
+                    report.failures.push(NodeFailure {
+                        node,
+                        message: format!("unknown node type '{}'", type_id),
+                        type_id,
+                    });
+                    true
+                }
+                // Graph-level problems have no partial answer.
+                Err(other) => return Err(other),
+            }
+        };
+        if stalled {
+            for e in graph.noodles().iter().filter(|e| e.from.node == id) {
+                blocked.insert(e.to.node);
+            }
+        }
+        // A skipped node is not itself broken — only its ancestor is —
+        // so `failed` records the node's *own* verdict.
+        let own_failure = report.failure_for(id).is_some();
+        if let Some(n) = graph.get_mut(id) {
+            n.dirty = false;
+            n.failed = own_failure;
         }
     }
-    Ok(walked)
+    Ok(report)
 }
 
 /// Evaluate one node: gather its inputs from upstream `cached_outputs`,
@@ -204,8 +366,12 @@ mod tests {
 
     struct AddNode;
     impl NodeDef for AddNode {
-        fn type_id(&self) -> &'static str { "Add" }
-        fn category(&self) -> &'static str { "Math" }
+        fn type_id(&self) -> &'static str {
+            "Add"
+        }
+        fn category(&self) -> &'static str {
+            "Math"
+        }
         fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
             InstanceTemplate::builder(alloc)
                 .input("a", SocketType::Number)
@@ -214,8 +380,14 @@ mod tests {
                 .build()
         }
         fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
-            let a = match ctx.input_named("a") { PortValue::Number(n) => *n, _ => 0.0 };
-            let b = match ctx.input_named("b") { PortValue::Number(n) => *n, _ => 0.0 };
+            let a = match ctx.input_named("a") {
+                PortValue::Number(n) => *n,
+                _ => 0.0,
+            };
+            let b = match ctx.input_named("b") {
+                PortValue::Number(n) => *n,
+                _ => 0.0,
+            };
             let mut o = NodeOutputs::default();
             o.set("out", PortValue::Number(a + b));
             Ok(o)
@@ -223,8 +395,12 @@ mod tests {
     }
     struct Const;
     impl NodeDef for Const {
-        fn type_id(&self) -> &'static str { "Const" }
-        fn category(&self) -> &'static str { "Math" }
+        fn type_id(&self) -> &'static str {
+            "Const"
+        }
+        fn category(&self) -> &'static str {
+            "Math"
+        }
         fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
             InstanceTemplate::builder(alloc)
                 .output("out", SocketType::Number)
@@ -238,10 +414,41 @@ mod tests {
         }
     }
 
+    /// Fails whenever its `boom` property is true — stands in for a
+    /// Boolean node refusing a non-solid operand.
+    struct Fussy;
+    impl NodeDef for Fussy {
+        fn type_id(&self) -> &'static str {
+            "Fussy"
+        }
+        fn category(&self) -> &'static str {
+            "Math"
+        }
+        fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
+            InstanceTemplate::builder(alloc)
+                .input("a", SocketType::Number)
+                .output("out", SocketType::Number)
+                .build()
+        }
+        fn evaluate(&self, ctx: &EvalCtx) -> Result<NodeOutputs, NodeError> {
+            if ctx.properties.bool_("boom", false) {
+                return Err(NodeError::msg("input 'a' is not a closed solid"));
+            }
+            let a = match ctx.input_named("a") {
+                PortValue::Number(n) => *n,
+                _ => 0.0,
+            };
+            let mut o = NodeOutputs::default();
+            o.set("out", PortValue::Number(a + 1.0));
+            Ok(o)
+        }
+    }
+
     fn registry() -> NodeRegistry {
         let mut r = NodeRegistry::new();
         r.register(AddNode);
         r.register(Const);
+        r.register(Fussy);
         r
     }
 
@@ -267,10 +474,17 @@ mod tests {
     fn evaluate_all_three_node_chain() {
         let (mut g, _, _, c) = three_node_graph();
         let reg = registry();
-        let order = evaluate_all(&mut g, &reg).unwrap();
-        assert_eq!(order.len(), 3);
+        let report = evaluate_all(&mut g, &reg).unwrap();
+        assert_eq!(report.walked.len(), 3);
+        assert!(report.is_clean());
         let out_c_uid = g.get(c).unwrap().output_by_name("out").unwrap().uid;
-        let result = g.get(c).unwrap().cached_outputs.get(&out_c_uid).cloned().unwrap();
+        let result = g
+            .get(c)
+            .unwrap()
+            .cached_outputs
+            .get(&out_c_uid)
+            .cloned()
+            .unwrap();
         assert_eq!(result, PortValue::Number(5.0));
     }
 
@@ -281,13 +495,142 @@ mod tests {
         evaluate_all(&mut g, &reg).unwrap();
         assert!(g.nodes().all(|n| !n.dirty));
         g.set_property(a, "value", PortValue::Number(10.0)).unwrap();
-        let walked = evaluate_dirty(&mut g, &reg).unwrap();
+        let walked = evaluate_dirty(&mut g, &reg).unwrap().walked;
         assert_eq!(walked.len(), 2, "only a and c should re-eval, not b");
         assert!(walked.contains(&a));
         assert!(walked.contains(&c));
         let out_c_uid = g.get(c).unwrap().output_by_name("out").unwrap().uid;
-        let result = g.get(c).unwrap().cached_outputs.get(&out_c_uid).cloned().unwrap();
+        let result = g
+            .get(c)
+            .unwrap()
+            .cached_outputs
+            .get(&out_c_uid)
+            .cloned()
+            .unwrap();
         assert_eq!(result, PortValue::Number(13.0));
+    }
+
+    /// `k(2) -> fussy -> sink(Add)`, plus a `lone` Const that depends on
+    /// nothing. Mirrors a Boolean refusing an operand while the rest of
+    /// the graph is perfectly healthy.
+    fn fussy_graph() -> (Graph, NodeId, NodeId, NodeId) {
+        let reg = registry();
+        let mut g = Graph::new();
+        let k = g.add_new_node("Const", [0.0, 0.0], &reg).unwrap();
+        let f = g.add_new_node("Fussy", [0.0, 0.0], &reg).unwrap();
+        let sink = g.add_new_node("Add", [0.0, 0.0], &reg).unwrap();
+        let lone = g.add_new_node("Const", [0.0, 0.0], &reg).unwrap();
+        g.set_property(k, "value", PortValue::Number(2.0)).unwrap();
+        g.set_property(lone, "value", PortValue::Number(7.0))
+            .unwrap();
+        let k_out = g.get(k).unwrap().output_by_name("out").unwrap().uid;
+        let f_in = g.get(f).unwrap().input_by_name("a").unwrap().uid;
+        let f_out = g.get(f).unwrap().output_by_name("out").unwrap().uid;
+        let s_in = g.get(sink).unwrap().input_by_name("a").unwrap().uid;
+        g.connect(Noodle::new(k, k_out, f, f_in), &reg).unwrap();
+        g.connect(Noodle::new(f, f_out, sink, s_in), &reg).unwrap();
+        (g, f, sink, lone)
+    }
+
+    fn cached_number(g: &Graph, id: NodeId) -> Option<f64> {
+        let uid = g.get(id)?.output_by_name("out")?.uid;
+        match g.get(id)?.cached_outputs.get(&uid)? {
+            PortValue::Number(n) => Some(*n),
+            _ => None,
+        }
+    }
+
+    /// A refused node must not take the whole pass down with it: it is
+    /// recorded by id, and nodes that don't depend on it still compute.
+    #[test]
+    fn a_failed_node_is_recorded_and_independent_nodes_still_evaluate() {
+        let (mut g, f, sink, lone) = fussy_graph();
+        let reg = registry();
+        g.set_property(f, "boom", PortValue::Bool(true)).unwrap();
+
+        let report = evaluate_all(&mut g, &reg).unwrap();
+
+        assert!(!report.is_clean());
+        assert_eq!(report.failures.len(), 1);
+        let failure = report.failure_for(f).expect("the fussy node is named");
+        assert_eq!(failure.type_id.as_ref(), "Fussy");
+        assert!(failure.message.contains("input 'a'"), "{}", failure.message);
+        assert!(report.skipped.contains(&sink), "the dependent is skipped");
+        assert!(
+            report.walked.contains(&lone),
+            "an unrelated node still runs"
+        );
+        assert_eq!(cached_number(&g, lone), Some(7.0));
+    }
+
+    /// The dependent keeps the value from the last good pass rather than
+    /// evaluating against a vanished input — stale beats empty.
+    #[test]
+    fn dependents_of_a_failed_node_keep_their_last_good_output() {
+        let (mut g, f, sink, _) = fussy_graph();
+        let reg = registry();
+        evaluate_all(&mut g, &reg).unwrap();
+        assert_eq!(cached_number(&g, sink), Some(3.0));
+
+        g.set_property(f, "boom", PortValue::Bool(true)).unwrap();
+        let report = evaluate_dirty(&mut g, &reg).unwrap();
+
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(cached_number(&g, sink), Some(3.0), "stale, not gone");
+        assert!(
+            g.nodes().all(|n| !n.dirty),
+            "a broken pass still settles the dirty flags, so a parked graph \
+             does not re-report the same failure every tick"
+        );
+    }
+
+    /// Editing a node *downstream* of a node that failed on an earlier
+    /// pass must not evaluate it against the failed node's stale
+    /// outputs: the failed node is clean-flagged by then, so only the
+    /// persisted `failed` flag can stop it.
+    #[test]
+    fn a_downstream_edit_does_not_evaluate_against_a_failed_nodes_stale_output() {
+        let (mut g, f, sink, _) = fussy_graph();
+        let reg = registry();
+        evaluate_all(&mut g, &reg).unwrap();
+        assert_eq!(cached_number(&g, sink), Some(3.0));
+        g.set_property(f, "boom", PortValue::Bool(true)).unwrap();
+        evaluate_dirty(&mut g, &reg).unwrap();
+        assert!(g.get(f).unwrap().failed, "the failure is remembered");
+
+        // The user now edits the *sink* (its own property, nothing to do
+        // with the broken upstream).
+        g.set_property(sink, "unrelated", PortValue::Number(1.0))
+            .unwrap();
+        let report = evaluate_dirty(&mut g, &reg).unwrap();
+
+        assert!(report.skipped.contains(&sink), "the dependent is skipped");
+        assert!(!report.walked.contains(&sink));
+        assert_eq!(cached_number(&g, sink), Some(3.0), "last good value kept");
+
+        // Fixing the upstream re-runs both.
+        g.set_property(f, "boom", PortValue::Bool(false)).unwrap();
+        let report = evaluate_dirty(&mut g, &reg).unwrap();
+        assert!(report.is_clean());
+        assert!(report.walked.contains(&f) && report.walked.contains(&sink));
+        assert!(!g.get(f).unwrap().failed, "the flag clears on success");
+    }
+
+    /// Fixing the node clears the failure and re-runs its dependents.
+    #[test]
+    fn fixing_a_failed_node_clears_the_failure() {
+        let (mut g, f, sink, _) = fussy_graph();
+        let reg = registry();
+        g.set_property(f, "boom", PortValue::Bool(true)).unwrap();
+        evaluate_all(&mut g, &reg).unwrap();
+        assert!(cached_number(&g, sink).is_none());
+
+        g.set_property(f, "boom", PortValue::Bool(false)).unwrap();
+        let report = evaluate_dirty(&mut g, &reg).unwrap();
+
+        assert!(report.is_clean());
+        assert!(report.walked.contains(&sink));
+        assert_eq!(cached_number(&g, sink), Some(3.0));
     }
 
     #[test]

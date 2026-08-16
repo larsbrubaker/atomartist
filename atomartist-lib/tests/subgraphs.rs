@@ -101,7 +101,7 @@ fn translate_subgraph_shifts_box_in_y() {
         .connect(Noodle::new(sub, sub_out_uid, out_node, out_in_uid), &reg)
         .unwrap();
 
-    evaluate_all(&mut parent, &reg).unwrap();
+    evaluate_all(&mut parent, &reg).unwrap().expect_clean();
 
     let display_uid = parent
         .get(out_node)
@@ -155,7 +155,7 @@ fn subgraph_with_unconnected_input_returns_no_mesh() {
     let mut parent = Graph::new();
     let sub = parent.add_new_node("ShiftYBy7v2", [0.0, 0.0], &reg).unwrap();
 
-    evaluate_all(&mut parent, &reg).unwrap();
+    evaluate_all(&mut parent, &reg).unwrap().expect_clean();
     // The published output is "out" (adopted from the Transform's
     // socket name in the template).
     let out_uid = parent.get(sub).unwrap().output_by_name("out").unwrap().uid;
@@ -256,7 +256,7 @@ fn unconnected_scalar_input_uses_instance_override() {
         Some(&PortValue::Number(3.0)),
     );
 
-    evaluate_all(&mut parent, &reg).unwrap();
+    evaluate_all(&mut parent, &reg).unwrap().expect_clean();
     let out_uid = parent.get(sub).unwrap().output_by_name("out").unwrap().uid;
     assert_eq!(
         parent.get(sub).unwrap().cached_outputs.get(&out_uid),
@@ -266,7 +266,7 @@ fn unconnected_scalar_input_uses_instance_override() {
 
     // Change the override → the result follows.
     parent.set_property(sub, "n", PortValue::Number(42.0)).unwrap();
-    evaluate_all(&mut parent, &reg).unwrap();
+    evaluate_all(&mut parent, &reg).unwrap().expect_clean();
     assert_eq!(
         parent.get(sub).unwrap().cached_outputs.get(&out_uid),
         Some(&PortValue::Number(42.0)),
@@ -296,7 +296,7 @@ fn connected_scalar_input_ignores_instance_override() {
     parent.set_property(sub, "n", PortValue::Number(42.0)).unwrap();
     connect_by_name(&mut parent, src, "out", sub, "n", &reg);
 
-    evaluate_all(&mut parent, &reg).unwrap();
+    evaluate_all(&mut parent, &reg).unwrap().expect_clean();
     let out_uid = parent.get(sub).unwrap().output_by_name("out").unwrap().uid;
     assert_eq!(
         parent.get(sub).unwrap().cached_outputs.get(&out_uid),

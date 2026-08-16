@@ -250,6 +250,13 @@ pub struct NodeInstance {
     /// evaluation — set by `Graph::mark_dirty_subtree` and cleared by the
     /// executor after producing fresh outputs.
     pub dirty: bool,
+    /// True when the most recent evaluation of this node returned an
+    /// error. Runtime-only (never serialized): it exists so the executor
+    /// can keep the node's dependents from evaluating against stale
+    /// inputs on a *later* pass that doesn't re-walk the failed node —
+    /// see `executor::run_pass`. Cleared the moment the node evaluates
+    /// successfully.
+    pub failed: bool,
 }
 
 impl NodeInstance {
@@ -266,6 +273,7 @@ impl NodeInstance {
             properties: HashMap::new(),
             cached_outputs: HashMap::new(),
             dirty: true,
+            failed: false,
         }
     }
 

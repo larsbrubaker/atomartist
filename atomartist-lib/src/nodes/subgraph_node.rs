@@ -347,8 +347,14 @@ impl NodeDef for SubgraphNodeDef {
             n.dirty = true;
         }
 
-        evaluate_all(&mut scratch, &local_reg)
+        let report = evaluate_all(&mut scratch, &local_reg)
             .map_err(|e| NodeError::msg(format!("subgraph eval: {}", e)))?;
+        // A node inside the template that refused makes the *instance*
+        // fail: the parent graph has no way to badge an inner node, so
+        // the component reports the first inner failure as its own.
+        if let Some(failure) = report.failures.first() {
+            return Err(NodeError::msg(format!("subgraph eval: {}", failure)));
+        }
 
         // Pull each Output-mirror's cached value into the parent-facing
         // NodeOutputs. Each subgraph output port is bound to one mirror
@@ -635,7 +641,7 @@ mod eval_contract_tests {
             .connect(Noodle::new(src, src_out, inst, in_uid), &reg)
             .unwrap();
 
-        crate::graph::executor::evaluate_all(&mut parent, &reg).unwrap();
+        crate::graph::executor::evaluate_all(&mut parent, &reg).unwrap().expect_clean();
 
         let out_uid = parent.get(inst).unwrap().output_by_name("out").unwrap().uid;
         let value = parent

@@ -91,7 +91,7 @@ mod tests {
             let inf_delta = g.get(inf).unwrap().input_by_name("delta").unwrap().uid;
             g.connect(Noodle::new(nc, nc_out, inf, inf_delta), &reg).unwrap();
         }
-        evaluate_all(&mut g, &reg).unwrap();
+        evaluate_all(&mut g, &reg).unwrap().expect_clean();
         let out_uid = g.get(inf).unwrap().output_by_name("out").unwrap().uid;
         match g.get(inf).unwrap().cached_outputs.get(&out_uid) {
             Some(PortValue::Path2d(cs)) => cs.bounds().size().x,

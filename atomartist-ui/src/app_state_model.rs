@@ -152,7 +152,16 @@ impl AppStateModel {
 /// [`crate::node_insertion`] must size and place nodes in whichever
 /// graph the insertion actually targets (the mesh import, for one,
 /// always inserts into the root graph).
-pub fn node_views(g: &atomartist_lib::Graph, reg: &atomartist_lib::registry::NodeRegistry) -> Vec<ne::NodeView> {
+///
+/// `errors` is the last evaluation's per-node failure messages (see
+/// [`crate::eval_errors`]); a node listed there gets an error badge on
+/// the canvas. Callers that only need geometry (node sizing / placement)
+/// pass an empty map.
+pub fn node_views(
+    g: &atomartist_lib::Graph,
+    reg: &atomartist_lib::registry::NodeRegistry,
+    errors: &std::collections::HashMap<atomartist_lib::graph::node::NodeId, String>,
+) -> Vec<ne::NodeView> {
     g.nodes()
             .filter_map(|n| {
                 let def = reg.get(&n.type_id)?;
@@ -247,6 +256,7 @@ pub fn node_views(g: &atomartist_lib::Graph, reg: &atomartist_lib::registry::Nod
                     inputs,
                     outputs,
                     properties,
+                    error: errors.get(&n.id).cloned(),
                 })
             })
             .collect()
@@ -256,7 +266,20 @@ impl ne::NodeGraphModel for AppStateModel {
     fn nodes(&self) -> Vec<ne::NodeView> {
         let ag = self.state.active_graph();
         let g = ag.lock().unwrap();
-        node_views(&g, &self.state.registry)
+        // Error badges only while editing the root graph. `node_errors`
+        // is keyed by *root* NodeId and a drilled-in template graph
+        // allocates its own ids from the same space, so projecting them
+        // onto template nodes would badge whichever inner node happened
+        // to collide. Badging inside a component is future work, and
+        // needs the same treatment as the subgraph error collapse in
+        // `subgraph_node.rs` (the instance reports, the inner node
+        // doesn't).
+        let errors = if self.state.edit_depth() > 0 {
+            std::collections::HashMap::new()
+        } else {
+            self.state.node_errors_snapshot()
+        };
+        node_views(&g, &self.state.registry, &errors)
     }
 
     fn noodles(&self) -> Vec<ne::NoodleView> {

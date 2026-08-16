@@ -386,7 +386,7 @@ mod tests {
         let s2 = g.get(out).unwrap().inputs.last().unwrap().uid;
         g.connect(Noodle::new(bx2, bx2_out, out, s2), &reg).unwrap();
 
-        evaluate_all(&mut g, &reg).unwrap();
+        evaluate_all(&mut g, &reg).unwrap().expect_clean();
         let n = g.get(out).unwrap();
         let display_uid = n.output_by_name(DISPLAY_OUTPUT_NAME).unwrap().uid;
         match n.cached_outputs.get(&display_uid) {
@@ -426,7 +426,7 @@ mod tests {
         g.connect(Noodle::new(bx, bx_out, tf, tf_in), &reg).unwrap();
         g.connect(Noodle::new(tf, tf_out, out, out_in), &reg).unwrap();
 
-        evaluate_all(&mut g, &reg).unwrap();
+        evaluate_all(&mut g, &reg).unwrap().expect_clean();
         let display_uid = g.get(out).unwrap().output_by_name(DISPLAY_OUTPUT_NAME).unwrap().uid;
         match g.get(out).unwrap().cached_outputs.get(&display_uid) {
             Some(PortValue::Geometry3d(geom)) => {
@@ -458,7 +458,7 @@ mod tests {
         let s2 = g.get(out).unwrap().inputs.last().unwrap().uid;
         g.connect(Noodle::new(bx2, bx2_out, out, s2), &reg).unwrap();
 
-        evaluate_all(&mut g, &reg).unwrap();
+        evaluate_all(&mut g, &reg).unwrap().expect_clean();
         let display_uid = g.get(out).unwrap().output_by_name(DISPLAY_OUTPUT_NAME).unwrap().uid;
         let bodies = match g.get(out).unwrap().cached_outputs.get(&display_uid) {
             Some(PortValue::Geometry3d(geom)) => geom.bodies.clone(),
@@ -480,7 +480,7 @@ mod tests {
         let in_target = g.get(out).unwrap().inputs[0].uid;
         g.connect(Noodle::new(bx, bx_out, out, in_target), &reg).unwrap();
 
-        evaluate_all(&mut g, &reg).unwrap();
+        evaluate_all(&mut g, &reg).unwrap().expect_clean();
         let n = g.get(out).unwrap();
         // Mirror output named "out" should carry the same Geometry3d the
         // Box emitted (pointer-equal via the Arc clone path).

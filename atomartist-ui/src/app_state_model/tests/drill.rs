@@ -55,7 +55,8 @@ fn enter_component_pushes_level_and_serves_template_nodes() {
     let (state, _template, type_id) = component_fixture();
     let inst = {
         let mut g = state.graph.lock().unwrap();
-        g.add_new_node(type_id, [0.0, 0.0], &state.registry).unwrap()
+        g.add_new_node(type_id, [0.0, 0.0], &state.registry)
+            .unwrap()
     };
     let bx = {
         let mut g = state.graph.lock().unwrap();
@@ -63,10 +64,16 @@ fn enter_component_pushes_level_and_serves_template_nodes() {
     };
     let mut model = AppStateModel::new(state);
     // A plain node is not a component — no drill-in.
-    assert!(!ne::NodeGraphModel::on_node_activated(&mut model, ne::NodeId(bx.0)));
+    assert!(!ne::NodeGraphModel::on_node_activated(
+        &mut model,
+        ne::NodeId(bx.0)
+    ));
     assert_eq!(model.state.edit_depth(), 0);
     // The component node drills in.
-    assert!(ne::NodeGraphModel::on_node_activated(&mut model, ne::NodeId(inst.0)));
+    assert!(ne::NodeGraphModel::on_node_activated(
+        &mut model,
+        ne::NodeId(inst.0)
+    ));
     assert_eq!(model.state.edit_depth(), 1);
     // nodes() now serves the template — its single GraphInput node.
     let nodes = ne::NodeGraphModel::nodes(&model);
@@ -79,7 +86,8 @@ fn exit_syncs_new_template_port_to_root_instance() {
     let (state, _template, type_id) = component_fixture();
     let inst = {
         let mut g = state.graph.lock().unwrap();
-        g.add_new_node(type_id, [0.0, 0.0], &state.registry).unwrap()
+        g.add_new_node(type_id, [0.0, 0.0], &state.registry)
+            .unwrap()
     };
     // Instance mints the single "w" input from the template scan.
     assert!(state
@@ -96,7 +104,9 @@ fn exit_syncs_new_template_port_to_root_instance() {
     {
         let ag = state.active_graph();
         let mut g = ag.lock().unwrap();
-        let gin = g.add_new_node("GraphInput", [0.0, 0.0], &state.registry).unwrap();
+        let gin = g
+            .add_new_node("GraphInput", [0.0, 0.0], &state.registry)
+            .unwrap();
         g.set_property_hooked(gin, "port_type", str_val("Number"), &state.registry)
             .unwrap();
         g.set_property(gin, "name", str_val("h")).unwrap();
@@ -118,12 +128,17 @@ fn property_edit_inside_component_schedules_root_eval() {
     let (state, _template, type_id) = component_fixture();
     {
         let mut g = state.graph.lock().unwrap();
-        g.add_new_node(type_id, [0.0, 0.0], &state.registry).unwrap();
+        g.add_new_node(type_id, [0.0, 0.0], &state.registry)
+            .unwrap();
     }
     // enter via the shared state so the model clone observes the stack.
     let inst = {
         let g = state.graph.lock().unwrap();
-        let id = g.nodes().find(|n| n.type_id.as_ref() == type_id).unwrap().id;
+        let id = g
+            .nodes()
+            .find(|n| n.type_id.as_ref() == type_id)
+            .unwrap()
+            .id;
         id
     };
     assert!(state.enter_component(inst));
@@ -148,11 +163,16 @@ fn undo_inside_component_leaves_root_history_untouched() {
     let (state, _template, type_id) = component_fixture();
     {
         let mut g = state.graph.lock().unwrap();
-        g.add_new_node(type_id, [0.0, 0.0], &state.registry).unwrap();
+        g.add_new_node(type_id, [0.0, 0.0], &state.registry)
+            .unwrap();
     }
     let inst = {
         let g = state.graph.lock().unwrap();
-        let id = g.nodes().find(|n| n.type_id.as_ref() == type_id).unwrap().id;
+        let id = g
+            .nodes()
+            .find(|n| n.type_id.as_ref() == type_id)
+            .unwrap()
+            .id;
         id
     };
     assert!(state.enter_component(inst));
@@ -181,7 +201,8 @@ fn on_node_activated_true_for_component_false_for_plain_node() {
     let (state, _template, type_id) = component_fixture();
     let inst = {
         let mut g = state.graph.lock().unwrap();
-        g.add_new_node(type_id, [0.0, 0.0], &state.registry).unwrap()
+        g.add_new_node(type_id, [0.0, 0.0], &state.registry)
+            .unwrap()
     };
     let num = {
         let mut g = state.graph.lock().unwrap();
@@ -189,8 +210,14 @@ fn on_node_activated_true_for_component_false_for_plain_node() {
             .unwrap()
     };
     let mut model = AppStateModel::new(state);
-    assert!(!ne::NodeGraphModel::on_node_activated(&mut model, ne::NodeId(num.0)));
-    assert!(ne::NodeGraphModel::on_node_activated(&mut model, ne::NodeId(inst.0)));
+    assert!(!ne::NodeGraphModel::on_node_activated(
+        &mut model,
+        ne::NodeId(num.0)
+    ));
+    assert!(ne::NodeGraphModel::on_node_activated(
+        &mut model,
+        ne::NodeId(inst.0)
+    ));
 }
 
 #[test]
@@ -202,7 +229,8 @@ fn menu_add_while_drilled_in_lands_in_template_not_root() {
     let (state, template, type_id) = component_fixture();
     let inst = {
         let mut g = state.graph.lock().unwrap();
-        g.add_new_node(type_id, [0.0, 0.0], &state.registry).unwrap()
+        g.add_new_node(type_id, [0.0, 0.0], &state.registry)
+            .unwrap()
     };
     let root_before = state.graph.lock().unwrap().node_count();
     let template_before = template.lock().unwrap().node_count();
@@ -260,7 +288,8 @@ fn drilled_in_reports_unsaved_changes_even_when_root_matches_baseline() {
     let (state, _template, type_id) = component_fixture();
     let inst = {
         let mut g = state.graph.lock().unwrap();
-        g.add_new_node(type_id, [0.0, 0.0], &state.registry).unwrap()
+        g.add_new_node(type_id, [0.0, 0.0], &state.registry)
+            .unwrap()
     };
     // Baseline on the current root so it is "clean" at depth 0.
     state.mark_saved_baseline();
@@ -290,7 +319,8 @@ fn new_project_clears_drill_in_stack() {
     let (state, _template, type_id) = component_fixture();
     let inst = {
         let mut g = state.graph.lock().unwrap();
-        g.add_new_node(type_id, [0.0, 0.0], &state.registry).unwrap()
+        g.add_new_node(type_id, [0.0, 0.0], &state.registry)
+            .unwrap()
     };
     assert!(state.enter_component(inst));
     assert_eq!(state.edit_depth(), 1);
@@ -298,7 +328,11 @@ fn new_project_clears_drill_in_stack() {
     let root = state.graph.clone();
     state.new_empty_project();
 
-    assert_eq!(state.edit_depth(), 0, "New must exit any drilled-in component");
+    assert_eq!(
+        state.edit_depth(),
+        0,
+        "New must exit any drilled-in component"
+    );
     assert!(
         Arc::ptr_eq(&state.active_graph(), &root),
         "active_graph() must resolve to the (new) root after New",
@@ -344,7 +378,8 @@ fn exit_to_root_after_nested_drill_syncs_each_parent() {
     let (state, inner_tmpl, outer_tmpl, inner_type, outer_type) = nested_component_fixture();
     let outer_inst = {
         let mut g = state.graph.lock().unwrap();
-        g.add_new_node(outer_type, [0.0, 0.0], &state.registry).unwrap()
+        g.add_new_node(outer_type, [0.0, 0.0], &state.registry)
+            .unwrap()
     };
     // Make the root outer instance stale: add a port to the outer
     // template without reconciling the instance.
@@ -363,7 +398,11 @@ fn exit_to_root_after_nested_drill_syncs_each_parent() {
     let inner_inst = {
         let ag = state.active_graph();
         let g = ag.lock().unwrap();
-        let id = g.nodes().find(|n| n.type_id.as_ref() == inner_type).unwrap().id;
+        let id = g
+            .nodes()
+            .find(|n| n.type_id.as_ref() == inner_type)
+            .unwrap()
+            .id;
         id
     };
     assert!(state.enter_component(inner_inst));
@@ -411,12 +450,16 @@ fn nested_drill_in_serves_inner_template() {
     }
     let outer_inst = {
         let mut g = state.graph.lock().unwrap();
-        g.add_new_node(outer_type, [0.0, 0.0], &state.registry).unwrap()
+        g.add_new_node(outer_type, [0.0, 0.0], &state.registry)
+            .unwrap()
     };
     let mut model = AppStateModel::new(state);
 
     // Drill into the outer component.
-    assert!(ne::NodeGraphModel::on_node_activated(&mut model, ne::NodeId(outer_inst.0)));
+    assert!(ne::NodeGraphModel::on_node_activated(
+        &mut model,
+        ne::NodeId(outer_inst.0)
+    ));
     // The outer template serves its single Inner instance.
     let inner_id = {
         let nodes = ne::NodeGraphModel::nodes(&model);
@@ -437,5 +480,53 @@ fn nested_drill_in_serves_inner_template() {
     assert!(
         !nodes.iter().any(|n| n.type_id == inner_type),
         "must not still be serving the outer template",
+    );
+}
+
+/// `node_errors` is keyed by **root-graph** node id, and a component
+/// template allocates ids from its own space — here the template's node
+/// has *the same id* as the failing root instance, which is exactly the
+/// collision the projection has to refuse. While drilled in, nobody
+/// wears a badge.
+#[test]
+fn drilled_in_nodes_never_wear_the_root_graphs_error_badges() {
+    let (state, template, type_id) = component_fixture();
+    let inst = {
+        let mut g = state.graph.lock().unwrap();
+        g.add_new_node(type_id, [0.0, 0.0], &state.registry)
+            .unwrap()
+    };
+    let inner = template.lock().unwrap().nodes().next().unwrap().id;
+    assert_eq!(inner, inst, "the id spaces really do collide");
+
+    // The component instance is the failing node at the root.
+    state
+        .node_errors
+        .lock()
+        .unwrap()
+        .insert(inst, "Comp: subgraph eval failed".to_string());
+
+    let mut model = AppStateModel::new(state);
+    let at_root = ne::NodeGraphModel::nodes(&model);
+    assert_eq!(
+        at_root
+            .iter()
+            .find(|n| n.id.0 == inst.0)
+            .and_then(|n| n.error.as_deref()),
+        Some("Comp: subgraph eval failed"),
+        "the root instance is badged"
+    );
+
+    assert!(ne::NodeGraphModel::on_node_activated(
+        &mut model,
+        ne::NodeId(inst.0)
+    ));
+    assert_eq!(model.state.edit_depth(), 1);
+
+    let inside = ne::NodeGraphModel::nodes(&model);
+    assert!(!inside.is_empty());
+    assert!(
+        inside.iter().all(|n| n.error.is_none()),
+        "no badges inside a component"
     );
 }

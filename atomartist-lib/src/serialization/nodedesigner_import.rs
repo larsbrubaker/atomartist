@@ -454,7 +454,7 @@ mod tests {
 
         // Evaluate the imported graph and verify the Output sees a Box mesh.
         let mut g = result.graph;
-        evaluate_all(&mut g, &reg).unwrap();
+        evaluate_all(&mut g, &reg).unwrap().expect_clean();
         let output_node = g.nodes()
             .find(|n| n.type_id == "Output")
             .expect("Output node missing");

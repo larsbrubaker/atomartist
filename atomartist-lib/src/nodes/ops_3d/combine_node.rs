@@ -288,7 +288,7 @@ mod tests {
         let e2 = g.get(c).unwrap().inputs.last().unwrap().uid;
         g.connect(Noodle::new(bx2, bx2_out, c, e2), &reg).unwrap();
 
-        evaluate_all(&mut g, &reg).unwrap();
+        evaluate_all(&mut g, &reg).unwrap().expect_clean();
         let out_uid = g.get(c).unwrap().output_by_name("out").unwrap().uid;
         match g.get(c).unwrap().cached_outputs.get(&out_uid) {
             Some(PortValue::Geometry3d(geo)) => {
@@ -328,7 +328,7 @@ mod tests {
         let e2 = g.get(c).unwrap().inputs.last().unwrap().uid;
         g.connect(Noodle::new(bx2, bx2_out, c, e2), &reg).unwrap();
 
-        evaluate_all(&mut g, &reg).unwrap();
+        evaluate_all(&mut g, &reg).unwrap().expect_clean();
         let out_uid = g.get(c).unwrap().output_by_name("out").unwrap().uid;
         match g.get(c).unwrap().cached_outputs.get(&out_uid) {
             Some(PortValue::Geometry3d(geo)) => {
@@ -352,7 +352,7 @@ mod tests {
         let reg = registry();
         let mut g = Graph::new();
         let c = g.add_new_node("Combine", [0.0, 0.0], &reg).unwrap();
-        evaluate_all(&mut g, &reg).unwrap();
+        evaluate_all(&mut g, &reg).unwrap().expect_clean();
         let out_uid = g.get(c).unwrap().output_by_name("out").unwrap().uid;
         match g.get(c).unwrap().cached_outputs.get(&out_uid) {
             Some(PortValue::Geometry3d(geo)) => {

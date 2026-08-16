@@ -435,7 +435,7 @@ fn evaluated_graph_passes_data_along_connected_noodles() {
         &reg,
     )
     .unwrap();
-    evaluate_all(&mut g, &reg).unwrap();
+    evaluate_all(&mut g, &reg).unwrap().expect_clean();
     let pt_out_uid = g.get(pt).unwrap().output_by_name("out").unwrap().uid;
     assert_eq!(
         g.get(pt).unwrap().cached_outputs.get(&pt_out_uid).cloned(),
@@ -468,7 +468,7 @@ fn evaluated_graph_passes_data_through_chain() {
         &reg,
     )
     .unwrap();
-    evaluate_all(&mut g, &reg).unwrap();
+    evaluate_all(&mut g, &reg).unwrap().expect_clean();
     let p2_out = g.get(p2).unwrap().output_by_name("out").unwrap().uid;
     assert_eq!(
         g.get(p2).unwrap().cached_outputs.get(&p2_out).cloned(),
@@ -489,7 +489,7 @@ fn disconnecting_stops_data_flow() {
         to: in_ep(&g, pt, "in"),
     };
     g.connect(noodle, &reg).unwrap();
-    evaluate_all(&mut g, &reg).unwrap();
+    evaluate_all(&mut g, &reg).unwrap().expect_clean();
     let pt_out_uid = g.get(pt).unwrap().output_by_name("out").unwrap().uid;
     assert_eq!(
         g.get(pt).unwrap().cached_outputs.get(&pt_out_uid).cloned(),
@@ -497,7 +497,7 @@ fn disconnecting_stops_data_flow() {
     );
 
     g.disconnect(&noodle, &reg).unwrap();
-    evaluate_all(&mut g, &reg).unwrap();
+    evaluate_all(&mut g, &reg).unwrap().expect_clean();
     // With nothing wired, the passthrough sees PortValue::None and
     // emits None on its output.
     assert_eq!(

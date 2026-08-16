@@ -150,6 +150,11 @@ pub fn render_icon(registry: &NodeRegistry, type_id: &str, size: u32) -> Option<
 fn default_geometry(registry: &NodeRegistry, type_id: &str) -> Option<Arc<Geometry3d>> {
     let mut graph = Graph::new();
     let id = graph.add_new_node(type_id, [0.0, 0.0], registry).ok()?;
+    // The report is dropped on purpose: a node type that refuses to
+    // evaluate at its defaults simply has no icon geometry (the caller
+    // falls back to a glyph). Nothing here is user-triggered, so a
+    // status-bar notice would be noise from a palette that is merely
+    // drawing itself.
     evaluate_all(&mut graph, registry).ok()?;
     let node = graph.get(id)?;
     // Socket order, not `HashMap` order: a node with two geometry

@@ -249,7 +249,9 @@ pub fn auto_connect_to_output(graph: &mut Graph, registry: &NodeRegistry, node: 
 /// always the active one (the mesh import inserts into the root graph
 /// even while the user is drilled in).
 pub fn node_boxes(graph: &Graph, registry: &NodeRegistry) -> Vec<NodeBox> {
-    crate::app_state_model::node_views(graph, registry)
+    // Sizing only — an error badge lives inside the title bar and does
+    // not change a node's box, so an empty error map is honest here.
+    crate::app_state_model::node_views(graph, registry, &std::collections::HashMap::new())
         .iter()
         .map(|view| {
             let info = layout_node(view);
