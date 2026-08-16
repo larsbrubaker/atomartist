@@ -461,6 +461,22 @@ pub trait NodeDef: Send + Sync {
     /// disconnects any noodle the retype left type-incompatible.
     fn on_property_changed(&self, _ctx: &mut PropertyChangedCtx) {}
 
+    /// Invoked once per restored instance after a graph is deserialized
+    /// (nodes *and* noodles are all in place). Default no-op.
+    ///
+    /// This is where a node type reasserts an invariant its socket hooks
+    /// normally maintain but the file cannot carry — a dynamic-input node
+    /// re-appends its trailing empty slot, so a project saved by an older
+    /// build (or by a build whose input model differed) can still take a
+    /// new connection. Deserialization is otherwise a straight decode:
+    /// the socket list comes back exactly as written, hooks and all
+    /// skipped.
+    ///
+    /// Keep it idempotent and cheap — it runs for every node of every
+    /// load.
+    fn on_loaded(&self, _graph: &mut crate::graph::graph::Graph, _node: crate::graph::node::NodeId) {
+    }
+
     /// Decide whether a property row should appear in the panel right
     /// now. This is the dynamic, host-defined visibility hook —
     /// MatterCAD's `IPropertyGridModifier.UpdateControls(change)`

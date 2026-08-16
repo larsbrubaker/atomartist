@@ -19,14 +19,11 @@ use crate::nodes::ops_3d::boolean_import::{import_operand, positions_only};
 use crate::geometry::mesh3d::STRIDE;
 use crate::geometry::{generate_box, Geometry3d};
 use crate::graph::node::{NodeId, NodeInstance, PortValue};
-use crate::graph::socket::SocketUidAlloc;
+use crate::graph::socket::{Socket, SocketUidAlloc};
 use crate::registry::{EvalCtx, NodeDef, NodeError, NodeInputs, NodeProperties};
+use crate::socket_types::SocketType;
 
 // ---------------------------------------------------------------- helpers
-
-fn wrap(m: MeshGL) -> PortValue {
-    PortValue::Geometry3d(Arc::new(Geometry3d::from_mesh(Arc::new(m))))
-}
 
 /// Run the Boolean node once over two operand meshes, returning the
 /// **first** body's mesh. `operation` is the stored property value, so
@@ -45,25 +42,72 @@ fn run_boolean_bodies(
     b: MeshGL,
     operation: PortValue,
 ) -> Result<Geometry3d, NodeError> {
+    run_boolean_geoms(
+        Geometry3d::from_mesh(Arc::new(a)),
+        Geometry3d::from_mesh(Arc::new(b)),
+        operation,
+    )
+}
+
+/// The same, over whole geometry groups (so a test can give an operand a
+/// body matrix or several bodies).
+pub(super) fn run_boolean_geoms(
+    a: Geometry3d,
+    b: Geometry3d,
+    operation: PortValue,
+) -> Result<Geometry3d, NodeError> {
+    run_boolean_inputs(&[("a", a), ("b", b)], operation, None)
+}
+
+/// Evaluate the Boolean node over an arbitrary operand list.
+///
+/// Inputs are dynamic now, so the fixture builds the socket layout the
+/// canvas would have left behind after each connect: one named slot per
+/// operand, then the trailing empty placeholder.
+pub(super) fn run_boolean_inputs(
+    operands: &[(&str, Geometry3d)],
+    operation: PortValue,
+    removers: Option<&[&str]>,
+) -> Result<Geometry3d, NodeError> {
     let n = BooleanNode;
     let mut alloc = SocketUidAlloc::new();
     let tpl = n.instantiate(&mut alloc);
     let mut inst = NodeInstance::new(NodeId(1), "Boolean", [0.0, 0.0]);
-    inst.inputs = tpl.inputs;
+    inst.inputs = Vec::new();
     inst.outputs = tpl.outputs;
     let mut inputs = NodeInputs::default();
-    let uid_a = match inst.input_by_name("a") {
-        Some(s) => s.uid,
-        None => panic!("Boolean node has no input 'a'"),
-    };
-    let uid_b = match inst.input_by_name("b") {
-        Some(s) => s.uid,
-        None => panic!("Boolean node has no input 'b'"),
-    };
-    inputs.insert(uid_a, wrap(a));
-    inputs.insert(uid_b, wrap(b));
+    for (name, geom) in operands {
+        let uid = alloc.allocate();
+        inst.inputs
+            .push(Socket::new(uid, *name, SocketType::Geometry3d, true));
+        inputs.insert(uid, PortValue::Geometry3d(Arc::new(geom.clone())));
+    }
+    // The trailing empty placeholder the model always keeps last.
+    inst.inputs.push(Socket::new(
+        alloc.allocate(),
+        "",
+        SocketType::Geometry3d,
+        true,
+    ));
+
     let mut props = NodeProperties::default();
     props.insert("operation", operation);
+    if let Some(names) = removers {
+        // The selection is keyed by socket uid, which only exists once the
+        // layout above is built — so tests name the removers and the
+        // fixture resolves them.
+        let uids: Vec<_> = names
+            .iter()
+            .filter_map(|n| inst.input_by_name(n).map(|s| s.uid))
+            .collect();
+        props.insert(
+            crate::nodes::ops_3d::boolean_selection::SUBTRACT_PARTS,
+            PortValue::StringVal(Arc::new(
+                crate::nodes::ops_3d::boolean_selection::encode(&uids),
+            )),
+        );
+    }
+
     let ctx = EvalCtx { instance: &inst, properties: &props, inputs: &inputs };
     let outs = n.evaluate(&ctx)?;
     match outs.by_name.get("out") {
@@ -72,13 +116,23 @@ fn run_boolean_bodies(
     }
 }
 
+/// Column-major translation matrix — the shape `Body::matrix` carries.
+pub(super) fn translate_matrix(x: f32, y: f32, z: f32) -> [f32; 16] {
+    [
+        1.0, 0.0, 0.0, 0.0, //
+        0.0, 1.0, 0.0, 0.0, //
+        0.0, 0.0, 1.0, 0.0, //
+        x, y, z, 1.0,
+    ]
+}
+
 /// The stored property value for a named operation.
-fn op(name: &str) -> PortValue {
+pub(super) fn op(name: &str) -> PortValue {
     PortValue::StringVal(Arc::new(name.to_string()))
 }
 
 /// Translate every vertex position of a `num_prop = 6` mesh.
-fn translated(mesh: &MeshGL, dx: f32, dy: f32, dz: f32) -> MeshGL {
+pub(super) fn translated(mesh: &MeshGL, dx: f32, dy: f32, dz: f32) -> MeshGL {
     let mut out = mesh.clone();
     let stride = out.num_prop as usize;
     let n = out.vert_properties.len() / stride;
@@ -150,7 +204,7 @@ fn seam_split_box() -> MeshGL {
 /// Signed volume of a closed triangle mesh (divergence theorem), for
 /// asserting that a boolean produced the *right* solid rather than merely a
 /// non-empty one.
-fn volume(mesh: &MeshGL) -> f64 {
+pub(super) fn volume(mesh: &MeshGL) -> f64 {
     let stride = mesh.num_prop as usize;
     let p = |i: u32| {
         let o = i as usize * stride;
@@ -507,6 +561,36 @@ fn unknown_operation_name_falls_back_to_combine() {
     };
     let v = volume(&out);
     assert!((v - 15.0).abs() < 1e-3, "fallback volume {}, expected 15", v);
+}
+
+/// A `Body` carries its transform in `Body::matrix` (Transform composes
+/// matrices instead of baking them into vertices), so an operand that was
+/// moved upstream arrives here still centred on its own origin. The
+/// boolean must bake that matrix in before importing — MatterCAD passes
+/// each participant's `WorldMatrix` into `BooleanProcessing.Do`
+/// (`Object3DBooleanOperations.DoSubtract`). Without the bake, `Box →
+/// Transform(+1,+1,+1) → Boolean(Subtract)` subtracts the box from
+/// *itself* and the part vanishes.
+#[test]
+fn an_operands_body_matrix_is_baked_before_the_boolean() {
+    let a = generate_box(2.0, 2.0, 2.0); // [-1,1]^3, volume 8
+    let b = generate_box(2.0, 2.0, 2.0); // same mesh …
+    let moved = translate_matrix(1.0, 1.0, 1.0); // … but moved to [0,2]^3
+    let geom = match run_boolean_geoms(
+        Geometry3d::from_mesh(Arc::new(a)),
+        Geometry3d::from_mesh(Arc::new(b)).with_matrix(moved),
+        op("Subtract"),
+    ) {
+        Ok(g) => g,
+        Err(e) => panic!("Subtract with a transformed operand failed: {}", e),
+    };
+    let v: f64 = geom.iter().map(|body| volume(&body.mesh)).sum();
+    assert!(
+        (v - 7.0).abs() < 1e-3,
+        "Subtract with a translated operand gave volume {}, expected 7 \
+         (0 means the operand's matrix was ignored and the box cut itself away)",
+        v
+    );
 }
 
 /// A graph built before the enum landed stores `operation` as a number.

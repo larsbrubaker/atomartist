@@ -4,7 +4,10 @@
 pub mod align_node;
 pub mod boolean_import;
 pub mod boolean_node;
+pub mod boolean_ops;
+pub mod boolean_selection;
 pub mod combine_node;
+pub mod dynamic_inputs;
 pub mod extrude_node;
 pub mod fit_to_bounds_node;
 pub mod transform_node;

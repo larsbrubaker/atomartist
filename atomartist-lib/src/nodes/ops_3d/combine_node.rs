@@ -18,12 +18,13 @@
 
 use std::sync::Arc;
 
-use crate::geometry::{merge_meshes, num_tris, num_verts};
+use super::dynamic_inputs;
+use crate::geometry::{num_tris, num_verts};
 use crate::graph::node::PortValue;
-use crate::graph::socket::{Socket, SocketUidAlloc};
+use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    geometry_props, wrap_mesh, ConnectCtx, DisconnectCtx, EvalCtx, InstanceTemplate, NodeDef,
-    NodeError, NodeOutputs, NodeRegistry, PropDef,
+    geometry_props, ConnectCtx, DisconnectCtx, EvalCtx, InstanceTemplate, NodeDef, NodeError,
+    NodeOutputs, NodeRegistry, PropDef,
 };
 use crate::socket_types::SocketType;
 
@@ -47,68 +48,17 @@ impl NodeDef for CombineNode {
         // can see what feeds each input. Combine never publishes mirror
         // outputs — its merged result lives entirely on the static
         // "out" socket.
-        let (source_name, source_title) = {
-            let src = match ctx.graph.get(ctx.source_node) {
-                Some(n) => n,
-                None => return,
-            };
-            let name = src
-                .output_by_uid(ctx.source_socket)
-                .map(|s| s.name.to_string())
-                .unwrap_or_default();
-            let title = src.type_id.to_string();
-            (name, title)
-        };
-
-        // Unique internal name within Combine's input list. Two Box
-        // sources both emit "out" → suffix `_1`, `_2`, …
-        let unique_name = {
-            let me = match ctx.graph.get(ctx.this_node) {
-                Some(n) => n,
-                None => return,
-            };
-            let mut candidate = source_name.clone();
-            let mut suffix = 1;
-            while me
-                .inputs
-                .iter()
-                .any(|s| s.uid != ctx.target_socket && s.name.as_ref() == candidate.as_str())
-            {
-                candidate = format!("{}_{}", source_name, suffix);
-                suffix += 1;
-            }
-            candidate
-        };
-
-        let display_label = format!("{} - {}", source_title, source_name);
-        let _ = ctx.graph.rename_socket(
-            ctx.this_node,
-            ctx.target_socket,
-            Arc::<str>::from(unique_name.as_str()),
-        );
-        let _ = ctx.graph.relabel_socket(
-            ctx.this_node,
-            ctx.target_socket,
-            Some(Arc::<str>::from(display_label.as_str())),
-        );
-        // Type stays Geometry3d — no retype needed.
-
-        ensure_trailing_empty_input(ctx.graph, ctx.this_node);
+        dynamic_inputs::adopt_connected_slot(ctx);
     }
 
     fn on_input_disconnected(&self, ctx: &mut DisconnectCtx) {
-        // Drop the slot unless it's already empty (defensive).
-        let was_configured = match ctx.graph.get(ctx.this_node) {
-            Some(n) => n
-                .input_by_uid(ctx.target_socket)
-                .map(|s| !s.name.as_ref().is_empty())
-                .unwrap_or(false),
-            None => return,
-        };
-        if was_configured {
-            let _ = ctx.graph.remove_input_socket(ctx.this_node, ctx.target_socket);
-        }
-        ensure_trailing_empty_input(ctx.graph, ctx.this_node);
+        dynamic_inputs::collapse_disconnected_slot(ctx);
+    }
+
+    fn on_loaded(&self, graph: &mut crate::graph::graph::Graph, node: crate::graph::node::NodeId) {
+        // Deserialization is a straight decode, so the invariant the
+        // socket hooks maintain has to be reasserted here.
+        dynamic_inputs::ensure_trailing_empty_input(graph, node);
     }
 
     fn properties(&self) -> Vec<PropDef> {
@@ -141,30 +91,6 @@ impl NodeDef for CombineNode {
             PortValue::Geometry3d(Arc::new(crate::geometry::Geometry3d::from_bodies(bodies))),
         );
         Ok(out)
-    }
-}
-
-/// Append a trailing empty Geometry3d input if the node doesn't already
-/// end in one. Combine's empty slot is typed `Geometry3d` (not `None`)
-/// so the canvas's compatibility check refuses non-geometry drops.
-fn ensure_trailing_empty_input(
-    graph: &mut crate::graph::graph::Graph,
-    node: crate::graph::node::NodeId,
-) {
-    let needs_one = match graph.get(node) {
-        Some(n) => n
-            .inputs
-            .last()
-            .map(|s| !s.name.as_ref().is_empty())
-            .unwrap_or(true),
-        None => return,
-    };
-    if needs_one {
-        let uid = graph.allocate_socket_uid();
-        let _ = graph.append_input_socket(
-            node,
-            Socket::new(uid, "", SocketType::Geometry3d, true),
-        );
     }
 }
 

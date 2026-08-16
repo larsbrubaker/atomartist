@@ -342,6 +342,21 @@ pub fn load_graph(file: GraphFile, registry: &NodeRegistry) -> LoadResult {
         });
     }
 
+    // Let each node type reassert the invariants a straight decode cannot
+    // carry — a dynamic-input node (Combine, Boolean) re-appends its
+    // trailing empty slot, so a project written by a build with a
+    // different input model is still connectable. Runs after the noodles
+    // so the hook sees the finished graph.
+    let restored: Vec<(NodeId, Arc<str>)> = graph
+        .nodes()
+        .map(|n| (n.id, n.type_id.clone()))
+        .collect();
+    for (id, type_id) in restored {
+        if let Some(def) = registry.get(type_id.as_ref()).cloned() {
+            def.on_loaded(&mut graph, id);
+        }
+    }
+
     LoadResult {
         graph,
         warnings,
