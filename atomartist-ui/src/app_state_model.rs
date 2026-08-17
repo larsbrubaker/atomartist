@@ -31,7 +31,7 @@ use atomartist_lib::graph::undo_commands::{
     AddNodeCmd, BatchCmd, ChangePropertyCmd, ConnectCmd, DisconnectCmd,
     MoveNodeCmd, RemoveNodeCmd,
 };
-use atomartist_lib::registry::EditorKind;
+use atomartist_lib::registry::{CommitTranslation, EditorKind};
 use atomartist_lib::SocketType;
 
 use crate::app_state::AppState;
@@ -190,9 +190,14 @@ pub fn node_views(
                 // renders them as bare input rows at the top of the
                 // node body. Compute that set up-front and use it to
                 // prune the input list before SocketView translation.
-                let hidden_sockets: std::collections::HashSet<String> = def
-                    .properties()
-                    .into_iter()
+                // The row list is resolved *per instance*: a def may add
+                // rows that only exist for this node's live wiring (the
+                // Boolean's one checkbox per connected operand). Defs
+                // without such rows return their static schema, so this
+                // is the old list for everyone else.
+                let schema = def.resolved_properties(n);
+                let hidden_sockets: std::collections::HashSet<String> = schema
+                    .iter()
                     .filter(|p| !def.row_visible(&p.name, &snapshot))
                     .filter_map(|p| p.bound_input.as_ref().map(|s| s.to_string()))
                     .collect();
@@ -215,8 +220,7 @@ pub fn node_views(
                         display_label: s.display_label.as_ref().map(|l| l.to_string()),
                     })
                     .collect();
-                let properties: Vec<ne::PropertyView> = def
-                    .properties()
+                let properties: Vec<ne::PropertyView> = schema
                     .into_iter()
                     .filter(|p| def.row_visible(&p.name, &snapshot))
                     .map(|p| {
@@ -601,7 +605,30 @@ impl ne::NodeGraphModel for AppStateModel {
             ne::PropertyValue::Text(s) => PortValue::StringVal(Arc::new(s)),
             ne::PropertyValue::Other { .. } => return,
         };
-        let name_arc: Arc<str> = Arc::<str>::from(name);
+        // A row minted per instance (`NodeDef::instance_properties`) has
+        // no property of its own — the def folds its commit into whatever
+        // it actually stores, or refuses it outright when the row no
+        // longer matches the instance (a checkbox for a part that has
+        // since been disconnected). Defs without such rows translate
+        // nothing and the write lands verbatim, exactly as before.
+        let translated = {
+            let ag = self.state.active_graph();
+            let g = ag.lock().unwrap();
+            match g.get(domain_id) {
+                Some(n) => match self.state.registry.get(&n.type_id) {
+                    Some(def) => def.translate_property_commit(n, name, &port_value),
+                    None => CommitTranslation::Passthrough,
+                },
+                None => CommitTranslation::Passthrough,
+            }
+        };
+        let (name_arc, port_value) = match translated {
+            CommitTranslation::Store(real_name, real_value) => (real_name, real_value),
+            CommitTranslation::Passthrough => (Arc::<str>::from(name), port_value),
+            // Silently: the row is stale, so there is nothing to tell the
+            // user about — the panel is about to redraw without it.
+            CommitTranslation::Reject => return,
+        };
         let undo = self.state.active_undo();
         // Slider-coalescing — see MoveNodeCmd::extend_into for the
         // matching node-drag case. Pixel-rate property writes merge

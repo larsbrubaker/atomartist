@@ -270,6 +270,23 @@ impl<'a> PropertyChangedCtx<'a> {
     }
 }
 
+/// What a def wants done with an edit committed against one of its
+/// property rows — the return of
+/// [`NodeDef::translate_property_commit`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum CommitTranslation {
+    /// Store the write as it came. The answer for every ordinary row,
+    /// and the default.
+    Passthrough,
+    /// Store this property instead — the row is synthetic and folds
+    /// into a real one.
+    Store(Arc<str>, PortValue),
+    /// Drop the write. The row is one this def owns and cannot honour
+    /// right now; writing anything would either invent a property or
+    /// act on a part that is no longer there.
+    Reject,
+}
+
 /// One registered node type — describes its factory + behavior.
 pub trait NodeDef: Send + Sync {
     /// Stable identifier used for serialization and registry lookup.
@@ -295,6 +312,59 @@ pub trait NodeDef: Send + Sync {
     /// the latter seeds the value on a brand-new instance).
     fn properties(&self) -> Vec<PropDef> {
         Vec::new()
+    }
+
+    /// Per-**instance** property schema. `None` (the default) means "the
+    /// static [`properties`](Self::properties) schema is the whole story".
+    ///
+    /// [`properties`](Self::properties) describes a node *type*, so a row
+    /// whose very existence depends on what the instance has wired up —
+    /// the Boolean node's one checkbox per connected operand — cannot be
+    /// expressed there. A def that overrides this returns the **complete**
+    /// row list (usually `self.properties()` plus its instance rows), and
+    /// the UI projection uses it verbatim in place of the static schema.
+    ///
+    /// Rows minted here are ordinary [`PropDef`]s in every respect except
+    /// one: their name need not exist in the instance's property map. The
+    /// projection falls back to `PropDef::default` for an absent value, so
+    /// an instance row carries its current state in its default — and a
+    /// commit against such a row must be translated into a write the node
+    /// actually stores (see
+    /// [`translate_property_commit`](Self::translate_property_commit)).
+    ///
+    /// Called once per node per canvas projection: keep it cheap.
+    fn instance_properties(
+        &self,
+        _node: &crate::graph::node::NodeInstance,
+    ) -> Option<Vec<PropDef>> {
+        None
+    }
+
+    /// Translate an edit committed against a property row into the write
+    /// that should actually land on the instance.
+    /// [`Passthrough`](CommitTranslation::Passthrough) (the default)
+    /// stores `name` = `value` unchanged.
+    ///
+    /// This is the write half of [`instance_properties`](Self::instance_properties):
+    /// a synthetic row ("is this operand a remover?") has no property of
+    /// its own, and its commit has to be folded into the real one the node
+    /// stores (a list of selected sockets).
+    /// [`Store`](CommitTranslation::Store) makes the UI's undo command
+    /// target that property instead, so the synthetic name never reaches
+    /// the instance's property map — nothing to serialize, nothing to
+    /// prune. [`Reject`](CommitTranslation::Reject) drops the write
+    /// entirely, which is the answer for a row the def owns but can no
+    /// longer honour (a checkbox naming a socket that has since been
+    /// disconnected): storing it verbatim would leave a phantom property
+    /// behind, and storing *something* would act on a part the user can
+    /// no longer see.
+    fn translate_property_commit(
+        &self,
+        _node: &crate::graph::node::NodeInstance,
+        _name: &str,
+        _value: &PortValue,
+    ) -> CommitTranslation {
+        CommitTranslation::Passthrough
     }
 
     /// Compute outputs from inputs and properties. Pure function — must not
@@ -380,6 +450,15 @@ pub trait NodeDef: Send + Sync {
     /// `None` (the default) means "use the static `PropDef` editor".
     fn editor_override(&self, _prop: &str, _props: &NodeProperties) -> Option<EditorKind> {
         None
+    }
+
+    /// Provided helper: the row list for a live instance — the
+    /// per-instance schema when the def has one, else the static one.
+    /// The single call the UI projection should make; overriding it is
+    /// not intended.
+    fn resolved_properties(&self, node: &crate::graph::node::NodeInstance) -> Vec<PropDef> {
+        self.instance_properties(node)
+            .unwrap_or_else(|| self.properties())
     }
 
     /// Provided helper: the declarative visibility check using each

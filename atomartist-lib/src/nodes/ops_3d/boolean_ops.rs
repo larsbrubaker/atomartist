@@ -179,7 +179,16 @@ impl InputGroup {
 /// (in particular "last input, therefore the default remover") to a
 /// neighbour.
 pub fn operand_sockets(ctx: &EvalCtx) -> Vec<SocketUid> {
-    ctx.instance
+    operand_sockets_of(ctx.instance)
+}
+
+/// [`operand_sockets`] against a bare instance, for the callers that have
+/// no evaluation in hand — the property-row projection (B-3b) builds one
+/// "Part(s) to Subtract" checkbox per entry of this list, and it must be
+/// the *same* list the evaluation resolves the selection against or a row
+/// could name a slot the boolean does not treat as an operand.
+pub fn operand_sockets_of(instance: &crate::graph::node::NodeInstance) -> Vec<SocketUid> {
+    instance
         .inputs
         .iter()
         .filter(|s| !s.name.as_ref().is_empty() && s.socket_type == SocketType::Geometry3d)

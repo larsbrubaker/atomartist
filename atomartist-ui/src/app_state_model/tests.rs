@@ -617,6 +617,124 @@ fn enum_clicks_are_separate_undo_steps() {
     );
 }
 
+/// A Boolean with two Box operands wired in — the fixture for the
+/// per-instance "Part(s) to Subtract" rows.
+fn boolean_with_two_operands(
+    state: &AppState,
+) -> (DomainNodeId, Vec<atomartist_lib::graph::socket::SocketUid>) {
+    use atomartist_lib::graph::graph::Noodle;
+    let mut g = state.graph.lock().unwrap();
+    let b = g.add_new_node("Boolean", [0.0, 0.0], &state.registry).unwrap();
+    g.set_property(b, "operation", PortValue::StringVal(Arc::new("Subtract".into())))
+        .unwrap();
+    let mut slots = Vec::new();
+    for i in 0..2 {
+        let bx = g
+            .add_new_node("Box", [0.0, 100.0 * i as f64], &state.registry)
+            .unwrap();
+        let out = g.get(bx).unwrap().output_by_name("out").unwrap().uid;
+        let slot = g.get(b).unwrap().inputs.last().unwrap().uid;
+        g.connect(Noodle::new(bx, out, b, slot), &state.registry).unwrap();
+        slots.push(slot);
+    }
+    (b, slots)
+}
+
+/// The projection mounts the instance rows, and a click on one lands as
+/// a write to the property the node actually stores — never as a
+/// property named after the row.
+#[test]
+fn a_part_selection_row_commits_into_the_stored_selection() {
+    use atomartist_lib::nodes::ops_3d::boolean_selection;
+    let state = fixture();
+    let (id, slots) = boolean_with_two_operands(&state);
+    let mut model = AppStateModel::new(state.clone());
+
+    let row = format!("{}{}", boolean_selection::ROW_PREFIX, slots[0].0);
+    let view = ne::NodeGraphModel::nodes(&model)
+        .into_iter()
+        .find(|v| v.id == ne::NodeId(id.0))
+        .expect("the Boolean node is projected");
+    let projected = view
+        .properties
+        .iter()
+        .find(|p| p.name == row)
+        .expect("the first operand has a checkbox row");
+    assert!(
+        matches!(projected.current, ne::PropertyValue::Bool(false)),
+        "the first operand is a keep by default, so its row starts unchecked"
+    );
+
+    ne::NodeGraphModel::set_property(
+        &mut model,
+        ne::NodeId(id.0),
+        &row,
+        ne::PropertyValue::Bool(true),
+    );
+
+    let g = state.graph.lock().unwrap();
+    let n = g.get(id).unwrap();
+    assert!(
+        n.properties.get(row.as_str()).is_none(),
+        "the synthetic row name must never reach the property map"
+    );
+    match n.properties.get(boolean_selection::SUBTRACT_PARTS) {
+        Some(PortValue::StringVal(s)) => assert_eq!(
+            s.as_str(),
+            boolean_selection::encode(&slots),
+            "the click must materialize the auto default and add the flipped part"
+        ),
+        other => panic!("the selection is {:?}", other),
+    }
+}
+
+/// Each toggle is its own undo step — the same discrete-commit rule as
+/// the enum strip. The translated write is a string, which is outside
+/// the Number-only coalescing window, and this is what pins that.
+#[test]
+fn part_selection_toggles_are_separate_undo_steps() {
+    use atomartist_lib::nodes::ops_3d::boolean_selection;
+    let state = fixture();
+    let (id, slots) = boolean_with_two_operands(&state);
+    let mut model = AppStateModel::new(state.clone());
+
+    // Check the first row (selection becomes both), then uncheck the
+    // second (selection becomes the first alone).
+    for (slot, checked) in [(slots[0], true), (slots[1], false)] {
+        ne::NodeGraphModel::set_property(
+            &mut model,
+            ne::NodeId(id.0),
+            &format!("{}{}", boolean_selection::ROW_PREFIX, slot.0),
+            ne::PropertyValue::Bool(checked),
+        );
+    }
+    let stored = |label: &str| match state
+        .graph
+        .lock()
+        .unwrap()
+        .get(id)
+        .unwrap()
+        .properties
+        .get(boolean_selection::SUBTRACT_PARTS)
+    {
+        Some(PortValue::StringVal(s)) => s.as_str().to_string(),
+        other => panic!("{label}: the selection is {:?}", other),
+    };
+    assert_eq!(stored("after two clicks"), boolean_selection::encode(&slots[..1]));
+
+    let undo = state.active_undo();
+    undo.lock().unwrap().undo();
+    assert_eq!(
+        stored("after one undo"),
+        boolean_selection::encode(&slots),
+        "one undo must step back to the previous choice, not past both clicks"
+    );
+    assert!(
+        undo.lock().unwrap().can_undo(),
+        "the first click must still be on the undo stack"
+    );
+}
+
 /// Slider scrubs keep their coalescing: a numeric row writes on every
 /// pixel of the drag, and one undo must take the whole drag back.
 #[test]

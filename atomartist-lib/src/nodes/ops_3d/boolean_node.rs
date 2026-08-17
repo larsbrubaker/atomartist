@@ -94,7 +94,7 @@ use crate::geometry::{Body, BodyRole, Geometry3d, DEFAULT_GEOMETRY_COLOR, INHERI
 use crate::graph::node::PortValue;
 use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    enum_variant_for_index, op_props, ConnectCtx, DisconnectCtx, EditorKind, EvalCtx,
+    enum_variant_for_index, op_props, CommitTranslation, ConnectCtx, DisconnectCtx, EditorKind, EvalCtx,
     InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeProperties, NodeRegistry, ParamSet,
     PropDef, VisibleWhen,
 };
@@ -152,12 +152,11 @@ fn own_params() -> ParamSet {
         )
         .string(SUBTRACT_PARTS, "Part(s) to Subtract", boolean_selection::AUTO)
         .no_socket()
-        // Hidden for now: the value is a list of input-socket uids, and
-        // there is no editor that can render a checkbox per *connected
-        // input* — `NodeDef::properties()` is a per-type schema with no
-        // access to the instance, so a dynamic row count is not
-        // expressible today. The semantics (default, pruning, per-input
-        // keep/remove) are live; only the row is missing.
+        // Permanently hidden: the stored value is a list of socket uids,
+        // which is storage, not a control. The user edits it through the
+        // per-operand checkbox rows minted by
+        // [`boolean_selection::rows`] (B-3b) — one row per connected
+        // input, which only a per-*instance* schema can express.
         .visible_when(VisibleWhen::Never)
         .description(
             "Which inputs are cut out of the others. Empty means the last connected \
@@ -272,6 +271,36 @@ impl NodeDef for BooleanNode {
         properties()
     }
 
+    /// The static schema plus "Part(s) to Subtract" — one checkbox per
+    /// connected operand, which only the instance knows about. The rows
+    /// are minted for every operation and *shown* only for the two that
+    /// cut (see [`row_visible`](Self::row_visible)), so visibility stays
+    /// in one place.
+    fn instance_properties(
+        &self,
+        node: &crate::graph::node::NodeInstance,
+    ) -> Option<Vec<PropDef>> {
+        let rows = boolean_selection::rows(node);
+        if rows.is_empty() {
+            return None;
+        }
+        let mut props = properties();
+        props.extend(rows);
+        Some(props)
+    }
+
+    /// A checkbox row commits into the stored uid list; a checkbox for a
+    /// part that is no longer wired is refused; everything else is
+    /// stored as it comes.
+    fn translate_property_commit(
+        &self,
+        node: &crate::graph::node::NodeInstance,
+        name: &str,
+        value: &PortValue,
+    ) -> CommitTranslation {
+        boolean_selection::commit(node, name, value)
+    }
+
     fn on_input_connected(&self, ctx: &mut ConnectCtx) {
         dynamic_inputs::adopt_connected_slot(ctx);
     }
@@ -293,7 +322,7 @@ impl NodeDef for BooleanNode {
         let node = ctx.this_node;
         let (stored, live) = match ctx.graph.get(node) {
             Some(n) => (
-                boolean_selection::stored(&properties_of(n)),
+                boolean_selection::stored(&boolean_selection::properties_of(n)),
                 n.inputs.iter().map(|s| s.uid).collect::<Vec<_>>(),
             ),
             None => return,
@@ -315,6 +344,9 @@ impl NodeDef for BooleanNode {
             SUBTRACT_PARTS => {
                 selection_row_available(props) && self.default_row_visible(name, props)
             }
+            // The per-operand checkboxes and their group title follow the
+            // same `UpdateControls` gate — they *are* the selection row.
+            _ if boolean_selection::is_row(name) => selection_row_available(props),
             KEEP_SUBTRACTED => {
                 keep_subtracted_row_available(props) && self.default_row_visible(name, props)
             }
@@ -562,17 +594,6 @@ fn normalize_pre_b6_color(graph: &mut crate::graph::graph::Graph, node: crate::g
     }
 }
 
-/// A [`NodeProperties`] view of a live instance's property map, so the
-/// selection helpers can read the same way during a graph hook as they do
-/// during evaluation.
-fn properties_of(node: &crate::graph::node::NodeInstance) -> NodeProperties {
-    let mut props = NodeProperties::default();
-    for (k, v) in &node.properties {
-        props.insert(k.clone(), v.clone());
-    }
-    props
-}
-
 pub fn register(reg: &mut NodeRegistry) {
     reg.register(BooleanNode);
 }
@@ -584,6 +605,12 @@ mod tests;
 #[cfg(test)]
 #[path = "boolean_nary_tests.rs"]
 mod nary_tests;
+
+// The per-instance "Part(s) to Subtract" rows (B-3b): the schema half of
+// the selection whose semantics `nary_tests` pins.
+#[cfg(test)]
+#[path = "boolean_rows_tests.rs"]
+mod rows_tests;
 
 // The operation row's schema shape (icon ids, and that the presentation
 // switch left the value semantics alone).

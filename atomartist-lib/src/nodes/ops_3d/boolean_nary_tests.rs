@@ -382,12 +382,12 @@ fn the_selection_row_is_available_only_for_the_cutting_operations() {
     assert!(selection_row_available(&legacy));
 }
 
-/// …and until an editor exists that can draw one checkbox per *connected
-/// input*, the row itself stays out of the property panel: the schema is
-/// per node type and cannot vary its row count with the instance. The
-/// operation gate above is live and tested; only the widget is missing.
+/// …while the raw `subtract_parts` value — a list of socket uids — never
+/// appears in the panel at all. It is storage, not a control: the user
+/// edits it through the per-operand checkbox rows (B-3b, covered in
+/// `boolean_rows_tests`).
 #[test]
-fn the_selection_row_is_still_hidden_pending_a_per_input_editor() {
+fn the_raw_uid_row_is_never_shown() {
     let mut props = NodeProperties::default();
     props.insert("operation", op("Subtract"));
     assert!(!BooleanNode.row_visible(SUBTRACT_PARTS, &props));
