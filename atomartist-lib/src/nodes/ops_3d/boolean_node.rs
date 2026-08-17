@@ -113,6 +113,23 @@ pub struct BooleanNode;
 /// generic index-based migration correct here.
 pub const OPERATIONS: [&str; 4] = ["Combine", "Subtract", "Intersect", "Subtract & Replace"];
 
+/// Icon-registry ids for [`OPERATIONS`], in the same order — the row is
+/// an icon strip (MatterCAD renders this property as an icon row,
+/// `BooleanObject3D.cs:129-151`), and the schema names the artwork
+/// instead of carrying it.
+///
+/// The drawings themselves live in the UI layer
+/// (`atomartist-ui/src/boolean_icons.rs`) and are registered into
+/// agg-gui's icon registry at startup. An id with nothing registered
+/// under it renders as the variant's label, so a headless caller — or a
+/// shell that skipped the registration — still gets a usable row.
+pub const OPERATION_ICONS: [&str; 4] = [
+    "boolean.combine",
+    "boolean.subtract",
+    "boolean.intersect",
+    "boolean.subtract_and_replace",
+];
+
 /// The Boolean node's own params — the shared `color` / `matrix` pair is
 /// added by [`properties`] from [`op_props`], which strips the socket
 /// binding.
@@ -125,9 +142,9 @@ pub const OPERATIONS: [&str; 4] = ["Combine", "Subtract", "Intersect", "Subtract
 fn own_params() -> ParamSet {
     ParamSet::new()
         .enum_("operation", "Operation", OPERATIONS[0], &OPERATIONS)
-        .editor(EditorKind::EnumButtons {
-            variants: OPERATIONS.iter().map(|v| Arc::from(*v)).collect(),
-        })
+        .editor(EditorKind::enum_icons(
+            OPERATIONS.iter().copied().zip(OPERATION_ICONS),
+        ))
         .description(
             "Combine merges the parts; Subtract cuts the selected parts out of the \
              others; Intersect keeps only the shared volume; Subtract & Replace cuts \
@@ -567,6 +584,12 @@ mod tests;
 #[cfg(test)]
 #[path = "boolean_nary_tests.rs"]
 mod nary_tests;
+
+// The operation row's schema shape (icon ids, and that the presentation
+// switch left the value semantics alone).
+#[cfg(test)]
+#[path = "boolean_icons_tests.rs"]
+mod icons_tests;
 
 #[cfg(test)]
 #[path = "boolean_options_tests.rs"]

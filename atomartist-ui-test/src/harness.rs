@@ -18,7 +18,6 @@
 
 use std::sync::Arc;
 
-use agg_gui::text::Font;
 use agg_gui::widget::{
     find_widget_by_id, find_widget_by_id_mut, find_widget_by_type, InspectorNode,
 };
@@ -36,10 +35,10 @@ use atomartist_ui::top_menu_bar::{FileDialogProvider, NoFileDialogs};
 pub const DEFAULT_WIDTH: f64 = 1280.0;
 pub const DEFAULT_HEIGHT: f64 = 720.0;
 
-/// Bundled NotoSans font — same bytes the demo shells `include_bytes!` so
-/// the harness produces a layout that exactly matches running natives.
-const FONT_BYTES: &[u8] =
-    include_bytes!("../../../agg-gui/agg-gui/assets/fonts/NotoSans-Regular.ttf");
+// The bundled font used to be installed here from a local
+// `include_bytes!`. It now arrives through
+// `atomartist_ui::install_theme_and_fonts` — the shells' own startup —
+// so the harness cannot drift from what ships.
 
 /// Scheme of the harness's in-memory store. Tests address projects as
 /// `mem:///whatever.atmr` and never touch the filesystem.
@@ -165,11 +164,14 @@ impl TestHarness {
         state: AppState,
         make_dialogs: impl FnOnce(&FileBrowserModalHandle, &AppState) -> Arc<dyn FileDialogProvider>,
     ) -> Self {
-        // Install the bundled font into agg-gui's thread-local font
-        // slot — most chrome widgets (MenuBar, Label) need it. Idempotent
-        // across multiple harness instances in one test process.
-        let font = Arc::new(Font::from_bytes(FONT_BYTES.to_vec()).expect("bundled NotoSans"));
-        agg_gui::font_settings::set_system_font(Some(font));
+        // Run the shells' own startup: theme, fonts, text-quality
+        // recipe, and the vector icons property rows name by id. Calling
+        // the *same function* the shells call — rather than re-doing a
+        // subset of it here — is what makes a test able to catch a
+        // registration that startup stopped performing. A harness that
+        // installed its own copy would stay green while the shipped app
+        // lost the artwork. Idempotent across harness instances.
+        atomartist_ui::install_theme_and_fonts(1.0);
         // Same storage completion hook both shells install, so a test
         // exercising an off-thread settle sees production wiring rather
         // than a harness that gets away with polling every frame.

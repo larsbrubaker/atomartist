@@ -306,7 +306,8 @@ impl ParamSet {
     /// A first-class enum param: a string value constrained to one of
     /// `variants`, stored as [`PortValue::StringVal`] and rendered (by
     /// default) as an [`EditorKind::EnumDropdown`]. Override the widget
-    /// with [`ParamSet::editor`] (`EnumButtons` / `EnumTabs`).
+    /// with [`ParamSet::editor`] (`EnumButtons` / `EnumTabs` /
+    /// `EnumIcons`).
     ///
     /// Enum params mint **no input socket** (there is no socket type for
     /// an enum) — they are property-only by construction. Read them with
@@ -607,12 +608,10 @@ impl<'a> ParamReader<'a> {
     /// import, a test, a graph built in memory).
     pub fn enum_(&self, name: &str) -> &'a str {
         let p = self.params.param(name);
-        let variants: &'a [Arc<str>] = match &p.editor {
-            EditorKind::EnumDropdown { variants }
-            | EditorKind::EnumButtons { variants }
-            | EditorKind::EnumTabs { variants } => variants.as_slice(),
-            _ => &[],
-        };
+        // Every enum presentation (dropdown, buttons, tabs, icon strip)
+        // answers `enum_variants`; going through it means a param that
+        // switches presentation keeps reading the same way.
+        let variants: &'a [Arc<str>] = p.editor.enum_variants().unwrap_or(&[]);
         let default: &'a str = match &p.default {
             PortValue::StringVal(s) => s.as_str(),
             _ => "",

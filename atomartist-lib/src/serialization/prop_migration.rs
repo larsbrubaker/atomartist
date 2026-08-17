@@ -46,7 +46,7 @@
 //! [`ParamSet::enum_`]: crate::registry::ParamSet::enum_
 
 use crate::graph::node::PortValue;
-use crate::registry::{enum_variant_for_index, EditorKind, PropDef};
+use crate::registry::{enum_variant_for_index, PropDef};
 
 /// Coerce one loaded property value into the shape `prop` declares.
 ///
@@ -54,11 +54,13 @@ use crate::registry::{enum_variant_for_index, EditorKind, PropDef};
 /// stored choice that could not be honoured. `value` comes back
 /// untouched (and warning-free) when no migration applies.
 pub fn migrate_value(prop: &PropDef, value: PortValue) -> (PortValue, Option<String>) {
-    let variants = match &prop.editor {
-        EditorKind::EnumDropdown { variants }
-        | EditorKind::EnumButtons { variants }
-        | EditorKind::EnumTabs { variants } => variants.as_slice(),
-        _ => return (value, None),
+    // Any enum presentation migrates the same way — the presentation
+    // (dropdown, buttons, tabs, icon strip) says nothing about how the
+    // value is stored. Asking `enum_variants` rather than matching means
+    // a row that switches presentation keeps its migration.
+    let variants = match prop.editor.enum_variants() {
+        Some(v) => v,
+        None => return (value, None),
     };
     match value {
         PortValue::Number(n) => match enum_variant_for_index(variants, n) {
@@ -100,6 +102,7 @@ fn default_label(prop: &PropDef) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::EditorKind;
     use std::sync::Arc;
 
     fn enum_prop() -> PropDef {

@@ -12,6 +12,11 @@ pub mod app_state_files_import;
 pub mod app_state_model;
 pub mod app_state_storage;
 pub mod app_state_view;
+// Vector icon artwork for the Boolean node's operation row. Private on
+// purpose: `shell_init` is the only intended caller, so the shells (and
+// the UI-test harness, which runs the same startup) cannot drift into
+// registering a different set.
+mod boolean_icons;
 pub mod breadcrumb_bar;
 pub mod circular_dropdown;
 pub mod circular_icon_button;

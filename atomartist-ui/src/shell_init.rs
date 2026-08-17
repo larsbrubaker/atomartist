@@ -63,6 +63,39 @@ pub fn install_theme_and_fonts(device_scale: f64) {
     agg_gui::font_settings::set_faux_weight(0.0);
     agg_gui::font_settings::set_faux_italic(0.0);
     agg_gui::font_settings::set_primary_weight(1.0 / 3.0);
+
+    install_icons();
+}
+
+/// Register the vector icons that property rows name by id.
+///
+/// Part of [`install_theme_and_fonts`] rather than each shell's own
+/// startup for the same anti-drift reason as the fonts: an unregistered
+/// id falls back to the variant's *text*, so a shell that forgot the
+/// call would quietly render a different, worse control instead of
+/// failing. Exposed separately only so the failure path is documented in
+/// one place.
+///
+/// The path data is a compile-time constant, so a failure here is a
+/// programming error, not a runtime condition:
+///
+/// - `debug_assert!` makes it fatal in every debug build — including the
+///   wasm dev build, where `console_error_panic_hook` (installed by the
+///   wasm shell) puts the panic and its stack in the browser console.
+///   This is what makes the failure *visible on both platforms* without
+///   atomartist-ui taking a `web-sys` dependency of its own.
+/// - a release build prints and carries on, because the only consequence
+///   is an icon row that reads as truncated text; refusing to start the
+///   app over decoration would be the worse trade.
+///
+/// It is also covered statically: `boolean_icons`'s tests fail if the
+/// bundled path data stops parsing, so this can only fire between an
+/// edit and its test run.
+fn install_icons() {
+    if let Err(e) = crate::boolean_icons::register_boolean_icons() {
+        debug_assert!(false, "boolean operation icons failed to register: {e}");
+        eprintln!("boolean operation icons failed to register: {e}");
+    }
 }
 
 /// Teach `atomartist-storage` how to wake the UI when a job settles off
