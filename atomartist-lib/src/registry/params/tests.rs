@@ -243,6 +243,95 @@ fn number_unbounded_has_no_range() {
 }
 
 #[test]
+fn reader_clamps_socket_value_to_declared_range() {
+    let ps = sample();
+    // `width` is declared 0.1..=100.0.
+    let (inst, inputs, props) =
+        fixture(&ps, &[("width", PortValue::Number(1_000.0))], &[]);
+    let ctx = EvalCtx { instance: &inst, properties: &props, inputs: &inputs };
+    assert_eq!(ps.reader(&ctx).number("width"), 100.0);
+
+    let (inst, inputs, props) =
+        fixture(&ps, &[("width", PortValue::Number(-1.0))], &[]);
+    let ctx = EvalCtx { instance: &inst, properties: &props, inputs: &inputs };
+    assert_eq!(ps.reader(&ctx).number("width"), 0.1);
+}
+
+#[test]
+fn reader_clamps_out_of_range_property_to_declared_range() {
+    // A deserialized / programmatically built graph can carry a stored
+    // property outside the declared range; the reader clamps it too.
+    let ps = sample();
+    let (inst, inputs, props) =
+        fixture(&ps, &[], &[("width", PortValue::Number(500.0))]);
+    let ctx = EvalCtx { instance: &inst, properties: &props, inputs: &inputs };
+    assert_eq!(ps.reader(&ctx).number("width"), 100.0);
+
+    let (inst, inputs, props) =
+        fixture(&ps, &[], &[("width", PortValue::Number(-7.0))]);
+    let ctx = EvalCtx { instance: &inst, properties: &props, inputs: &inputs };
+    assert_eq!(ps.reader(&ctx).number("width"), 0.1);
+}
+
+#[test]
+fn reader_ignores_non_finite_socket_value() {
+    let ps = sample();
+    // NaN on the socket is unusable → fall through to the property.
+    let (inst, inputs, props) = fixture(
+        &ps,
+        &[("width", PortValue::Number(f64::NAN))],
+        &[("width", PortValue::Number(3.0))],
+    );
+    let ctx = EvalCtx { instance: &inst, properties: &props, inputs: &inputs };
+    assert_eq!(ps.reader(&ctx).number("width"), 3.0);
+
+    // With no property either, it falls all the way to the default.
+    let (inst, inputs, props) =
+        fixture(&ps, &[("width", PortValue::Number(f64::INFINITY))], &[]);
+    let ctx = EvalCtx { instance: &inst, properties: &props, inputs: &inputs };
+    assert_eq!(ps.reader(&ctx).number("width"), 4.0);
+}
+
+#[test]
+fn reader_ignores_non_finite_property() {
+    // A NaN stored property is as unusable as a NaN socket value: it must
+    // fall through to the declared default rather than clamping to the
+    // range minimum (NaN.max(lo) == lo).
+    let ps = sample();
+    let (inst, inputs, props) =
+        fixture(&ps, &[], &[("width", PortValue::Number(f64::NAN))]);
+    let ctx = EvalCtx { instance: &inst, properties: &props, inputs: &inputs };
+    assert_eq!(ps.reader(&ctx).number("width"), 4.0);
+
+    // Same for an unbounded param, where NaN would otherwise propagate.
+    let unbounded = ParamSet::new().number_unbounded("tx", "Translate X", 2.5);
+    let (inst, inputs, props) =
+        fixture(&unbounded, &[], &[("tx", PortValue::Number(f64::NEG_INFINITY))]);
+    let ctx = EvalCtx { instance: &inst, properties: &props, inputs: &inputs };
+    assert_eq!(unbounded.reader(&ctx).number("tx"), 2.5);
+}
+
+#[test]
+fn reader_passes_unbounded_param_through_unclamped() {
+    let ps = ParamSet::new().number_unbounded("tx", "Translate X", 0.0);
+    let (inst, inputs, props) =
+        fixture(&ps, &[("tx", PortValue::Number(-1.0e9))], &[]);
+    let ctx = EvalCtx { instance: &inst, properties: &props, inputs: &inputs };
+    assert_eq!(ps.reader(&ctx).number("tx"), -1.0e9);
+}
+
+/// An inverted range is an author error caught at declaration time in
+/// debug builds — otherwise every value would clamp to a single point.
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "inverted numeric range")]
+fn inverted_range_panics_in_debug() {
+    let _ = ParamSet::new()
+        .number("width", "Width", 4.0, 0.1..=100.0)
+        .range(10.0, 1.0);
+}
+
+#[test]
 fn socket_named_override_renames_socket_and_bind_input() {
     let ps = ParamSet::new()
         .number("width", "Width", 4.0, 0.1..=100.0)

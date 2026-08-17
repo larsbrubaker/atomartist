@@ -92,6 +92,29 @@ impl Param {
             socketable: true,
         }
     }
+
+    /// The param's declared inclusive numeric range, if it has one.
+    /// Read off the editor hint (`NumberDrag` / `Slider` attrs) — the
+    /// same source `PropDef::with_editor` mirrors onto `PropDef::min` /
+    /// `max`, so the reader and the UI agree on the bounds.
+    fn numeric_range(&self) -> (Option<f64>, Option<f64>) {
+        self.editor.numeric_range()
+    }
+
+    /// Clamp `v` into the param's declared range. Uses `max().min()`
+    /// rather than `f64::clamp`, which panics when a bound is NaN; this
+    /// form treats a NaN bound as "no constraint" on that side.
+    fn clamp_number(&self, v: f64) -> f64 {
+        let (min, max) = self.numeric_range();
+        let mut v = v;
+        if let Some(lo) = min {
+            v = v.max(lo);
+        }
+        if let Some(hi) = max {
+            v = v.min(hi);
+        }
+        v
+    }
 }
 
 /// An ordered, declarative set of node parameters. Build one with the
@@ -184,40 +207,30 @@ impl ParamSet {
     // ---- value constructors (each appends a new param) ----
 
     /// A numeric param rendered as a drag-value editor over `range`.
+    ///
+    /// Routed through [`ParamSet::range`] so every declared numeric range
+    /// passes the same author-error guard (see that method).
     pub fn number(
-        mut self,
+        self,
         name: impl Into<Arc<str>>,
         label: impl Into<Arc<str>>,
         default: f64,
         range: RangeInclusive<f64>,
     ) -> Self {
-        let attrs = NumberAttrs::with_range(*range.start(), *range.end());
-        self.params.push(Param::new(
-            name,
-            label,
-            PortValue::Number(default),
-            EditorKind::NumberDrag(attrs),
-        ));
-        self
+        let (min, max) = (*range.start(), *range.end());
+        self.number_unbounded(name, label, default).range(min, max)
     }
 
     /// A numeric param with an explicit drag `step`.
     pub fn number_stepped(
-        mut self,
+        self,
         name: impl Into<Arc<str>>,
         label: impl Into<Arc<str>>,
         default: f64,
         range: RangeInclusive<f64>,
         step: f64,
     ) -> Self {
-        let attrs = NumberAttrs::with_range(*range.start(), *range.end()).with_step(step);
-        self.params.push(Param::new(
-            name,
-            label,
-            PortValue::Number(default),
-            EditorKind::NumberDrag(attrs),
-        ));
-        self
+        self.number(name, label, default, range).step(step)
     }
 
     /// A boolean param rendered as a toggle.
@@ -385,8 +398,20 @@ impl ParamSet {
         self
     }
 
-    /// Override the last param's numeric range.
+    /// Override the last param's numeric range. This is the single choke
+    /// point through which every declared numeric range flows
+    /// ([`ParamSet::number`] and [`ParamSet::number_stepped`] route here),
+    /// so it is where an inverted range is caught: `.range(10.0, 1.0)`
+    /// would make [`ParamReader::number`] clamp every value to a single
+    /// point, silently. `debug_assert` fails that fast in debug builds
+    /// (including the registry-wide test sweeps) without costing anything
+    /// in release.
     pub fn range(mut self, min: f64, max: f64) -> Self {
+        let name = self.last_mut().name.clone();
+        debug_assert!(
+            min <= max,
+            "param '{name}' declares an inverted numeric range: min {min} > max {max}",
+        );
         let a = self.number_attrs_mut();
         a.min = Some(min);
         a.max = Some(max);
@@ -527,21 +552,44 @@ pub struct ParamReader<'a> {
 }
 
 impl<'a> ParamReader<'a> {
-    /// Read a numeric param.
+    /// Read a numeric param, **clamped to the param's declared range**
+    /// (the min/max on its [`NumberAttrs`]); params declared with
+    /// [`ParamSet::number_unbounded`] carry no range and pass through
+    /// unchanged.
+    ///
+    /// Clamping happens on the resolved value regardless of where it came
+    /// from. The UI clamps property edits, but a socket-fed value (a
+    /// NumberConst of -1 wired into Transform's `Scale X`) and a stored
+    /// property from a deserialized or programmatically built graph both
+    /// bypass the widget entirely — without this they could hand the CSG
+    /// kernel a mirrored, negative-determinant transform.
+    ///
+    /// A non-finite value (NaN / ±∞) is treated as unusable and skipped
+    /// wherever it appears in the chain — on the socket *and* in the
+    /// stored property — so resolution falls through to the next source
+    /// and ultimately to the declared default. This is the same rule
+    /// [`enum_variant_for_index`] applies to a non-finite legacy enum
+    /// index. Without it a NaN property would resolve to the range's
+    /// minimum (clamping NaN with `max()`) or, on an unbounded param,
+    /// propagate NaN into the geometry kernel.
     pub fn number(&self, name: &str) -> f64 {
         let p = self.params.param(name);
         if p.socketable {
             if let PortValue::Number(n) = self.ctx.input_named(&p.socket_name) {
-                return *n;
+                if n.is_finite() {
+                    return p.clamp_number(*n);
+                }
             }
         }
-        match self.ctx.properties.get(name) {
+        let stored = match self.ctx.properties.get(name) {
+            PortValue::Number(n) if n.is_finite() => Some(*n),
+            _ => None,
+        };
+        let resolved = stored.unwrap_or(match &p.default {
             PortValue::Number(n) => *n,
-            _ => match &p.default {
-                PortValue::Number(n) => *n,
-                _ => 0.0,
-            },
-        }
+            _ => 0.0,
+        });
+        p.clamp_number(resolved)
     }
 
     /// Read a boolean param.
