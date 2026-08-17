@@ -37,8 +37,13 @@ pub struct TransformNode;
 /// `matrix` params, but marks `matrix` `no_socket`: Transform builds its
 /// own matrix from the nine translate/rotate/scale parameters and would
 /// discard any op `matrix` input, so wiring one would be a silent no-op.
-/// The translation offsets are unbounded; rotations and scales carry the
-/// NodeDesigner ranges. Capitalized socket names are preserved.
+/// The translation offsets are unbounded, and so are the rotations:
+/// rotation is cyclic, so a wired multi-turn angle (720°, or an
+/// animated angle that keeps winding) is a legal orientation rather
+/// than an out-of-range value, and clamping it to ±360° would silently
+/// change the result. Only the scales carry a declared range
+/// (0.001..=1000.0), which keeps a wired negative scale from handing the
+/// CSG kernel a mirrored body. Capitalized socket names are preserved.
 fn params() -> ParamSet {
     ParamSet::op()
         .no_socket() // `matrix`: property-only; Transform builds its own.
@@ -48,11 +53,11 @@ fn params() -> ParamSet {
         .socket_named("Translate Y")
         .number_unbounded("tz", "Translate Z", 0.0)
         .socket_named("Translate Z")
-        .number("rx", "Rotate X", 0.0, -360.0..=360.0)
+        .number_unbounded("rx", "Rotate X", 0.0)
         .socket_named("Rotate X")
-        .number("ry", "Rotate Y", 0.0, -360.0..=360.0)
+        .number_unbounded("ry", "Rotate Y", 0.0)
         .socket_named("Rotate Y")
-        .number("rz", "Rotate Z", 0.0, -360.0..=360.0)
+        .number_unbounded("rz", "Rotate Z", 0.0)
         .socket_named("Rotate Z")
         .number("sx", "Scale X", 1.0, 0.001..=1000.0)
         .socket_named("Scale X")
@@ -379,6 +384,75 @@ mod tests {
                    "Transform should claim origin = its own NodeId; got {:?}", body.origin);
         assert_ne!(body.origin, Some(upstream_node_id),
                    "upstream Box's origin must be overwritten");
+    }
+
+    /// A NumberConst emitting -1 wired into `Scale X` must not produce a
+    /// mirrored (negative-determinant) transform: `sx` is declared
+    /// 0.001..=1000.0, so the socket value clamps to the declared minimum
+    /// before it reaches the matrix. Before the clamp landed, this graph
+    /// handed the CSG kernel an inside-out body.
+    #[test]
+    fn negative_wired_scale_x_clamps_instead_of_mirroring() {
+        use crate::graph::{executor::evaluate_all, Graph, Noodle};
+        use crate::nodes::register_all;
+
+        let mut reg = NodeRegistry::new();
+        register_all(&mut reg);
+        let mut g = Graph::new();
+        let boxn = g.add_new_node("Box", [0.0, 0.0], &reg).unwrap();
+        let xf = g.add_new_node("Transform", [200.0, 0.0], &reg).unwrap();
+        let bout = g.get(boxn).unwrap().output_by_name("out").unwrap().uid;
+        let xin = g.get(xf).unwrap().input_by_name("input").unwrap().uid;
+        g.connect(Noodle::new(boxn, bout, xf, xin), &reg).unwrap();
+
+        let nc = g.add_new_node("NumberConst", [-200.0, 0.0], &reg).unwrap();
+        g.set_property(nc, "value", PortValue::Number(-1.0)).unwrap();
+        let nc_out = g.get(nc).unwrap().output_by_name("out").unwrap().uid;
+        let sx_in = g.get(xf).unwrap().input_by_name("Scale X").unwrap().uid;
+        g.connect(Noodle::new(nc, nc_out, xf, sx_in), &reg).unwrap();
+
+        evaluate_all(&mut g, &reg).unwrap().expect_clean();
+        let out_uid = g.get(xf).unwrap().output_by_name("out").unwrap().uid;
+        let m = match g.get(xf).unwrap().cached_outputs.get(&out_uid) {
+            Some(PortValue::Geometry3d(geo)) => geo.first().unwrap().matrix,
+            other => panic!("expected Geometry3d output, got {other:?}"),
+        };
+        // The X-scale cell carries the clamped minimum, not -1.
+        assert!(
+            (m[0] - 0.001).abs() < 1e-6,
+            "wired sx=-1 must clamp to the declared 0.001 minimum; got matrix[0]={}",
+            m[0]
+        );
+        // And the upper-left 3×3 determinant stays positive (not mirrored).
+        let det = m[0] * (m[5] * m[10] - m[9] * m[6])
+            - m[4] * (m[1] * m[10] - m[9] * m[2])
+            + m[8] * (m[1] * m[6] - m[5] * m[2]);
+        assert!(det > 0.0, "transform must not be mirrored; determinant was {det}");
+    }
+
+    /// Rotation is cyclic, so a wired multi-turn angle must reach the
+    /// matrix unclamped. 810° about Z is two full turns plus 90°; if the
+    /// reader clamped it to a ±360° range it would come out as a plain
+    /// 360° (identity) rotation instead.
+    #[test]
+    fn wired_multi_turn_rotation_is_not_clamped() {
+        let n = TransformNode;
+        let mesh = Arc::new(generate_box(1.0, 1.0, 1.0));
+        let (inst, mut inputs) = setup_with_body(Body::from_mesh(mesh));
+        let rz_uid = inst.input_by_name("Rotate Z").unwrap().uid;
+        inputs.insert(rz_uid, PortValue::Number(810.0));
+        let props = props_with(&[]);
+        let ctx = EvalCtx { instance: &inst, properties: &props, inputs: &inputs };
+        let outs = n.evaluate(&ctx).unwrap();
+        let body = first_body(&outs);
+        // Column-major rot-Z: m[0] = cos, m[1] = sin. 810° ≡ 90°.
+        assert!(
+            body.matrix[0].abs() < 1e-5 && (body.matrix[1] - 1.0).abs() < 1e-5,
+            "wired Rotate Z=810 must pass through as a 90° rotation \
+             (cos≈0, sin≈1); got matrix[0]={}, matrix[1]={}",
+            body.matrix[0],
+            body.matrix[1]
+        );
     }
 
     /// Multi-body inputs: every body gets composed, not just the first.
