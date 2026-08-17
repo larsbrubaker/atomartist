@@ -483,11 +483,12 @@ fn nested_drill_in_serves_inner_template() {
     );
 }
 
-/// `node_errors` is keyed by **root-graph** node id, and a component
-/// template allocates ids from its own space — here the template's node
-/// has *the same id* as the failing root instance, which is exactly the
-/// collision the projection has to refuse. While drilled in, nobody
-/// wears a badge.
+/// `node_errors` — and `node_warnings`, which is keyed the same way —
+/// use **root-graph** node ids, and a component template allocates ids
+/// from its own space: here the template's node has *the same id* as the
+/// failing root instance, which is exactly the collision the projection
+/// has to refuse. While drilled in, nobody wears a badge of either
+/// severity.
 #[test]
 fn drilled_in_nodes_never_wear_the_root_graphs_error_badges() {
     let (state, template, type_id) = component_fixture();
@@ -499,22 +500,34 @@ fn drilled_in_nodes_never_wear_the_root_graphs_error_badges() {
     let inner = template.lock().unwrap().nodes().next().unwrap().id;
     assert_eq!(inner, inst, "the id spaces really do collide");
 
-    // The component instance is the failing node at the root.
+    // The component instance is the failing node at the root — and a
+    // degraded one, so the amber badge is under the same test.
     state
         .node_errors
         .lock()
         .unwrap()
         .insert(inst, "Comp: subgraph eval failed".to_string());
+    state
+        .node_warnings
+        .lock()
+        .unwrap()
+        .insert(inst, "Comp: 1 of 3 parts were skipped".to_string());
 
     let mut model = AppStateModel::new(state);
     let at_root = ne::NodeGraphModel::nodes(&model);
+    let root_view = at_root
+        .iter()
+        .find(|n| n.id.0 == inst.0)
+        .expect("the instance is in the root projection");
     assert_eq!(
-        at_root
-            .iter()
-            .find(|n| n.id.0 == inst.0)
-            .and_then(|n| n.error.as_deref()),
+        root_view.error.as_deref(),
         Some("Comp: subgraph eval failed"),
         "the root instance is badged"
+    );
+    assert_eq!(
+        root_view.warning.as_deref(),
+        Some("Comp: 1 of 3 parts were skipped"),
+        "and carries its warning too — the canvas picks which one shows"
     );
 
     assert!(ne::NodeGraphModel::on_node_activated(
@@ -527,6 +540,10 @@ fn drilled_in_nodes_never_wear_the_root_graphs_error_badges() {
     assert!(!inside.is_empty());
     assert!(
         inside.iter().all(|n| n.error.is_none()),
-        "no badges inside a component"
+        "no error badges inside a component"
+    );
+    assert!(
+        inside.iter().all(|n| n.warning.is_none()),
+        "and no warning badges either — same colliding id space"
     );
 }

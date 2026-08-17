@@ -75,10 +75,15 @@ fn harness_with_broken_node() -> (TestHarness, atomartist_lib::graph::node::Node
 fn badges(harness: &TestHarness) -> Vec<Option<String>> {
     let state = harness.state();
     let graph = state.graph.lock().unwrap();
-    node_views(&graph, &state.registry, &state.node_errors_snapshot())
-        .into_iter()
-        .map(|view| view.error)
-        .collect()
+    node_views(
+        &graph,
+        &state.registry,
+        &state.node_errors_snapshot(),
+        &state.node_warnings_snapshot(),
+    )
+    .into_iter()
+    .map(|view| view.error)
+    .collect()
 }
 
 /// The failure reaches the status bar, names the node, and — however

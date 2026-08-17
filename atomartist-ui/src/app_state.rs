@@ -481,14 +481,9 @@ impl AppState {
         }
     }
 
-    /// Snapshot of every currently-failing node, keyed by node id, with
-    /// the message the canvas badges and the status bar shows.
-    pub fn node_errors_snapshot(&self) -> std::collections::HashMap<NodeId, String> {
-        self.node_errors
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-    }
+    // The badge-map snapshots (`node_errors_snapshot` /
+    // `node_warnings_snapshot`) live in `crate::eval_errors`, which owns
+    // both maps' semantics — and this file is at the 800-line cap.
 
     /// Set the display target — the canvas calls this when the user
     /// selects a node with a Geometry3d output.

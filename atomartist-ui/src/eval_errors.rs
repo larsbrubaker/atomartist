@@ -5,6 +5,10 @@
 //! (`NodeView::error`, painted by the canvas's node widgets through
 //! `agg_gui_node_editor::draw_error`).
 //!
+//! Warnings ride the same machinery in a second map (`node_warnings`):
+//! same change-only posting rule, same pruning, and since B-5a the same
+//! badge shape in amber instead of red.
+//!
 //! Owned by [`AppState`](crate::AppState) as `node_errors` and written by
 //! the evaluator task in `app_state.rs`; read by
 //! [`crate::app_state_model::node_views`] when it projects the graph for
@@ -51,6 +55,30 @@ use crate::NoticeLevel;
 
 /// Message per currently-failing node, shared with clones of `AppState`.
 pub type NodeErrors = Arc<Mutex<HashMap<NodeId, String>>>;
+
+/// The read side of the two maps, on [`AppState`](crate::AppState) itself
+/// because that is where callers hold them — but written here, next to
+/// the rules that fill them (and because `app_state.rs` sits at the
+/// 800-line cap).
+impl crate::AppState {
+    /// Snapshot of every currently-failing node, keyed by node id, with
+    /// the message the canvas badges in red and the status bar shows.
+    pub fn node_errors_snapshot(&self) -> HashMap<NodeId, String> {
+        snapshot(&self.node_errors)
+    }
+
+    /// Snapshot of every node whose last evaluation was *degraded* —
+    /// output exists, but something was skipped or rescued. Badged
+    /// amber, so a permanently degraded node stays visible long after
+    /// its status-bar notice has scrolled away.
+    pub fn node_warnings_snapshot(&self) -> HashMap<NodeId, String> {
+        snapshot(&self.node_warnings)
+    }
+}
+
+fn snapshot(map: &NodeErrors) -> HashMap<NodeId, String> {
+    map.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
 
 /// Build the user-facing message set for one pass: the node's own error
 /// text, prefixed with the node type's display name so the sentence
@@ -101,9 +129,11 @@ pub struct PassOutcome<'a> {
     pub failures: HashMap<NodeId, String>,
     /// Message per node that succeeded with something to report. Kept
     /// apart from [`failures`](Self::failures) all the way to the
-    /// status bar: a warning must not badge the node, because the badge
-    /// means "this node produced nothing and everything downstream is
-    /// blocked", which is exactly what a degraded result is not.
+    /// status bar and the canvas: a warning badges the node *amber*
+    /// (`NodeView::warning`), never red, because red means "this node
+    /// produced nothing and everything downstream is blocked", which is
+    /// exactly what a degraded result is not. A node in both maps wears
+    /// the error badge — the canvas resolves that.
     pub warnings: HashMap<NodeId, String>,
     /// Nodes that evaluated *successfully* this pass — their stale error
     /// is dropped.

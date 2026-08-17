@@ -124,14 +124,21 @@ fn harness_with_degraded_node() -> (TestHarness, Ids) {
     (TestHarness::with_app_state(state), (warner, sink))
 }
 
-/// The `NodeView::error` of every node in the canvas snapshot.
+/// The `NodeView::error` of every node in the canvas snapshot — the
+/// *red* badge. (A warning badges amber instead; that projection is
+/// covered by `node_warning_badge.rs`.)
 fn badges(harness: &TestHarness) -> Vec<Option<String>> {
     let state = harness.state();
     let graph = state.graph.lock().unwrap();
-    node_views(&graph, &state.registry, &state.node_errors_snapshot())
-        .into_iter()
-        .map(|view| view.error)
-        .collect()
+    node_views(
+        &graph,
+        &state.registry,
+        &state.node_errors_snapshot(),
+        &state.node_warnings_snapshot(),
+    )
+    .into_iter()
+    .map(|view| view.error)
+    .collect()
 }
 
 /// The warning reaches the status bar at [`NoticeLevel::Warning`], names
@@ -164,10 +171,11 @@ fn a_degraded_node_posts_one_warning_notice_not_one_per_pass() {
     );
 }
 
-/// The node is **not** badged and its dependents evaluate normally — the
-/// whole point of a warning being something other than a failure.
+/// The node is **not** badged as broken and its dependents evaluate
+/// normally — the whole point of a warning being something other than a
+/// failure. (It does wear the amber badge; see `node_warning_badge.rs`.)
 #[test]
-fn a_warning_neither_badges_the_node_nor_blocks_downstream() {
+fn a_warning_neither_errors_the_node_nor_blocks_downstream() {
     let (harness, (_, sink)) = harness_with_degraded_node();
     harness.evaluate_now();
 

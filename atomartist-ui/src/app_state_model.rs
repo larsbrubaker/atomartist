@@ -28,8 +28,7 @@ use atomartist_lib::graph::graph::Noodle;
 use atomartist_lib::graph::node::{NodeId as DomainNodeId, PortValue};
 use atomartist_lib::graph::socket::SocketUid;
 use atomartist_lib::graph::undo_commands::{
-    AddNodeCmd, BatchCmd, ChangePropertyCmd, ConnectCmd, DisconnectCmd,
-    MoveNodeCmd, RemoveNodeCmd,
+    AddNodeCmd, BatchCmd, ChangePropertyCmd, ConnectCmd, DisconnectCmd, MoveNodeCmd, RemoveNodeCmd,
 };
 use atomartist_lib::registry::{CommitTranslation, EditorKind};
 use atomartist_lib::SocketType;
@@ -144,7 +143,9 @@ impl AppStateModel {
             PortValue::Geometry3d(_) => ne::PropertyValue::Other {
                 display: "Geometry".into(),
             },
-            PortValue::None => ne::PropertyValue::Other { display: "—".into() },
+            PortValue::None => ne::PropertyValue::Other {
+                display: "—".into(),
+            },
         }
     }
 }
@@ -159,137 +160,148 @@ impl AppStateModel {
 /// graph the insertion actually targets (the mesh import, for one,
 /// always inserts into the root graph).
 ///
-/// `errors` is the last evaluation's per-node failure messages (see
-/// [`crate::eval_errors`]); a node listed there gets an error badge on
-/// the canvas. Callers that only need geometry (node sizing / placement)
-/// pass an empty map.
+/// `errors` is the last evaluation's per-node failure messages and
+/// `warnings` its degraded-but-usable ones (see [`crate::eval_errors`]);
+/// a node listed in either gets a badge on the canvas, red for an error
+/// and amber for a warning — the canvas resolves the tie when a node is
+/// in both. Callers that only need geometry (node sizing / placement)
+/// pass empty maps.
 pub fn node_views(
     g: &atomartist_lib::Graph,
     reg: &atomartist_lib::registry::NodeRegistry,
     errors: &std::collections::HashMap<atomartist_lib::graph::node::NodeId, String>,
+    warnings: &std::collections::HashMap<atomartist_lib::graph::node::NodeId, String>,
 ) -> Vec<ne::NodeView> {
     g.nodes()
-            .filter_map(|n| {
-                let def = reg.get(&n.type_id)?;
-                // Row-by-row visibility runs through `NodeDef::row_visible`,
-                // the Rust analogue of MatterCAD's
-                // `IPropertyGridModifier.UpdateControls(change)`. The
-                // default impl applies each `PropDef.visible_when`
-                // against the live `advanced` toggle; nodes with
-                // complex inter-property predicates (e.g. an Align
-                // node where `XOffset` depends on both `XAlign` and
-                // `XMode`) override the hook to express the full
-                // logic. Build a `NodeProperties` snapshot once per
-                // node, then ask the def whether each row is visible.
-                let mut snapshot = atomartist_lib::registry::NodeProperties::default();
-                for (k, v) in &n.properties {
-                    snapshot.insert(k.clone(), v.clone());
-                }
-                // Sockets whose bound property is currently filtered
-                // out should disappear too — otherwise the canvas
-                // renders them as bare input rows at the top of the
-                // node body. Compute that set up-front and use it to
-                // prune the input list before SocketView translation.
-                // The row list is resolved *per instance*: a def may add
-                // rows that only exist for this node's live wiring (the
-                // Boolean's one checkbox per connected operand). Defs
-                // without such rows return their static schema, so this
-                // is the old list for everyone else.
-                let schema = def.resolved_properties(n);
-                let hidden_sockets: std::collections::HashSet<String> = schema
-                    .iter()
-                    .filter(|p| !def.row_visible(&p.name, &snapshot))
-                    .filter_map(|p| p.bound_input.as_ref().map(|s| s.to_string()))
-                    .collect();
-                let inputs: Vec<ne::SocketView> = n
-                    .inputs
-                    .iter()
-                    .filter(|s| !hidden_sockets.contains(s.name.as_ref()))
-                    .map(|s| ne::SocketView {
-                        name: s.name.to_string(),
-                        socket_type: AppStateModel::socket_type_to_id(s.socket_type),
-                        display_label: s.display_label.as_ref().map(|l| l.to_string()),
-                    })
-                    .collect();
-                let outputs: Vec<ne::SocketView> = n
-                    .outputs
-                    .iter()
-                    .map(|s| ne::SocketView {
-                        name: s.name.to_string(),
-                        socket_type: AppStateModel::socket_type_to_id(s.socket_type),
-                        display_label: s.display_label.as_ref().map(|l| l.to_string()),
-                    })
-                    .collect();
-                let properties: Vec<ne::PropertyView> = schema
-                    .into_iter()
-                    .filter(|p| def.row_visible(&p.name, &snapshot))
-                    .map(|p| {
-                        let current = n
-                            .properties
-                            .get(&p.name)
-                            .cloned()
-                            .unwrap_or_else(|| p.default.clone());
-                        // Let the node vary a property's editor with its
-                        // live values (e.g. NumberConst's value slider
-                        // tracking the instance's min/max/step). Falls
-                        // back to the static schema editor when the node
-                        // has no override for this property.
-                        let editor = def
-                            .editor_override(&p.name, &snapshot)
-                            .unwrap_or_else(|| p.editor.clone());
-                        let (min, max) = match editor.numeric_range() {
-                            (Some(mn), Some(mx)) => (Some(mn), Some(mx)),
-                            _ => (p.min, p.max),
-                        };
-                        ne::PropertyView {
-                            name: p.name.to_string(),
-                            display_label: p.label.as_ref().map(|l| l.to_string()),
-                            current: AppStateModel::property_value_to_ne(&current, &editor),
-                            min,
-                            max,
-                            bound_input: p.bound_input.as_ref().map(|s| s.to_string()),
-                            editor: AppStateModel::editor_kind_to_ne(&editor),
-                            // Forward the full schema-side editor so
-                            // the per-kind row renderers (`paint_row`)
-                            // can mount the right pill, toggle,
-                            // swatch, etc.
-                            editor_kind: Some(editor),
-                        }
-                    })
-                    .collect();
-                Some(ne::NodeView {
-                    id: AppStateModel::to_ne(n.id),
-                    type_id: def.type_id().into(),
-                    display_name: def.display_name().into(),
-                    category: def.category().into(),
-                    position: n.position,
-                    inputs,
-                    outputs,
-                    properties,
-                    error: errors.get(&n.id).cloned(),
+        .filter_map(|n| {
+            let def = reg.get(&n.type_id)?;
+            // Row-by-row visibility runs through `NodeDef::row_visible`,
+            // the Rust analogue of MatterCAD's
+            // `IPropertyGridModifier.UpdateControls(change)`. The
+            // default impl applies each `PropDef.visible_when`
+            // against the live `advanced` toggle; nodes with
+            // complex inter-property predicates (e.g. an Align
+            // node where `XOffset` depends on both `XAlign` and
+            // `XMode`) override the hook to express the full
+            // logic. Build a `NodeProperties` snapshot once per
+            // node, then ask the def whether each row is visible.
+            let mut snapshot = atomartist_lib::registry::NodeProperties::default();
+            for (k, v) in &n.properties {
+                snapshot.insert(k.clone(), v.clone());
+            }
+            // Sockets whose bound property is currently filtered
+            // out should disappear too — otherwise the canvas
+            // renders them as bare input rows at the top of the
+            // node body. Compute that set up-front and use it to
+            // prune the input list before SocketView translation.
+            // The row list is resolved *per instance*: a def may add
+            // rows that only exist for this node's live wiring (the
+            // Boolean's one checkbox per connected operand). Defs
+            // without such rows return their static schema, so this
+            // is the old list for everyone else.
+            let schema = def.resolved_properties(n);
+            let hidden_sockets: std::collections::HashSet<String> = schema
+                .iter()
+                .filter(|p| !def.row_visible(&p.name, &snapshot))
+                .filter_map(|p| p.bound_input.as_ref().map(|s| s.to_string()))
+                .collect();
+            let inputs: Vec<ne::SocketView> = n
+                .inputs
+                .iter()
+                .filter(|s| !hidden_sockets.contains(s.name.as_ref()))
+                .map(|s| ne::SocketView {
+                    name: s.name.to_string(),
+                    socket_type: AppStateModel::socket_type_to_id(s.socket_type),
+                    display_label: s.display_label.as_ref().map(|l| l.to_string()),
                 })
+                .collect();
+            let outputs: Vec<ne::SocketView> = n
+                .outputs
+                .iter()
+                .map(|s| ne::SocketView {
+                    name: s.name.to_string(),
+                    socket_type: AppStateModel::socket_type_to_id(s.socket_type),
+                    display_label: s.display_label.as_ref().map(|l| l.to_string()),
+                })
+                .collect();
+            let properties: Vec<ne::PropertyView> = schema
+                .into_iter()
+                .filter(|p| def.row_visible(&p.name, &snapshot))
+                .map(|p| {
+                    let current = n
+                        .properties
+                        .get(&p.name)
+                        .cloned()
+                        .unwrap_or_else(|| p.default.clone());
+                    // Let the node vary a property's editor with its
+                    // live values (e.g. NumberConst's value slider
+                    // tracking the instance's min/max/step). Falls
+                    // back to the static schema editor when the node
+                    // has no override for this property.
+                    let editor = def
+                        .editor_override(&p.name, &snapshot)
+                        .unwrap_or_else(|| p.editor.clone());
+                    let (min, max) = match editor.numeric_range() {
+                        (Some(mn), Some(mx)) => (Some(mn), Some(mx)),
+                        _ => (p.min, p.max),
+                    };
+                    ne::PropertyView {
+                        name: p.name.to_string(),
+                        display_label: p.label.as_ref().map(|l| l.to_string()),
+                        current: AppStateModel::property_value_to_ne(&current, &editor),
+                        min,
+                        max,
+                        bound_input: p.bound_input.as_ref().map(|s| s.to_string()),
+                        editor: AppStateModel::editor_kind_to_ne(&editor),
+                        // Forward the full schema-side editor so
+                        // the per-kind row renderers (`paint_row`)
+                        // can mount the right pill, toggle,
+                        // swatch, etc.
+                        editor_kind: Some(editor),
+                    }
+                })
+                .collect();
+            Some(ne::NodeView {
+                id: AppStateModel::to_ne(n.id),
+                type_id: def.type_id().into(),
+                display_name: def.display_name().into(),
+                category: def.category().into(),
+                position: n.position,
+                inputs,
+                outputs,
+                properties,
+                error: errors.get(&n.id).cloned(),
+                warning: warnings.get(&n.id).cloned(),
             })
-            .collect()
+        })
+        .collect()
 }
 
 impl ne::NodeGraphModel for AppStateModel {
     fn nodes(&self) -> Vec<ne::NodeView> {
         let ag = self.state.active_graph();
         let g = ag.lock().unwrap();
-        // Error badges only while editing the root graph. `node_errors`
-        // is keyed by *root* NodeId and a drilled-in template graph
-        // allocates its own ids from the same space, so projecting them
-        // onto template nodes would badge whichever inner node happened
-        // to collide. Badging inside a component is future work, and
-        // needs the same treatment as the subgraph error collapse in
-        // `subgraph_node.rs` (the instance reports, the inner node
-        // doesn't).
-        let errors = if self.state.edit_depth() > 0 {
-            std::collections::HashMap::new()
+        // Badges (error and warning alike) only while editing the root
+        // graph. `node_errors` / `node_warnings` are keyed by *root*
+        // NodeId and a drilled-in template graph allocates its own ids
+        // from the same space, so projecting them onto template nodes
+        // would badge whichever inner node happened to collide. Badging
+        // inside a component is future work, and needs the same
+        // treatment as the subgraph error collapse in `subgraph_node.rs`
+        // (the instance reports, the inner node doesn't).
+        let drilled_in = self.state.edit_depth() > 0;
+        let (errors, warnings) = if drilled_in {
+            (
+                std::collections::HashMap::new(),
+                std::collections::HashMap::new(),
+            )
         } else {
-            self.state.node_errors_snapshot()
+            (
+                self.state.node_errors_snapshot(),
+                self.state.node_warnings_snapshot(),
+            )
         };
-        node_views(&g, &self.state.registry, &errors)
+        node_views(&g, &self.state.registry, &errors, &warnings)
     }
 
     fn noodles(&self) -> Vec<ne::NoodleView> {
@@ -365,8 +377,7 @@ impl ne::NodeGraphModel for AppStateModel {
     }
 
     fn sockets_compatible(&self, out_ty: ne::SocketTypeId, in_ty: ne::SocketTypeId) -> bool {
-        Self::id_to_socket_type(out_ty)
-            .is_compatible_with(Self::id_to_socket_type(in_ty))
+        Self::id_to_socket_type(out_ty).is_compatible_with(Self::id_to_socket_type(in_ty))
     }
 
     fn primary_selection(&self) -> Option<ne::NodeId> {
@@ -408,7 +419,11 @@ impl ne::NodeGraphModel for AppStateModel {
             (id, node)
         };
         let cmd = AddNodeCmd::new(self.state.active_graph(), node);
-        self.state.active_undo().lock().unwrap().add_and_do(Box::new(cmd));
+        self.state
+            .active_undo()
+            .lock()
+            .unwrap()
+            .add_and_do(Box::new(cmd));
         self.state.schedule_evaluate_after_edit();
         Some(Self::to_ne(id))
     }
@@ -416,7 +431,11 @@ impl ne::NodeGraphModel for AppStateModel {
     fn remove_node(&mut self, id: ne::NodeId) {
         let domain_id = Self::from_ne(id);
         let cmd = RemoveNodeCmd::new(self.state.active_graph(), domain_id);
-        self.state.active_undo().lock().unwrap().add_and_do(Box::new(cmd));
+        self.state
+            .active_undo()
+            .lock()
+            .unwrap()
+            .add_and_do(Box::new(cmd));
         self.state.schedule_evaluate_after_edit();
     }
 
@@ -447,7 +466,11 @@ impl ne::NodeGraphModel for AppStateModel {
                     })
                     .collect();
                 let batch = BatchCmd::new(format!("Delete {} Nodes", many.len()), children);
-                self.state.active_undo().lock().unwrap().add_and_do(Box::new(batch));
+                self.state
+                    .active_undo()
+                    .lock()
+                    .unwrap()
+                    .add_and_do(Box::new(batch));
                 self.state.schedule_evaluate_after_edit();
             }
         }
@@ -469,7 +492,12 @@ impl ne::NodeGraphModel for AppStateModel {
             (Some(a), Some(b)) => (a, b),
             _ => return ne::NoodleResult::Rejected,
         };
-        let noodle = Noodle::new(Self::from_ne(from_node), from_uid, Self::from_ne(to_node), to_uid);
+        let noodle = Noodle::new(
+            Self::from_ne(from_node),
+            from_uid,
+            Self::from_ne(to_node),
+            to_uid,
+        );
         let ag = self.state.active_graph();
         let undo = self.state.active_undo();
         // Dry-run the connect on a peek lock to figure out which path
@@ -505,11 +533,7 @@ impl ne::NodeGraphModel for AppStateModel {
 
         let result = match decision {
             ne::NoodleResult::Connected => {
-                let cmd = ConnectCmd::new(
-                    ag.clone(),
-                    self.state.registry.clone(),
-                    noodle,
-                );
+                let cmd = ConnectCmd::new(ag.clone(), self.state.registry.clone(), noodle);
                 undo.lock().unwrap().add_and_do(Box::new(cmd));
                 // Check it actually landed (validation failures inside
                 // ConnectCmd::do_it set succeeded=false; the noodle
@@ -551,7 +575,10 @@ impl ne::NodeGraphModel for AppStateModel {
             }
             _ => ne::NoodleResult::Rejected,
         };
-        if matches!(result, ne::NoodleResult::Connected | ne::NoodleResult::Replaced) {
+        if matches!(
+            result,
+            ne::NoodleResult::Connected | ne::NoodleResult::Replaced
+        ) {
             self.state.schedule_evaluate_after_edit();
         }
         result
@@ -586,12 +613,12 @@ impl ne::NodeGraphModel for AppStateModel {
         if !ag.lock().unwrap().noodles().contains(&noodle) {
             return false;
         }
-        let cmd = DisconnectCmd::new(
-            ag,
-            self.state.registry.clone(),
-            noodle,
-        );
-        self.state.active_undo().lock().unwrap().add_and_do(Box::new(cmd));
+        let cmd = DisconnectCmd::new(ag, self.state.registry.clone(), noodle);
+        self.state
+            .active_undo()
+            .lock()
+            .unwrap()
+            .add_and_do(Box::new(cmd));
         self.state.schedule_evaluate_after_edit();
         true
     }
@@ -658,13 +685,9 @@ impl ne::NodeGraphModel for AppStateModel {
             })
         };
         if !coalesced {
-            let cmd = ChangePropertyCmd::new(
-                self.state.active_graph(),
-                domain_id,
-                name_arc,
-                port_value,
-            )
-            .with_registry(self.state.registry.clone());
+            let cmd =
+                ChangePropertyCmd::new(self.state.active_graph(), domain_id, name_arc, port_value)
+                    .with_registry(self.state.registry.clone());
             undo.lock().unwrap().add_and_do(Box::new(cmd));
         }
         self.state.schedule_evaluate_after_edit();

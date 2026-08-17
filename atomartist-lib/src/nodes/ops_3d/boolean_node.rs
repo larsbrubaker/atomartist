@@ -94,9 +94,9 @@ use crate::geometry::{Body, BodyRole, Geometry3d, DEFAULT_GEOMETRY_COLOR, INHERI
 use crate::graph::node::PortValue;
 use crate::graph::socket::SocketUidAlloc;
 use crate::registry::{
-    enum_variant_for_index, op_props, CommitTranslation, ConnectCtx, DisconnectCtx, EditorKind, EvalCtx,
-    InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeProperties, NodeRegistry, ParamSet,
-    PropDef, VisibleWhen,
+    enum_variant_for_index, op_props, CommitTranslation, ConnectCtx, DisconnectCtx, EditorKind,
+    EvalCtx, InstanceTemplate, NodeDef, NodeError, NodeOutputs, NodeProperties, NodeRegistry,
+    ParamSet, PropDef, VisibleWhen,
 };
 use crate::socket_types::SocketType;
 
@@ -150,7 +150,11 @@ fn own_params() -> ParamSet {
              others; Intersect keeps only the shared volume; Subtract & Replace cuts \
              the selected parts out and keeps the removed volume as its own part.",
         )
-        .string(SUBTRACT_PARTS, "Part(s) to Subtract", boolean_selection::AUTO)
+        .string(
+            SUBTRACT_PARTS,
+            "Part(s) to Subtract",
+            boolean_selection::AUTO,
+        )
         .no_socket()
         // Permanently hidden: the stored value is a list of socket uids,
         // which is storage, not a control. The user edits it through the
@@ -254,9 +258,15 @@ pub fn keep_subtracted_row_available(props: &NodeProperties) -> bool {
 }
 
 impl NodeDef for BooleanNode {
-    fn type_id(&self) -> &'static str { "Boolean" }
-    fn display_name(&self) -> &'static str { "Boolean" }
-    fn category(&self) -> &'static str { "Operations 3D" }
+    fn type_id(&self) -> &'static str {
+        "Boolean"
+    }
+    fn display_name(&self) -> &'static str {
+        "Boolean"
+    }
+    fn category(&self) -> &'static str {
+        "Operations 3D"
+    }
 
     fn instantiate(&self, alloc: &mut SocketUidAlloc) -> InstanceTemplate {
         // One typed-empty placeholder input; one static output. No param
@@ -276,10 +286,7 @@ impl NodeDef for BooleanNode {
     /// are minted for every operation and *shown* only for the two that
     /// cut (see [`row_visible`](Self::row_visible)), so visibility stays
     /// in one place.
-    fn instance_properties(
-        &self,
-        node: &crate::graph::node::NodeInstance,
-    ) -> Option<Vec<PropDef>> {
+    fn instance_properties(&self, node: &crate::graph::node::NodeInstance) -> Option<Vec<PropDef>> {
         let rows = boolean_selection::rows(node);
         if rows.is_empty() {
             return None;
@@ -410,10 +417,12 @@ fn single_result(
         Some(r) => r,
         None => return Ok(Geometry3d::empty()),
     };
-    Ok(match painted_result_body(ctx, &result, &palette, base, BodyRole::Solid)? {
-        Some(body) => Geometry3d::from_body(body),
-        None => Geometry3d::empty(),
-    })
+    Ok(
+        match painted_result_body(ctx, &result, &palette, base, BodyRole::Solid)? {
+            Some(body) => Geometry3d::from_body(body),
+            None => Geometry3d::empty(),
+        },
+    )
 }
 
 /// The colour that stands in for a result with no single source part —
@@ -533,7 +542,10 @@ fn subtract(
         // Intersect and Combine deliberately do *not* do this — their
         // result is one body made of several operands, with no single role
         // to inherit, and MatterCAD's Combine likewise emits material.
-        for (i, solid) in import_group(keep, opts, &mut palette)?.into_iter().enumerate() {
+        for (i, solid) in import_group(keep, opts, &mut palette)?
+            .into_iter()
+            .enumerate()
+        {
             let role = keep.bodies[i].role;
             // The keep's own colour is what this body is: it stands in
             // on the surfaces the run data cannot claim, and it is the
@@ -584,7 +596,10 @@ fn subtract(
 /// identically unless the operands disagree, and when they do, showing
 /// the parts' own colours is what the user is now asking for by opening a
 /// B-6 build.
-fn normalize_pre_b6_color(graph: &mut crate::graph::graph::Graph, node: crate::graph::node::NodeId) {
+fn normalize_pre_b6_color(
+    graph: &mut crate::graph::graph::Graph,
+    node: crate::graph::node::NodeId,
+) {
     let is_default = matches!(
         graph.get(node).and_then(|n| n.properties.get("color")),
         Some(PortValue::Color(c)) if *c == DEFAULT_GEOMETRY_COLOR
@@ -634,3 +649,9 @@ mod degrade_tests;
 #[cfg(test)]
 #[path = "boolean_colors_tests.rs"]
 mod colors_tests;
+
+// And the measurements (B-5a): what the colour tagging and the touching-set
+// grouping actually cost, timed through the same whole-node fixtures.
+#[cfg(test)]
+#[path = "boolean_perf_tests.rs"]
+mod perf_tests;
