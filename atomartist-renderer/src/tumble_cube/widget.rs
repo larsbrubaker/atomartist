@@ -223,7 +223,7 @@ impl TumbleCubeWidget {
     /// [`crate::Viewport3dWidget::try_push_wgpu_render`].
     fn try_push_wgpu_render(&self, ctx: &mut dyn DrawCtx, w: f64, h: f64) -> bool {
         let any = match ctx.as_any_mut() { Some(a) => a, None => return false };
-        let wgpu_ctx = match any.downcast_mut::<demo_wgpu::WgpuGfxCtx>() {
+        let wgpu_ctx = match any.downcast_mut::<agg_gui_wgpu::WgpuGfxCtx>() {
             Some(c) => c,
             None => return false,
         };

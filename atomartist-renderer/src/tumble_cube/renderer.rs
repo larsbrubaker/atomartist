@@ -19,7 +19,7 @@
 //! cube produces an immediately legible result.
 
 use bytemuck::{Pod, Zeroable};
-use demo_wgpu::{SsaaFramebuffer, WgpuCustomRender, WgpuCustomRenderCtx};
+use agg_gui_wgpu::{SsaaFramebuffer, WgpuCustomRender, WgpuCustomRenderCtx};
 use glam::{Mat4, Quat, Vec3};
 use wgpu::util::DeviceExt;
 

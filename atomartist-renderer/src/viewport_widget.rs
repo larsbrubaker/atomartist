@@ -339,7 +339,7 @@ impl Viewport3dWidget {
         // screen-space pixels via the active DrawCtx affine. The transform
         // maps widget-local → screen.
         let any = match ctx.as_any_mut() { Some(a) => a, None => return false };
-        let wgpu_ctx = match any.downcast_mut::<demo_wgpu::WgpuGfxCtx>() {
+        let wgpu_ctx = match any.downcast_mut::<agg_gui_wgpu::WgpuGfxCtx>() {
             Some(c) => c,
             None => return false,
         };

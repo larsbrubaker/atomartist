@@ -35,7 +35,7 @@
 //! normal; fragment shades against a fixed key + fill light plus ambient.
 
 use bytemuck::cast_slice;
-use demo_wgpu::SsaaFramebuffer;
+use agg_gui_wgpu::SsaaFramebuffer;
 use wgpu::util::DeviceExt;
 
 use atomartist_lib::geometry::{is_inherit_color, Body, DEFAULT_GEOMETRY_COLOR};

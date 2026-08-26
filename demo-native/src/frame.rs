@@ -1,99 +1,40 @@
-//! Per-frame paint orchestration + frame-time logger.
+//! The frame body the shell's `paint` hook runs, plus the opt-in
+//! frame-time breakdown logger.
 //!
-//! Split out of `main.rs` so the entry-point file stays under the
-//! repository's 800-line guardrail
-//! (`atomartist-lib/tests/file_line_count.rs`). The single public
-//! entry point is [`paint_frame`]; everything else is private state
-//! used to attribute frame cost across pipeline stages.
+//! `agg-gui-shell` owns surface acquire, `begin_frame` / `end_frame` and
+//! present; what is left here is AtomArtist's inspector wiring around
+//! layout + paint (View → Debug → Inspector), and the
+//! `ATOMARTIST_FRAME_LOG=1` per-stage cost attribution. Compared with the
+//! pre-shell logger, the acquire and present spans are no longer
+//! measurable from app code (the shell owns them); the whole-frame
+//! wall-clock cost still is — the shell reports it as `Frame::duration`,
+//! which is also what the Performance graph plots.
 
-use agg_gui::{App, DrawCtx, Size};
-use atomartist_ui::{AppState, DebugWindowHandles};
-use demo_wgpu::{begin_frame, WgpuGfxCtx};
-
-use crate::thumbnail_capture::ThumbnailCapture;
-use crate::Gpu;
+use agg_gui::App;
+use agg_gui_shell::{Frame, WgpuGfxCtx};
+use atomartist_ui::DebugWindowHandles;
 
 // Per-frame inspector epoch tracker. Mirrors agg-gui's
-// `demo-wgpu::render_app_frame` so the inspector tree only gets
-// re-collected when widget invalidation actually changes — collecting
-// every frame would torch the budget on a large widget tree.
+// `render_app_frame` so the inspector tree only gets re-collected when
+// widget invalidation actually changes — collecting every frame would
+// torch the budget on a large widget tree.
 thread_local! {
     static INSPECTOR_SNAPSHOT_EPOCH: std::cell::Cell<Option<u64>> =
         const { std::cell::Cell::new(None) };
 }
 
-/// Per-frame timing breakdown. Every span here is measured around a
-/// specific stage of `paint_frame` so the periodic log can attribute
-/// frame cost to the exact phase responsible. `total_ms` covers the
-/// whole function body (acquire → present), so it includes the GPU
-/// submit + VSync wait that `app.layout` + `app.paint` *don't* see.
-#[derive(Clone, Copy, Default)]
-struct FrameTimings {
-    /// `surface.get_current_texture()` — blocks when the swap chain
-    /// is saturated (e.g. waiting on the previous frame's present).
-    acquire_ms: f32,
-    /// Drain of `WidgetBaseEdit` + `InspectorEdit` queues from the
-    /// inspector panel into the live widget tree.
-    edits_ms: f32,
-    /// `app.collect_inspector_nodes()` — only nonzero when the
-    /// inspector is visible and the invalidation epoch changed.
-    snapshot_ms: f32,
-    /// `app.layout(...)` — recomputes widget bounds.
-    layout_ms: f32,
-    /// `app.paint(ctx)` — appends `DrawCommand`s to the deferred list.
-    paint_ms: f32,
-    /// `ctx.end_frame()` — prepare phase (allocates GPU buffers /
-    /// bind groups for each draw command) + execute phase (records
-    /// the wgpu command encoder and submits to the queue).
-    end_frame_ms: f32,
-    /// Inside `end_frame`: CPU walk that turns `DrawCommand`s into
-    /// `Prepared` GPU resources (per-command buffer + bind-group
-    /// allocation). Reported by `WgpuGfxCtx::last_end_frame_stats()`.
-    ef_prepare_ms: f32,
-    /// Inside `end_frame`: render-pass walk that records draw calls
-    /// into the command encoder.
-    ef_execute_ms: f32,
-    /// Inside `end_frame`: `queue.submit()` cost.
-    ef_submit_ms: f32,
-    /// `DrawCommand` count from the most recent end_frame.
-    cmd_count: u32,
-    /// `frame.present()` — typically waits on VSync with
-    /// `PresentMode::AutoVsync`.
-    present_ms: f32,
-    /// Wall-clock time for the whole `paint_frame` body. This is
-    /// the value pushed into `SharedFrameHistory` and shown in the
-    /// View → Debug → Performance Graph.
-    total_ms: f32,
-}
-
-pub fn paint_frame(
-    gpu: &Gpu,
-    ctx: &mut WgpuGfxCtx,
+/// Render one frame's contents: drain inspector edits, refresh the
+/// inspector snapshot, lay out (when needed) and paint. Runs between the
+/// shell's `begin_frame` and `end_frame`.
+pub fn paint_app_frame(
     app: &mut App,
+    ctx: &mut WgpuGfxCtx,
     debug: &DebugWindowHandles,
-    w: u32,
-    h: u32,
-    capture_after: bool,
-    thumbs: &mut ThumbnailCapture,
-    state: &AppState,
+    frame: &Frame,
+    log: &mut FrameLog,
 ) {
-    let t_total = web_time::Instant::now();
-    let mut t = FrameTimings::default();
-
-    let t_acquire = web_time::Instant::now();
-    let frame = match gpu.surface.get_current_texture() {
-        wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
-        _ => return,
-    };
-    t.acquire_ms = elapsed_ms(t_acquire);
-
-    // Stash the surface texture handle before begin_frame so the screenshot
-    // path can copy from it (capture_screenshot reads ctx.surface_texture).
-    ctx.set_surface_texture(frame.texture.clone());
-    let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-    ctx.reset(w as f32, h as f32);
+    ctx.reset(frame.width as f32, frame.height as f32);
     ctx.set_lcd_mode(agg_gui::font_settings::lcd_enabled());
-    begin_frame(ctx, view);
 
     // ── Inspector wiring (View → Debug → Inspector) ─────────────────
     // Drain queued edits the inspector pushed last frame, then refresh
@@ -101,12 +42,14 @@ pub fn paint_frame(
     // paint so the inspector sees the post-edit tree and the snapshot
     // matches what we're about to draw.
     let t_edits = web_time::Instant::now();
+    let mut edits_applied = false;
     {
         let mut q = debug.base_edits.borrow_mut();
         if !q.is_empty() {
             for edit in q.drain(..) {
                 let _ = agg_gui::apply_widget_base_edit(app.root_mut(), &edit);
             }
+            edits_applied = true;
             INSPECTOR_SNAPSHOT_EPOCH.with(|c| c.set(None));
         }
     }
@@ -116,10 +59,11 @@ pub fn paint_frame(
             for edit in q.drain(..) {
                 let _ = agg_gui::apply_inspector_edit(app.root_mut(), &edit);
             }
+            edits_applied = true;
             INSPECTOR_SNAPSHOT_EPOCH.with(|c| c.set(None));
         }
     }
-    t.edits_ms = elapsed_ms(t_edits);
+    log.timings.edits_ms = elapsed_ms(t_edits);
 
     let t_snapshot = web_time::Instant::now();
     if debug.inspector_visible.get() {
@@ -136,63 +80,19 @@ pub fn paint_frame(
         *debug.hovered_bounds.borrow_mut() = None;
         INSPECTOR_SNAPSHOT_EPOCH.with(|c| c.set(None));
     }
-    t.snapshot_ms = elapsed_ms(t_snapshot);
+    log.timings.snapshot_ms = elapsed_ms(t_snapshot);
 
+    // The shell skips layout when nothing that feeds it changed; edits
+    // just applied to the live tree force one regardless.
     let t_layout = web_time::Instant::now();
-    app.layout(Size::new(w as f64, h as f64));
-    t.layout_ms = elapsed_ms(t_layout);
+    if frame.needs_layout || edits_applied {
+        app.layout(frame.viewport());
+    }
+    log.timings.layout_ms = elapsed_ms(t_layout);
 
     let t_paint = web_time::Instant::now();
     app.paint(ctx);
-    t.paint_ms = elapsed_ms(t_paint);
-
-    let t_end_frame = web_time::Instant::now();
-    ctx.end_frame();
-    t.end_frame_ms = elapsed_ms(t_end_frame);
-    // Pull the in-renderer per-phase split so we can attribute end_frame
-    // cost across prepare (per-DrawCommand buffer + bind-group allocation),
-    // execute (render-pass walk), and submit (queue.submit). Different
-    // dominators imply different fixes. Skip the read when logging is off
-    // — the renderer still computes the numbers (cheap), we just don't
-    // copy them into the per-frame struct.
-    if frame_log_enabled() {
-        let ef = ctx.last_end_frame_stats();
-        t.ef_prepare_ms = ef.prepare_us as f32 / 1000.0;
-        t.ef_execute_ms = ef.execute_us as f32 / 1000.0;
-        t.ef_submit_ms = ef.submit_us as f32 / 1000.0;
-        t.cmd_count = ef.command_count;
-    }
-
-    if capture_after {
-        // Must run between end_frame (commands flushed) and present
-        // (surface texture destroyed). The captured pixels live inside
-        // ctx.capture_texture and survive present.
-        ctx.capture_screenshot();
-    } else {
-        // Project-preview snapshot — same window (post-end_frame,
-        // pre-present), but rate-limited and GPU-only. Skipped entirely
-        // during a `--screenshot` run, which owns the capture texture.
-        // The viewport rectangle is read from the tree we *just* laid
-        // out, so the crop matches this exact frame.
-        thumbs.before_present(ctx, app, w, h);
-    }
-
-    let t_present = web_time::Instant::now();
-    frame.present();
-    t.present_ms = elapsed_ms(t_present);
-
-    // Start / harvest the preview readback once the frame is on screen,
-    // so neither ever sits in front of present.
-    thumbs.after_present(ctx, state);
-
-    t.total_ms = elapsed_ms(t_total);
-
-    // The Performance graph now reflects the *full* wall-clock cost
-    // per frame — including GPU submit and VSync wait — not just
-    // `app.layout` + `app.paint`. That's the only number a user can
-    // correlate with the perceived smoothness of the app.
-    debug.frame_history.borrow_mut().push(t.total_ms);
-    record_frame_timings(t);
+    log.timings.paint_ms = elapsed_ms(t_paint);
 }
 
 #[inline]
@@ -200,17 +100,38 @@ fn elapsed_ms(t: web_time::Instant) -> f32 {
     t.elapsed().as_secs_f32() * 1000.0
 }
 
+/// Per-frame timing breakdown. Each span is measured around a specific
+/// stage so the periodic log can attribute frame cost to the phase
+/// responsible. `total_ms` is the shell's whole-frame wall clock for the
+/// *previous* frame (acquire → present).
+#[derive(Clone, Copy, Default)]
+struct FrameTimings {
+    /// Drain of `WidgetBaseEdit` + `InspectorEdit` queues from the
+    /// inspector panel into the live widget tree.
+    edits_ms: f32,
+    /// `app.collect_inspector_nodes()` — only nonzero when the
+    /// inspector is visible and the invalidation epoch changed.
+    snapshot_ms: f32,
+    /// `app.layout(...)` — recomputes widget bounds.
+    layout_ms: f32,
+    /// `app.paint(ctx)` — appends `DrawCommand`s to the deferred list.
+    paint_ms: f32,
+    /// Inside `end_frame`: CPU walk that turns `DrawCommand`s into
+    /// `Prepared` GPU resources. From `WgpuGfxCtx::last_end_frame_stats`.
+    ef_prepare_ms: f32,
+    /// Inside `end_frame`: render-pass walk that records draw calls.
+    ef_execute_ms: f32,
+    /// Inside `end_frame`: `queue.submit()` cost.
+    ef_submit_ms: f32,
+    /// `DrawCommand` count from the most recent end_frame.
+    cmd_count: u32,
+    /// The shell's wall-clock time for the previous frame.
+    total_ms: f32,
+}
+
 // ── Frame-time breakdown logger ─────────────────────────────────────
 // Accumulates per-stage timings and prints an average roughly every
-// 2 seconds to stderr. Useful for explaining a high Performance Graph
-// reading: "where did the time actually go this frame?". The averaging
-// window smooths over per-frame noise; the count tells you how many
-// frames went into the average so you can spot stalls (low count =
-// few frames = something is slow).
-//
-// Off by default — set `ATOMARTIST_FRAME_LOG=1` to enable. The check is
-// cheap (one atomic load per frame) and only happens after `OnceLock`
-// resolves the env var on the very first frame.
+// 2 seconds to stderr. Off by default — set `ATOMARTIST_FRAME_LOG=1`.
 
 const FRAME_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_millis(2000);
 
@@ -223,60 +144,72 @@ fn frame_log_enabled() -> bool {
     })
 }
 
-thread_local! {
-    static FRAME_TIMING_ACC: std::cell::RefCell<Vec<FrameTimings>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-    static FRAME_LOG_LAST: std::cell::Cell<Option<web_time::Instant>> =
-        const { std::cell::Cell::new(None) };
+/// Owns the in-flight [`FrameTimings`] and the accumulation window. One
+/// per host; `paint_app_frame` fills the paint-side spans and
+/// [`FrameLog::record_end_frame`] finishes the frame with the renderer's
+/// end-frame stats, then feeds the periodic average.
+#[derive(Default)]
+pub struct FrameLog {
+    timings: FrameTimings,
+    acc: Vec<FrameTimings>,
+    last_print: Option<web_time::Instant>,
 }
 
-fn record_frame_timings(t: FrameTimings) {
-    if !frame_log_enabled() {
-        return;
+impl FrameLog {
+    pub fn new() -> Self {
+        Self::default()
     }
-    FRAME_TIMING_ACC.with(|acc| acc.borrow_mut().push(t));
-    let now = web_time::Instant::now();
-    let last = FRAME_LOG_LAST.with(|c| c.get());
-    let should_log = match last {
-        Some(prev) => now.duration_since(prev) >= FRAME_LOG_INTERVAL,
-        None => {
-            FRAME_LOG_LAST.with(|c| c.set(Some(now)));
-            false
-        }
-    };
-    if !should_log {
-        return;
-    }
-    FRAME_LOG_LAST.with(|c| c.set(Some(now)));
-    FRAME_TIMING_ACC.with(|acc| {
-        let buf = acc.borrow();
-        if buf.is_empty() {
+
+    /// Called from `after_paint` — `end_frame` has run, so the renderer's
+    /// per-phase split is available. Skips all work when logging is off.
+    pub fn record_end_frame(&mut self, ctx: &WgpuGfxCtx, frame: &Frame) {
+        if !frame_log_enabled() {
             return;
         }
-        let n = buf.len() as f32;
-        let avg = |f: fn(&FrameTimings) -> f32| -> f32 {
-            buf.iter().map(f).sum::<f32>() / n
+        let ef = ctx.last_end_frame_stats();
+        self.timings.ef_prepare_ms = ef.prepare_us as f32 / 1000.0;
+        self.timings.ef_execute_ms = ef.execute_us as f32 / 1000.0;
+        self.timings.ef_submit_ms = ef.submit_us as f32 / 1000.0;
+        self.timings.cmd_count = ef.command_count;
+        self.timings.total_ms = frame.duration.as_secs_f32() * 1000.0;
+        let done = std::mem::take(&mut self.timings);
+        self.acc.push(done);
+        self.maybe_print();
+    }
+
+    fn maybe_print(&mut self) {
+        let now = web_time::Instant::now();
+        let should_log = match self.last_print {
+            Some(prev) => now.duration_since(prev) >= FRAME_LOG_INTERVAL,
+            None => {
+                self.last_print = Some(now);
+                false
+            }
         };
-        let max_total = buf.iter().map(|t| t.total_ms).fold(0.0_f32, f32::max);
-        let avg_cmds = buf.iter().map(|t| t.cmd_count as f32).sum::<f32>() / n;
+        if !should_log || self.acc.is_empty() {
+            return;
+        }
+        self.last_print = Some(now);
+        let n = self.acc.len() as f32;
+        let avg = |f: fn(&FrameTimings) -> f32| -> f32 {
+            self.acc.iter().map(f).sum::<f32>() / n
+        };
+        let max_total = self.acc.iter().map(|t| t.total_ms).fold(0.0_f32, f32::max);
+        let avg_cmds = self.acc.iter().map(|t| t.cmd_count as f32).sum::<f32>() / n;
         eprintln!(
-            "[frame {:>3} samples] total avg={:.2} max={:.2} ms | acquire={:.2} edits={:.2} snapshot={:.2} layout={:.2} paint={:.2} end_frame={:.2} (prep={:.2} exec={:.2} sub={:.2} cmds={:.0}) present={:.2}",
-            buf.len(),
+            "[frame {:>3} samples] total(prev) avg={:.2} max={:.2} ms | edits={:.2} snapshot={:.2} layout={:.2} paint={:.2} end_frame(prep={:.2} exec={:.2} sub={:.2} cmds={:.0})",
+            self.acc.len(),
             avg(|t| t.total_ms),
             max_total,
-            avg(|t| t.acquire_ms),
             avg(|t| t.edits_ms),
             avg(|t| t.snapshot_ms),
             avg(|t| t.layout_ms),
             avg(|t| t.paint_ms),
-            avg(|t| t.end_frame_ms),
             avg(|t| t.ef_prepare_ms),
             avg(|t| t.ef_execute_ms),
             avg(|t| t.ef_submit_ms),
             avg_cmds,
-            avg(|t| t.present_ms),
         );
-        drop(buf);
-        acc.borrow_mut().clear();
-    });
+        self.acc.clear();
+    }
 }

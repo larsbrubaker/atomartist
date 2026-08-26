@@ -7,7 +7,7 @@
 //! real perf pass, not as part of the line-count fix.
 
 use bytemuck::cast_slice;
-use demo_wgpu::{WgpuCustomRender, WgpuCustomRenderCtx};
+use agg_gui_wgpu::{WgpuCustomRender, WgpuCustomRenderCtx};
 use glam::Mat4;
 
 use super::depth_peel::pipelines::{BodyDrawHandle, PeelUniforms};

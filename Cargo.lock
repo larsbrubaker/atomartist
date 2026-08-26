@@ -26,7 +26,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agg-gui"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "agg-rust 1.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "base64",
@@ -53,6 +53,30 @@ version = "0.0.1"
 dependencies = [
  "agg-gui",
  "web-time",
+]
+
+[[package]]
+name = "agg-gui-shell"
+version = "0.5.0"
+dependencies = [
+ "agg-gui",
+ "agg-gui-wgpu",
+ "log",
+ "wgpu",
+ "windows-sys 0.52.0",
+ "winit",
+]
+
+[[package]]
+name = "agg-gui-wgpu"
+version = "0.5.1"
+dependencies = [
+ "agg-gui",
+ "agg-rust 1.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "bytemuck",
+ "pollster 0.3.0",
+ "web-time",
+ "wgpu",
 ]
 
 [[package]]
@@ -356,9 +380,9 @@ name = "atomartist-renderer"
 version = "0.0.1"
 dependencies = [
  "agg-gui",
+ "agg-gui-wgpu",
  "atomartist-lib",
  "bytemuck",
- "demo-wgpu",
  "glam",
  "manifold-rust",
  "naga",
@@ -880,19 +904,15 @@ name = "demo-native"
 version = "0.0.1"
 dependencies = [
  "agg-gui",
+ "agg-gui-shell",
+ "agg-gui-wgpu",
  "atomartist-lib",
  "atomartist-renderer",
  "atomartist-storage",
  "atomartist-ui",
- "demo-wgpu",
- "image",
- "pollster 0.4.0",
- "raw-window-handle",
  "rfd",
  "web-time",
  "wgpu",
- "windows-sys 0.59.0",
- "winit",
 ]
 
 [[package]]
@@ -900,12 +920,12 @@ name = "demo-wasm"
 version = "0.0.1"
 dependencies = [
  "agg-gui",
+ "agg-gui-wgpu",
  "atomartist-lib",
  "atomartist-renderer",
  "atomartist-storage",
  "atomartist-ui",
  "console_error_panic_hook",
- "demo-wgpu",
  "js-sys",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -913,24 +933,6 @@ dependencies = [
  "web-sys",
  "web-time",
  "wgpu",
-]
-
-[[package]]
-name = "demo-wgpu"
-version = "0.1.0"
-dependencies = [
- "agg-gui",
- "agg-rust 1.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "bytemuck",
- "console_error_panic_hook",
- "js-sys",
- "pollster 0.3.0",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
- "web-time",
- "wgpu",
- "winit",
 ]
 
 [[package]]
@@ -1887,7 +1889,7 @@ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
 name = "manifold-rust"
-version = "0.13.1"
+version = "0.14.0"
 dependencies = [
  "clipper2-rust",
  "dashu-int",

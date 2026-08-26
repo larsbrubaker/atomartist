@@ -28,7 +28,7 @@ use atomartist_ui::{
     top_menu_bar::FileDialogProvider, DebugWindowHandles, FirstPaintGate,
 };
 
-use demo_wgpu::{begin_frame, WgpuGfxCtx};
+use agg_gui_wgpu::WgpuGfxCtx;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
@@ -460,7 +460,7 @@ pub fn render(width: u32, height: u32, frame_ms: f64) {
                 ) {
                     ctx.set_surface_texture(frame.texture.clone());
                     ctx.reset(width as f32, height as f32);
-                    begin_frame(ctx, view);
+                    ctx.begin_frame(view);
 
                     // Inspector edit drain + snapshot refresh (same
                     // dance as `demo-native::paint_frame`).

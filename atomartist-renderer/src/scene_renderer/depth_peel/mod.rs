@@ -30,7 +30,7 @@
 //! respectively (added in a follow-up step); this module exposes only
 //! the textures + views + sampler, plus an [`DualPeelTargets::ensure_size`]
 //! helper that mirrors the cheap-when-stable pattern used by
-//! [`demo_wgpu::SsaaFramebuffer::ensure_size`].
+//! [`agg_gui_wgpu::SsaaFramebuffer::ensure_size`].
 
 mod pipeline_build;
 pub mod pipelines;
@@ -173,7 +173,7 @@ impl DualPeelTargets {
 
     /// Reallocate every texture if `(w, h)` differs from the cached
     /// extent. Cheap when the size is stable — matches the pattern used
-    /// by [`demo_wgpu::SsaaFramebuffer::ensure_size`] so the renderer
+    /// by [`agg_gui_wgpu::SsaaFramebuffer::ensure_size`] so the renderer
     /// can call it unconditionally each frame.
     pub fn ensure_size(&mut self, device: &wgpu::Device, w: u32, h: u32) {
         let w = w.max(1);

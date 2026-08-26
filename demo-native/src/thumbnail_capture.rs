@@ -15,7 +15,7 @@
 //! * **Snapshot** (`capture_screenshot`) is a GPU-side
 //!   `copy_texture_to_texture` — no CPU readback, no stall. It runs at
 //!   most once per [`CAPTURE_INTERVAL`].
-//! * **Readback** uses demo-wgpu's *non-blocking, scaled* pair
+//! * **Readback** uses agg-gui-wgpu's *non-blocking, scaled* pair
 //!   (`begin_capture_readback_scaled` / `poll_capture_readback_scaled`),
 //!   never the blocking `read_captured_screenshot` the `--screenshot`
 //!   path uses. The GPU crops to the preview's source region and
@@ -51,8 +51,8 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 
 use agg_gui::{App, DrawCtx};
+use agg_gui_wgpu::{RectInPixels, WgpuGfxCtx};
 use atomartist_ui::{AppState, CropRect, THUMBNAIL_HEIGHT, THUMBNAIL_WIDTH};
-use demo_wgpu::{RectInPixels, WgpuGfxCtx};
 use web_time::Instant;
 
 /// Minimum wall-clock gap between two preview snapshots. Long enough
@@ -79,13 +79,19 @@ pub struct ThumbnailCapture {
     enabled: bool,
     started: Instant,
     last_capture: Option<Instant>,
-    /// A snapshot was taken this frame; the readback starts after
-    /// present so the copy has been submitted.
+    /// A snapshot was taken last frame; the readback starts on the next
+    /// [`tick`](Self::tick) so the copy has been submitted (and presented)
+    /// first.
     snapshot_taken: bool,
     /// Preview source rectangle (the 4:3 window inside the 3-D
     /// viewport) as it stood when the snapshot was taken — handed to the
-    /// GPU blit when the readback starts after present.
+    /// GPU blit when the readback starts.
     snapshot_region: Option<RectInPixels>,
+    /// Crop rect computed from the tree the shell just laid out — recorded
+    /// in the `paint` hook (the only hook with `&App`), consumed by
+    /// [`tick`](Self::tick) in `after_paint` (the only hook inside the
+    /// post-`end_frame`, pre-`present` window).
+    frame_region: Option<RectInPixels>,
     /// Set while an encode thread is in flight, so a slow encode can't
     /// pile threads up behind a fast capture cadence.
     encoding: Arc<AtomicBool>,
@@ -102,48 +108,43 @@ impl ThumbnailCapture {
             last_capture: None,
             snapshot_taken: false,
             snapshot_region: None,
+            frame_region: None,
             encoding: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    /// Called from `paint_frame` between `end_frame` and `present` —
-    /// the only window where the surface texture holds this frame's
-    /// finished image and still exists.
+    /// Called from the shell's `paint` hook, after layout: records the
+    /// preview crop rect for the frame being painted, so the rectangle
+    /// [`tick`](Self::tick) hands to the GPU matches this exact frame.
     ///
     /// `surface_w` / `surface_h` are the framebuffer's dimensions, which
     /// on this shell are also the coordinate space the widget tree was
     /// laid out in.
-    pub fn before_present(
-        &mut self,
-        ctx: &mut WgpuGfxCtx,
-        app: &App,
-        surface_w: u32,
-        surface_h: u32,
-    ) {
-        if !self.enabled || !self.due() || ctx.has_pending_scaled_readback() {
+    pub fn note_frame(&mut self, app: &App, surface_w: u32, surface_h: u32) {
+        self.frame_region = None;
+        if !self.enabled || !self.due() {
             return;
         }
         // No viewport on screen (hidden, collapsed, or not laid out
         // yet) means there is nothing worth previewing — skip rather
         // than capture a window full of panels.
-        let Some(viewport) = viewport_region(app, surface_w, surface_h) else {
-            return;
-        };
-        let region = source_rect_in_pixels(viewport);
-        let t = Instant::now();
-        if ctx.capture_screenshot() {
-            self.snapshot_taken = true;
-            self.snapshot_region = Some(region);
-            self.last_capture = Some(Instant::now());
-            log_stage("snapshot", t);
+        if let Some(viewport) = viewport_region(app, surface_w, surface_h) {
+            self.frame_region = Some(source_rect_in_pixels(viewport));
         }
     }
 
-    /// Called from `paint_frame` after `present`: starts the readback
-    /// for a snapshot taken this frame, harvests any readback that has
-    /// completed, and publishes any preview an encode thread finished.
-    /// All three are non-blocking.
-    pub fn after_present(&mut self, ctx: &mut WgpuGfxCtx, state: &AppState) {
+    /// Called from the shell's `after_paint` hook — post-`end_frame`,
+    /// pre-`present`, the only window where the surface texture holds this
+    /// frame's finished image and still exists. Publishes any preview an
+    /// encode thread finished, starts the readback for a snapshot taken
+    /// last frame, harvests a completed readback, or takes a new snapshot
+    /// when one is due. All non-blocking.
+    ///
+    /// Split across two frames (snapshot this frame, readback begin next)
+    /// exactly as the pre-shell code did across `present`; a
+    /// `request_draw` after the snapshot guarantees that next frame
+    /// arrives promptly even in the reactive loop.
+    pub fn tick(&mut self, ctx: &mut WgpuGfxCtx, state: &AppState) {
         if !self.enabled {
             return;
         }
@@ -160,36 +161,53 @@ impl ThumbnailCapture {
             let region = self.snapshot_region.take();
             ctx.begin_capture_readback_scaled(region, THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT);
             log_stage("readback_begin", t);
-            return; // the map cannot possibly be ready in the same frame
-        }
-        if !ctx.has_pending_scaled_readback() {
+            // The map cannot possibly be ready in the same frame; ask for
+            // one so the harvest doesn't wait on unrelated input.
+            agg_gui::animation::request_draw();
             return;
         }
-        let t = Instant::now();
-        let Some((pixels, w, h)) = ctx.poll_capture_readback_scaled() else {
-            return;
-        };
-        log_stage("readback_harvest", t);
-        if pixels.is_empty() || w == 0 || h == 0 {
-            return;
-        }
-        if self.encoding.swap(true, Ordering::SeqCst) {
-            return; // an earlier encode is still running
-        }
-        let tx = self.encoded_tx.clone();
-        let flag = self.encoding.clone();
-        std::thread::spawn(move || {
+        if ctx.has_pending_scaled_readback() {
             let t = Instant::now();
-            // Already cropped and resampled by the blit — all that is
-            // left is shedding alpha and running the PNG encoder.
-            if let Some(png) = atomartist_ui::thumbnail_png_from_exact_rgba(&pixels, w, h) {
-                // A closed receiver just means the app is shutting
-                // down; the preview is disposable either way.
-                let _ = tx.send(png);
+            let Some((pixels, w, h)) = ctx.poll_capture_readback_scaled() else {
+                return;
+            };
+            log_stage("readback_harvest", t);
+            if pixels.is_empty() || w == 0 || h == 0 {
+                return;
             }
-            log_stage("encode(thread)", t);
-            flag.store(false, Ordering::SeqCst);
-        });
+            if self.encoding.swap(true, Ordering::SeqCst) {
+                return; // an earlier encode is still running
+            }
+            let tx = self.encoded_tx.clone();
+            let flag = self.encoding.clone();
+            std::thread::spawn(move || {
+                let t = Instant::now();
+                // Already cropped and resampled by the blit — all that is
+                // left is shedding alpha and running the PNG encoder.
+                if let Some(png) = atomartist_ui::thumbnail_png_from_exact_rgba(&pixels, w, h) {
+                    // A closed receiver just means the app is shutting
+                    // down; the preview is disposable either way.
+                    let _ = tx.send(png);
+                }
+                log_stage("encode(thread)", t);
+                flag.store(false, Ordering::SeqCst);
+            });
+            return;
+        }
+        // Nothing in flight: take a new snapshot when one is due. GPU-only
+        // copy of the finished frame into the capture texture; the readback
+        // begins on the next tick, after this frame has presented.
+        if let Some(region) = self.frame_region.take() {
+            let t = Instant::now();
+            if ctx.capture_screenshot() {
+                self.snapshot_taken = true;
+                self.snapshot_region = Some(region);
+                self.last_capture = Some(Instant::now());
+                log_stage("snapshot", t);
+                // Guarantee a prompt next frame for the readback begin.
+                agg_gui::animation::request_draw();
+            }
+        }
     }
 
     fn due(&self) -> bool {

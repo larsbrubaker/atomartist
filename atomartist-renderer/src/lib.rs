@@ -38,7 +38,7 @@
 //! Other 3-D widgets that don't need OIT (the tumble cube, bed
 //! composite chain) follow the same SSAA pattern: render into an
 //! oversized offscreen backbuffer and pick the matching composite
-//! kernel from `demo_wgpu::SsaaFramebuffer`. Pairing the scale with
+//! kernel from `agg_gui_wgpu::SsaaFramebuffer`. Pairing the scale with
 //! the right kernel matters — the wrong one silently throws SSAA work
 //! away:
 //!

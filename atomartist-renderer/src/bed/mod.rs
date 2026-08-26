@@ -87,7 +87,7 @@ struct BedQuadVertex {
 /// into the scene renderer's framebuffer.
 pub struct BedRenderer {
     /// Surface format threaded through from
-    /// [`demo_wgpu::WgpuCustomRenderCtx`] — drives the bed quad's
+    /// [`agg_gui_wgpu::WgpuCustomRenderCtx`] — drives the bed quad's
     /// pipeline target and the composite texture's format.
     surface_format: wgpu::TextureFormat,
     chain: ShadowChain,

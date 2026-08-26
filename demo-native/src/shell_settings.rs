@@ -9,9 +9,9 @@
 
 use std::path::PathBuf;
 
+use agg_gui_shell::winit::dpi::PhysicalPosition;
+use agg_gui_shell::winit::window::Window;
 use atomartist_ui::{AppState, DebugWindowHandles, MainWindowState};
-use winit::dpi::PhysicalPosition;
-use winit::window::Window;
 
 /// Compose the persistence blob from its three owners — HUD state on
 /// `AppState`, floating-window layout on the debug handles, and the
@@ -50,7 +50,9 @@ pub fn write_settings_blob(path: &std::path::Path, blob: &str) {
 /// Cast a winit `MonitorHandle` to a plain `(x, y, w, h)` rect in
 /// physical pixels — the shape `MainWindowState::fits_on_monitors`
 /// expects so the validation helper stays winit-agnostic.
-pub fn monitor_to_rect(m: winit::monitor::MonitorHandle) -> (i32, i32, u32, u32) {
+pub fn monitor_to_rect(
+    m: agg_gui_shell::winit::monitor::MonitorHandle,
+) -> (i32, i32, u32, u32) {
     let pos = m.position();
     let size = m.size();
     (pos.x, pos.y, size.width, size.height)
