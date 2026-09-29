@@ -26,7 +26,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agg-gui"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "agg-rust 1.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "base64",
@@ -57,7 +57,7 @@ dependencies = [
 
 [[package]]
 name = "agg-gui-shell"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "agg-gui",
  "agg-gui-wgpu",
@@ -69,11 +69,12 @@ dependencies = [
 
 [[package]]
 name = "agg-gui-wgpu"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "agg-gui",
  "agg-rust 1.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "bytemuck",
+ "log",
  "pollster 0.3.0",
  "web-time",
  "wgpu",

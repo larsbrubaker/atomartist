@@ -525,7 +525,12 @@ pub fn render(width: u32, height: u32, frame_ms: f64) {
             });
         });
     });
-    frame.present();
+    // Present via the ctx so it releases the stashed back buffer first
+    // (a leftover handle breaks DX12 resizes) — see `WgpuGfxCtx::present`.
+    WGPU_CTX.with(|ctx_cell| match ctx_cell.borrow_mut().as_mut() {
+        Some(ctx) => ctx.present(frame),
+        None => frame.present(),
+    });
     // Latched only here, after a frame was acquired, painted, and
     // presented — every early `return` above leaves the gate open so
     // the next tick tries again.
